@@ -1,0 +1,6 @@
+node_modules
+dist
+.env
+.shortdrama-generator.settings.json
+storage/projects/*
+!storage/projects/.gitkeep

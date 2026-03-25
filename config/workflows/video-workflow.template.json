@@ -1,0 +1,15 @@
+{
+  "note": "请将本文件替换为你从 ComfyUI 导出的 API Workflow JSON，并保留 {{input_image}} {{prompt}} {{negative_prompt}} {{output_prefix}} 等变量占位符。",
+  "workflow_placeholder": {
+    "class_type": "ReplaceMeWithYourVideoWorkflow",
+    "inputs": {
+      "input_image": "{{input_image}}",
+      "prompt": "{{prompt}}",
+      "negative_prompt": "{{negative_prompt}}",
+      "output_prefix": "{{output_prefix}}",
+      "checkpoint_name": "{{checkpoint_name}}",
+      "fps": "{{fps}}",
+      "duration_seconds": "{{duration_seconds}}"
+    }
+  }
+}
