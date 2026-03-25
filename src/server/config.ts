@@ -30,16 +30,49 @@ export const envAppSettingsDefaults: AppSettings = {
   },
   comfyui: {
     baseUrl: process.env.COMFYUI_BASE_URL ?? 'http://127.0.0.1:8188',
-    imageWorkflowPath: resolveMaybeRelative(
-      process.env.COMFYUI_IMAGE_WORKFLOW,
-      'config/workflows/image-workflow.template.json'
-    ),
-    videoWorkflowPath: resolveMaybeRelative(
-      process.env.COMFYUI_VIDEO_WORKFLOW,
-      'config/workflows/video-workflow.template.json'
-    ),
-    imageCheckpointName: process.env.COMFYUI_IMAGE_CHECKPOINT ?? '',
-    videoCheckpointName: process.env.COMFYUI_VIDEO_CHECKPOINT ?? '',
+    workflows: {
+      character: {
+        workflowPath: resolveMaybeRelative(
+          process.env.COMFYUI_CHARACTER_WORKFLOW ?? process.env.COMFYUI_IMAGE_WORKFLOW,
+          'config/workflows/image-workflow.template.json'
+        ),
+        checkpointName: process.env.COMFYUI_CHARACTER_CHECKPOINT ?? process.env.COMFYUI_IMAGE_CHECKPOINT ?? ''
+      },
+      scene: {
+        workflowPath: resolveMaybeRelative(
+          process.env.COMFYUI_SCENE_WORKFLOW ?? process.env.COMFYUI_IMAGE_WORKFLOW,
+          'config/workflows/image-workflow.template.json'
+        ),
+        checkpointName: process.env.COMFYUI_SCENE_CHECKPOINT ?? process.env.COMFYUI_IMAGE_CHECKPOINT ?? ''
+      },
+      object: {
+        workflowPath: resolveMaybeRelative(
+          process.env.COMFYUI_OBJECT_WORKFLOW ?? process.env.COMFYUI_IMAGE_WORKFLOW,
+          'config/workflows/image-workflow.template.json'
+        ),
+        checkpointName: process.env.COMFYUI_OBJECT_CHECKPOINT ?? process.env.COMFYUI_IMAGE_CHECKPOINT ?? ''
+      },
+      storyboard: {
+        workflowPath: resolveMaybeRelative(
+          process.env.COMFYUI_STORYBOARD_WORKFLOW ?? process.env.COMFYUI_IMAGE_WORKFLOW,
+          'config/workflows/image-workflow.template.json'
+        ),
+        checkpointName: process.env.COMFYUI_STORYBOARD_CHECKPOINT ?? process.env.COMFYUI_IMAGE_CHECKPOINT ?? ''
+      },
+      video: {
+        workflowPath: resolveMaybeRelative(
+          process.env.COMFYUI_VIDEO_WORKFLOW,
+          'config/workflows/video-workflow.template.json'
+        ),
+        checkpointName: process.env.COMFYUI_VIDEO_CHECKPOINT ?? ''
+      },
+      tts: {
+        workflowPath: process.env.COMFYUI_TTS_WORKFLOW
+          ? resolveMaybeRelative(process.env.COMFYUI_TTS_WORKFLOW, process.env.COMFYUI_TTS_WORKFLOW)
+          : '',
+        checkpointName: process.env.COMFYUI_TTS_CHECKPOINT ?? ''
+      }
+    },
     pollIntervalMs: Number(process.env.COMFYUI_POLL_INTERVAL_MS ?? 3000),
     timeoutMs: Number(process.env.COMFYUI_TIMEOUT_MS ?? 1_800_000)
   },

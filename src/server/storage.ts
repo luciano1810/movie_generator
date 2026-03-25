@@ -4,8 +4,10 @@ import crypto from 'node:crypto';
 import {
   type Project,
   type ProjectSettings,
+  createEmptyReferenceLibrary,
   createStageStateMap,
-  normalizeSettings
+  normalizeSettings,
+  normalizeStoryboardShot
 } from '../shared/types.js';
 import { appConfig, toStorageRelative } from './config.js';
 
@@ -39,14 +41,51 @@ async function ensureProjectLayout(projectId: string): Promise<void> {
     mkdir(resolveProjectPath(projectId, 'storyboard'), { recursive: true }),
     mkdir(resolveProjectPath(projectId, 'images'), { recursive: true }),
     mkdir(resolveProjectPath(projectId, 'videos'), { recursive: true }),
+    mkdir(resolveProjectPath(projectId, 'references', 'characters'), { recursive: true }),
+    mkdir(resolveProjectPath(projectId, 'references', 'scenes'), { recursive: true }),
+    mkdir(resolveProjectPath(projectId, 'references', 'objects'), { recursive: true }),
     mkdir(resolveProjectPath(projectId, 'output'), { recursive: true })
   ]);
+}
+
+function hydrateProject(project: Project): Project {
+  const settings = normalizeSettings(project.settings);
+
+  return {
+    ...project,
+    settings,
+    stages: project.stages ?? createStageStateMap(),
+    storyboard: (project.storyboard ?? []).map((shot, index) => normalizeStoryboardShot(shot, index, settings)),
+    assets: {
+      images: project.assets?.images ?? [],
+      videos: project.assets?.videos ?? [],
+      finalVideo: project.assets?.finalVideo ?? null
+    },
+    referenceLibrary: {
+      characters: project.referenceLibrary?.characters ?? [],
+      scenes: project.referenceLibrary?.scenes ?? [],
+      objects: project.referenceLibrary?.objects ?? []
+    },
+    artifacts: {
+      scriptMarkdown: project.artifacts?.scriptMarkdown ?? null,
+      scriptJson: project.artifacts?.scriptJson ?? null,
+      storyboardJson: project.artifacts?.storyboardJson ?? null,
+      referenceLibraryJson: project.artifacts?.referenceLibraryJson ?? null
+    },
+    logs: project.logs ?? [],
+    runState: project.runState ?? {
+      isRunning: false,
+      requestedStage: null,
+      currentStage: null,
+      startedAt: null
+    }
+  };
 }
 
 export async function readProject(projectId: string): Promise<Project> {
   const file = getProjectFile(projectId);
   const raw = await readFile(file, 'utf8');
-  return JSON.parse(raw) as Project;
+  return hydrateProject(JSON.parse(raw) as Project);
 }
 
 export async function writeProject(project: Project): Promise<void> {
@@ -98,10 +137,12 @@ export async function createProject(input: {
       videos: [],
       finalVideo: null
     },
+    referenceLibrary: createEmptyReferenceLibrary(),
     artifacts: {
       scriptMarkdown: null,
       scriptJson: null,
-      storyboardJson: null
+      storyboardJson: null,
+      referenceLibraryJson: null
     },
     logs: [],
     runState: {

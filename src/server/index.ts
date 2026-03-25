@@ -5,6 +5,10 @@ import express from 'express';
 import {
   type AppSettings,
   type AppMeta,
+  type LlmModelDiscoveryRequest,
+  type LlmModelDiscoveryResponse,
+  type Project,
+  type ReferenceAssetKind,
   type RunStage,
   DEFAULT_SETTINGS,
   STAGES,
@@ -12,11 +16,34 @@ import {
 } from '../shared/types.js';
 import { appConfig } from './config.js';
 import { getAppSettings, getRuntimeStatus, initializeAppSettings, updateAppSettings } from './app-settings.js';
+import { discoverAvailableModels } from './openai-client.js';
 import { ensureStorage, createProject, listProjects, readProject, updateProject } from './storage.js';
-import { enqueueProjectRun, isProjectRunning } from './pipeline.js';
+import {
+  enqueueProjectRun,
+  enqueueReferenceGeneration,
+  isProjectRunning,
+  isReferenceGenerationRunning,
+  updateStoryboardShotPrompts
+} from './pipeline.js';
 
 function isRunStage(value: unknown): value is RunStage {
   return value === 'all' || (typeof value === 'string' && STAGES.includes(value as (typeof STAGES)[number]));
+}
+
+function isReferenceAssetKind(value: unknown): value is ReferenceAssetKind {
+  return value === 'character' || value === 'scene' || value === 'object';
+}
+
+function getReferenceCollection(project: Project, kind: ReferenceAssetKind) {
+  if (kind === 'character') {
+    return project.referenceLibrary.characters;
+  }
+
+  if (kind === 'scene') {
+    return project.referenceLibrary.scenes;
+  }
+
+  return project.referenceLibrary.objects;
 }
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -51,8 +78,12 @@ async function main(): Promise<void> {
       })),
       envStatus: getRuntimeStatus(appSettings),
       workflowPaths: {
-        image: appSettings.comfyui.imageWorkflowPath,
-        video: appSettings.comfyui.videoWorkflowPath
+        character: appSettings.comfyui.workflows.character.workflowPath,
+        scene: appSettings.comfyui.workflows.scene.workflowPath,
+        object: appSettings.comfyui.workflows.object.workflowPath,
+        storyboard: appSettings.comfyui.workflows.storyboard.workflowPath,
+        video: appSettings.comfyui.workflows.video.workflowPath,
+        tts: appSettings.comfyui.workflows.tts.workflowPath
       }
     };
 
@@ -66,6 +97,21 @@ async function main(): Promise<void> {
   app.put('/api/app-settings', async (request, response, next) => {
     try {
       response.json(await updateAppSettings((request.body ?? {}) as Partial<AppSettings>));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/llm-models/discover', async (request, response, next) => {
+    try {
+      const payload = (request.body ?? {}) as Partial<LlmModelDiscoveryRequest>;
+      const result: LlmModelDiscoveryResponse = {
+        models: await discoverAvailableModels({
+          baseUrl: payload.baseUrl ?? '',
+          apiKey: payload.apiKey ?? ''
+        })
+      };
+      response.json(result);
     } catch (error) {
       next(error);
     }
@@ -124,13 +170,108 @@ async function main(): Promise<void> {
         return;
       }
 
+      try {
+        await readProject(request.params.id);
+      } catch {
+        response.status(404).json({ message: '项目不存在。' });
+        return;
+      }
+
       if (isProjectRunning(request.params.id)) {
         response.status(409).json({ message: '该项目已有任务在运行。' });
         return;
       }
 
+      if (isReferenceGenerationRunning(request.params.id)) {
+        response.status(409).json({ message: '该项目有参考资产正在生成，请稍后再试。' });
+        return;
+      }
+
       await enqueueProjectRun(request.params.id, stage);
       response.status(202).json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/projects/:id/reference-library/:kind/:itemId/generate', async (request, response, next) => {
+    try {
+      const { id, kind, itemId } = request.params;
+
+      if (!isReferenceAssetKind(kind)) {
+        response.status(400).json({ message: '无效的参考资产类型。' });
+        return;
+      }
+
+      let project: Project;
+      try {
+        project = await readProject(id);
+      } catch {
+        response.status(404).json({ message: '项目不存在。' });
+        return;
+      }
+
+      if (!getReferenceCollection(project, kind).some((item) => item.id === itemId)) {
+        response.status(404).json({ message: '参考资产不存在。' });
+        return;
+      }
+
+      if (isProjectRunning(id)) {
+        response.status(409).json({ message: '该项目已有阶段任务在运行。' });
+        return;
+      }
+
+      if (isReferenceGenerationRunning(id)) {
+        response.status(409).json({ message: '该项目已有参考资产在生成。' });
+        return;
+      }
+
+      await enqueueReferenceGeneration(id, kind, itemId, String(request.body?.prompt ?? ''));
+      response.status(202).json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put('/api/projects/:id/storyboard/:shotId/prompts', async (request, response, next) => {
+    try {
+      const { id, shotId } = request.params;
+
+      let project: Project;
+      try {
+        project = await readProject(id);
+      } catch {
+        response.status(404).json({ message: '项目不存在。' });
+        return;
+      }
+
+      if (!project.storyboard.some((shot) => shot.id === shotId)) {
+        response.status(404).json({ message: '镜头不存在。' });
+        return;
+      }
+
+      if (isProjectRunning(id)) {
+        response.status(409).json({ message: '该项目已有阶段任务在运行。' });
+        return;
+      }
+
+      if (isReferenceGenerationRunning(id)) {
+        response.status(409).json({ message: '该项目有参考资产正在生成，请稍后再试。' });
+        return;
+      }
+
+      response.json(
+        await updateStoryboardShotPrompts(id, shotId, {
+          videoPrompt:
+            typeof request.body?.videoPrompt === 'string' ? String(request.body.videoPrompt) : undefined,
+          backgroundSoundPrompt:
+            typeof request.body?.backgroundSoundPrompt === 'string'
+              ? String(request.body.backgroundSoundPrompt)
+              : undefined,
+          speechPrompt:
+            typeof request.body?.speechPrompt === 'string' ? String(request.body.speechPrompt) : undefined
+        })
+      );
     } catch (error) {
       next(error);
     }

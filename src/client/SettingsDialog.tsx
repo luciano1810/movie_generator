@@ -1,4 +1,4 @@
-import type { AppMeta, AppSettings } from '../shared/types';
+import type { AppMeta, AppSettings, ComfyWorkflowType } from '../shared/types';
 
 interface SettingsDialogProps {
   open: boolean;
@@ -6,17 +6,113 @@ interface SettingsDialogProps {
   status: AppMeta['envStatus'] | null;
   dirty: boolean;
   pending: boolean;
+  llmModels: string[];
+  llmModelsPending: boolean;
+  llmModelsError: string;
   onClose: () => void;
   onSave: () => void;
+  onRefreshModels: () => void;
   onChange: (next: AppSettings) => void;
 }
 
 export function SettingsDialog(props: SettingsDialogProps) {
-  const { open, draft, status, dirty, pending, onClose, onSave, onChange } = props;
+  const {
+    open,
+    draft,
+    status,
+    dirty,
+    pending,
+    llmModels,
+    llmModelsPending,
+    llmModelsError,
+    onClose,
+    onSave,
+    onRefreshModels,
+    onChange
+  } = props;
 
   if (!open || !draft) {
     return null;
   }
+
+  const workflowStatusMap = {
+    character: status?.characterWorkflowExists ?? false,
+    scene: status?.sceneWorkflowExists ?? false,
+    object: status?.objectWorkflowExists ?? false,
+    video: status?.videoWorkflowExists ?? false,
+    storyboard: status?.storyboardWorkflowExists ?? false,
+    tts: status?.ttsWorkflowExists ?? false
+  } satisfies Record<ComfyWorkflowType, boolean>;
+
+  const workflowConfigs: Array<{
+    key: ComfyWorkflowType;
+    label: string;
+    description: string;
+    workflowPlaceholder: string;
+    checkpointPlaceholder: string;
+  }> = [
+    {
+      key: 'character',
+      label: '人物资产生成',
+      description: '用于角色参考图生成',
+      workflowPlaceholder: '/absolute/path/to/character-workflow.json',
+      checkpointPlaceholder: 'character-model.safetensors'
+    },
+    {
+      key: 'scene',
+      label: '场景资产生成',
+      description: '用于场景参考图生成',
+      workflowPlaceholder: '/absolute/path/to/scene-workflow.json',
+      checkpointPlaceholder: 'scene-model.safetensors'
+    },
+    {
+      key: 'object',
+      label: '物品资产生成',
+      description: '用于物品参考图生成',
+      workflowPlaceholder: '/absolute/path/to/object-workflow.json',
+      checkpointPlaceholder: 'object-model.safetensors'
+    },
+    {
+      key: 'video',
+      label: '视频生成',
+      description: '用于基于首帧图生成视频片段',
+      workflowPlaceholder: '/absolute/path/to/video-workflow.json',
+      checkpointPlaceholder: 'video-model.safetensors'
+    },
+    {
+      key: 'storyboard',
+      label: '分镜图片生成',
+      description: '用于分镜阶段首帧图生成',
+      workflowPlaceholder: '/absolute/path/to/storyboard-workflow.json',
+      checkpointPlaceholder: 'storyboard-model.safetensors'
+    },
+    {
+      key: 'tts',
+      label: 'TTS / 声音生成',
+      description: '可选；用于台词、旁白或声音生成。不配置时会回退为把声音 prompt 合并到视频 prompt',
+      workflowPlaceholder: '/absolute/path/to/tts-workflow.json',
+      checkpointPlaceholder: 'tts-model.safetensors'
+    }
+  ];
+
+  const updateWorkflow = (
+    workflow: ComfyWorkflowType,
+    patch: Partial<AppSettings['comfyui']['workflows'][ComfyWorkflowType]>
+  ) => {
+    onChange({
+      ...draft,
+      comfyui: {
+        ...draft.comfyui,
+        workflows: {
+          ...draft.comfyui.workflows,
+          [workflow]: {
+            ...draft.comfyui.workflows[workflow],
+            ...patch
+          }
+        }
+      }
+    });
+  };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -55,7 +151,12 @@ export function SettingsDialog(props: SettingsDialogProps) {
         <section className="settings-section">
           <div className="section-head">
             <h3>LLM API</h3>
-            <span>兼容 OpenAI Chat Completions 的接口</span>
+            <div className="section-side">
+              <span>兼容 OpenAI Chat Completions 的接口</span>
+              <button className="button ghost mini-button" onClick={onRefreshModels} type="button">
+                重新获取模型
+              </button>
+            </div>
           </div>
           <div className="form-grid">
             <label className="field span-2">
@@ -77,6 +178,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
             <label className="field span-2">
               <span>API Key</span>
               <input
+                type="password"
                 value={draft.llm.apiKey}
                 onChange={(event) =>
                   onChange({
@@ -93,6 +195,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
             <label className="field span-2">
               <span>模型名</span>
               <input
+                list="llm-model-options"
                 value={draft.llm.model}
                 onChange={(event) =>
                   onChange({
@@ -105,6 +208,19 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 }
                 placeholder="gpt-4o-mini"
               />
+              <datalist id="llm-model-options">
+                {llmModels.map((model) => (
+                  <option key={model} value={model} />
+                ))}
+              </datalist>
+              <div className="inline-note">
+                {llmModelsPending ? '正在自动获取可用模型...' : null}
+                {!llmModelsPending && llmModels.length ? `已发现 ${llmModels.length} 个模型` : null}
+                {!llmModelsPending && !llmModels.length && !llmModelsError
+                  ? '输入 Base URL 和 API Key 后会自动获取模型列表'
+                  : null}
+                {!llmModelsPending && llmModelsError ? llmModelsError : null}
+              </div>
             </label>
           </div>
         </section>
@@ -112,7 +228,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
         <section className="settings-section">
           <div className="section-head">
             <h3>ComfyUI API</h3>
-            <span>本地工作流、检查点和轮询参数</span>
+            <span>统一地址，六类任务分别绑定各自工作流和检查点，其中 TTS 为可选项</span>
           </div>
           <div className="form-grid">
             <label className="field span-2">
@@ -129,70 +245,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   })
                 }
                 placeholder="http://127.0.0.1:8188"
-              />
-            </label>
-            <label className="field span-2">
-              <span>图片工作流 JSON 路径</span>
-              <input
-                value={draft.comfyui.imageWorkflowPath}
-                onChange={(event) =>
-                  onChange({
-                    ...draft,
-                    comfyui: {
-                      ...draft.comfyui,
-                      imageWorkflowPath: event.target.value
-                    }
-                  })
-                }
-                placeholder="/absolute/path/to/image-workflow.json"
-              />
-            </label>
-            <label className="field span-2">
-              <span>视频工作流 JSON 路径</span>
-              <input
-                value={draft.comfyui.videoWorkflowPath}
-                onChange={(event) =>
-                  onChange({
-                    ...draft,
-                    comfyui: {
-                      ...draft.comfyui,
-                      videoWorkflowPath: event.target.value
-                    }
-                  })
-                }
-                placeholder="/absolute/path/to/video-workflow.json"
-              />
-            </label>
-            <label className="field">
-              <span>图片检查点</span>
-              <input
-                value={draft.comfyui.imageCheckpointName}
-                onChange={(event) =>
-                  onChange({
-                    ...draft,
-                    comfyui: {
-                      ...draft.comfyui,
-                      imageCheckpointName: event.target.value
-                    }
-                  })
-                }
-                placeholder="sdxl.safetensors"
-              />
-            </label>
-            <label className="field">
-              <span>视频检查点</span>
-              <input
-                value={draft.comfyui.videoCheckpointName}
-                onChange={(event) =>
-                  onChange({
-                    ...draft,
-                    comfyui: {
-                      ...draft.comfyui,
-                      videoCheckpointName: event.target.value
-                    }
-                  })
-                }
-                placeholder="wan2_1.safetensors"
               />
             </label>
             <label className="field">
@@ -227,6 +279,57 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 }
               />
             </label>
+          </div>
+          <div className="workflow-config-grid">
+            {workflowConfigs.map((workflow) => {
+              const workflowDraft = draft.comfyui.workflows[workflow.key];
+              const exists = workflowStatusMap[workflow.key];
+
+              return (
+                <article key={workflow.key} className="workflow-config-card">
+                  <div className="workflow-config-head">
+                    <div>
+                      <h4>{workflow.label}</h4>
+                      <p>{workflow.description}</p>
+                    </div>
+                    <span className={`pill ${exists ? 'success' : 'error'}`}>{exists ? '已就绪' : '未就绪'}</span>
+                  </div>
+                  <div className="form-grid">
+                    <label className="field span-2">
+                      <span>工作流 JSON 路径</span>
+                      <input
+                        value={workflowDraft.workflowPath}
+                        onChange={(event) =>
+                          updateWorkflow(workflow.key, {
+                            workflowPath: event.target.value
+                          })
+                        }
+                        placeholder={workflow.workflowPlaceholder}
+                      />
+                    </label>
+                    <label className="field span-2">
+                      <span>检查点名称</span>
+                      <input
+                        value={workflowDraft.checkpointName}
+                        onChange={(event) =>
+                          updateWorkflow(workflow.key, {
+                            checkpointName: event.target.value
+                          })
+                        }
+                        placeholder={workflow.checkpointPlaceholder}
+                      />
+                    </label>
+                  </div>
+                  <p className="settings-hint workflow-config-note">
+                    {workflowDraft.workflowPath
+                      ? exists
+                        ? '工作流文件已通过基础检查。'
+                        : '已填写路径，但当前文件不存在、无法访问，或仍是占位模板。'
+                      : '尚未配置工作流文件。'}
+                  </p>
+                </article>
+              );
+            })}
           </div>
         </section>
 

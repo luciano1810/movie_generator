@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react';
-import type { AppMeta, AppSettings, Project, ProjectSettings, RunStage, StageId } from '../shared/types';
-import { STAGES, STAGE_LABELS } from '../shared/types';
+import type {
+  AppMeta,
+  AppSettings,
+  LlmModelDiscoveryResponse,
+  Project,
+  ProjectSettings,
+  ReferenceAssetItem,
+  ReferenceAssetKind,
+  ScriptMode,
+  RunStage,
+  StageId
+} from '../shared/types';
+import { ASPECT_RATIOS, DEFAULT_SETTINGS, SCRIPT_MODES, STAGES, STAGE_LABELS } from '../shared/types';
 import { SettingsDialog } from './SettingsDialog';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
@@ -10,6 +21,89 @@ interface ProjectDraft {
   sourceText: string;
   settings: ProjectSettings;
 }
+
+type MainTab = 'projects' | 'assets';
+type AssetLibraryKind = 'image' | 'video' | 'final';
+type AssetLibrarySection = 'outputs' | 'characters' | 'scenes' | 'objects';
+type ResolutionPresetId = '540p' | '720p' | '1080p' | '1440p';
+type ResolutionSelectValue = ResolutionPresetId | 'custom';
+
+interface LibraryAssetItem {
+  id: string;
+  kind: AssetLibraryKind;
+  projectId: string;
+  projectTitle: string;
+  createdAt: string;
+  relativePath: string;
+  prompt: string;
+  sceneNumber: number | null;
+  shotId: string | null;
+}
+
+interface ReferenceLibraryAssetItem {
+  id: string;
+  kind: ReferenceAssetKind;
+  projectId: string;
+  projectTitle: string;
+  createdAt: string;
+  relativePath: string;
+  prompt: string;
+  name: string;
+  summary: string;
+}
+
+interface ShotAudioPromptDraft {
+  backgroundSoundPrompt: string;
+  speechPrompt: string;
+}
+
+const ASPECT_RATIO_LABELS: Record<ProjectSettings['aspectRatio'], string> = {
+  '21:9': '21:9 超宽横屏',
+  '16:9': '16:9 横屏',
+  '4:3': '4:3 经典横屏',
+  '3:2': '3:2 胶片横屏',
+  '1:1': '1:1 方屏',
+  '2:3': '2:3 海报竖屏',
+  '3:4': '3:4 经典竖屏',
+  '9:16': '9:16 手机竖屏'
+};
+
+const SCRIPT_MODE_LABELS: Record<ScriptMode, string> = {
+  generate: '生成新剧本',
+  optimize: '优化已有剧本'
+};
+
+const RESOLUTION_PRESETS: Array<{
+  id: ResolutionPresetId;
+  label: string;
+  width: number;
+  height: number;
+}> = [
+  {
+    id: '540p',
+    label: '540p · 960×540',
+    width: 960,
+    height: 540
+  },
+  {
+    id: '720p',
+    label: '720p · 1280×720',
+    width: 1280,
+    height: 720
+  },
+  {
+    id: '1080p',
+    label: '1080p · 1920×1080',
+    width: 1920,
+    height: 1080
+  },
+  {
+    id: '1440p',
+    label: '1440p · 2560×1440',
+    width: 2560,
+    height: 1440
+  }
+];
 
 function apiPath(pathname: string): string {
   return API_BASE ? `${API_BASE}${pathname}` : pathname;
@@ -70,20 +164,300 @@ function statusLabel(status: Project['stages'][StageId]['status']): string {
   return '失败';
 }
 
+function parseAspectRatio(aspectRatio: ProjectSettings['aspectRatio']): { width: number; height: number } {
+  const [width, height] = aspectRatio.split(':').map(Number);
+  return { width, height };
+}
+
+function aspectRatioDirectionLabel(aspectRatio: ProjectSettings['aspectRatio']): string {
+  const { width, height } = parseAspectRatio(aspectRatio);
+
+  if (width === height) {
+    return '方屏';
+  }
+
+  return width > height ? '横屏' : '竖屏';
+}
+
+function roundToEven(value: number): number {
+  const rounded = Math.max(2, Math.round(value));
+  return rounded % 2 === 0 ? rounded : rounded + 1;
+}
+
+function buildDimensionsForAspectRatio(
+  baseWidth: number,
+  baseHeight: number,
+  aspectRatio: ProjectSettings['aspectRatio']
+): { width: number; height: number } {
+  const { width: ratioWidth, height: ratioHeight } = parseAspectRatio(aspectRatio);
+  const longEdge = Math.max(baseWidth, baseHeight);
+  const shortEdge = Math.min(baseWidth, baseHeight);
+
+  if (ratioWidth === ratioHeight) {
+    return {
+      width: shortEdge,
+      height: shortEdge
+    };
+  }
+
+  if (ratioWidth > ratioHeight) {
+    return {
+      width: longEdge,
+      height: roundToEven((longEdge * ratioHeight) / ratioWidth)
+    };
+  }
+
+  return {
+    width: roundToEven((longEdge * ratioWidth) / ratioHeight),
+    height: longEdge
+  };
+}
+
+function applyAspectRatio(settings: ProjectSettings, aspectRatio: ProjectSettings['aspectRatio']): ProjectSettings {
+  const imageDimensions = buildDimensionsForAspectRatio(settings.imageWidth, settings.imageHeight, aspectRatio);
+  const videoDimensions = buildDimensionsForAspectRatio(settings.videoWidth, settings.videoHeight, aspectRatio);
+
+  return {
+    ...settings,
+    aspectRatio,
+    imageWidth: imageDimensions.width,
+    imageHeight: imageDimensions.height,
+    videoWidth: videoDimensions.width,
+    videoHeight: videoDimensions.height
+  };
+}
+
+function getResolutionPreset(presetId: ResolutionPresetId) {
+  const preset = RESOLUTION_PRESETS.find((item) => item.id === presetId);
+
+  if (!preset) {
+    throw new Error(`未知分辨率预设: ${presetId}`);
+  }
+
+  return preset;
+}
+
+function applyResolutionPreset(settings: ProjectSettings, presetId: ResolutionPresetId): ProjectSettings {
+  const preset = getResolutionPreset(presetId);
+  const imageDimensions = buildDimensionsForAspectRatio(preset.width, preset.height, settings.aspectRatio);
+  const videoDimensions = buildDimensionsForAspectRatio(preset.width, preset.height, settings.aspectRatio);
+
+  return {
+    ...settings,
+    imageWidth: imageDimensions.width,
+    imageHeight: imageDimensions.height,
+    videoWidth: videoDimensions.width,
+    videoHeight: videoDimensions.height
+  };
+}
+
+function inferResolutionPreset(settings: Pick<ProjectSettings, 'aspectRatio' | 'imageWidth' | 'imageHeight' | 'videoWidth' | 'videoHeight'>): ResolutionSelectValue {
+  const matchedPreset = RESOLUTION_PRESETS.find((preset) => {
+    const imageDimensions = buildDimensionsForAspectRatio(preset.width, preset.height, settings.aspectRatio);
+    const videoDimensions = buildDimensionsForAspectRatio(preset.width, preset.height, settings.aspectRatio);
+
+    return (
+      settings.imageWidth === imageDimensions.width &&
+      settings.imageHeight === imageDimensions.height &&
+      settings.videoWidth === videoDimensions.width &&
+      settings.videoHeight === videoDimensions.height
+    );
+  });
+
+  return matchedPreset?.id ?? 'custom';
+}
+
+function resolveDefaultResolutionPreset(
+  settings: Pick<ProjectSettings, 'aspectRatio' | 'imageWidth' | 'imageHeight' | 'videoWidth' | 'videoHeight'>
+): ResolutionPresetId {
+  const preset = inferResolutionPreset(settings);
+  return preset === 'custom' ? '720p' : preset;
+}
+
+function scriptModeSourcePlaceholder(scriptMode: ScriptMode): string {
+  return scriptMode === 'generate'
+    ? '输入故事梗概、角色设定、营销文案或剧情点子'
+    : '输入已有剧本、分场粗稿、对白草稿或待优化文案';
+}
+
+function buildCreateProjectSettings(
+  defaults: ProjectSettings,
+  aspectRatio: ProjectSettings['aspectRatio'],
+  scriptMode: ScriptMode,
+  resolutionPreset: ResolutionPresetId
+): Partial<ProjectSettings> {
+  return applyResolutionPreset(
+    {
+      ...defaults,
+      scriptMode,
+      aspectRatio
+    },
+    resolutionPreset
+  );
+}
+
+function createFormatSummary(settings: Partial<ProjectSettings>): string {
+  if (!settings.aspectRatio) {
+    return '未设置画幅';
+  }
+
+  return `${aspectRatioDirectionLabel(settings.aspectRatio)} ${settings.aspectRatio}｜图片 ${settings.imageWidth}×${settings.imageHeight}｜视频 ${settings.videoWidth}×${settings.videoHeight}`;
+}
+
+function assetKindLabel(kind: AssetLibraryKind): string {
+  if (kind === 'image') {
+    return '图片';
+  }
+
+  if (kind === 'video') {
+    return '视频片段';
+  }
+
+  return '完整成片';
+}
+
+function referenceKindLabel(kind: ReferenceAssetKind): string {
+  if (kind === 'character') {
+    return '角色';
+  }
+
+  if (kind === 'scene') {
+    return '场景';
+  }
+
+  return '物品';
+}
+
+function referenceCollectionLabel(section: AssetLibrarySection): string {
+  if (section === 'characters') {
+    return '角色';
+  }
+
+  if (section === 'scenes') {
+    return '场景';
+  }
+
+  if (section === 'objects') {
+    return '物品';
+  }
+
+  return '流程产物';
+}
+
+function buildLibraryAssets(projects: Project[]): LibraryAssetItem[] {
+  return projects
+    .flatMap((project) => [
+      ...project.assets.images.map((asset, index) => ({
+        id: `${project.id}-image-${asset.shotId ?? index}`,
+        kind: 'image' as const,
+        projectId: project.id,
+        projectTitle: project.title,
+        createdAt: asset.createdAt,
+        relativePath: asset.relativePath,
+        prompt: asset.prompt,
+        sceneNumber: asset.sceneNumber,
+        shotId: asset.shotId
+      })),
+      ...project.assets.videos.map((asset, index) => ({
+        id: `${project.id}-video-${asset.shotId ?? index}`,
+        kind: 'video' as const,
+        projectId: project.id,
+        projectTitle: project.title,
+        createdAt: asset.createdAt,
+        relativePath: asset.relativePath,
+        prompt: asset.prompt,
+        sceneNumber: asset.sceneNumber,
+        shotId: asset.shotId
+      })),
+      ...(project.assets.finalVideo
+        ? [
+            {
+              id: `${project.id}-final`,
+              kind: 'final' as const,
+              projectId: project.id,
+              projectTitle: project.title,
+              createdAt: project.assets.finalVideo.createdAt,
+              relativePath: project.assets.finalVideo.relativePath,
+              prompt: project.assets.finalVideo.prompt,
+              sceneNumber: null,
+              shotId: null
+            }
+          ]
+        : [])
+    ])
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function getReferenceCollection(project: Project, kind: ReferenceAssetKind): ReferenceAssetItem[] {
+  if (kind === 'character') {
+    return project.referenceLibrary.characters;
+  }
+
+  if (kind === 'scene') {
+    return project.referenceLibrary.scenes;
+  }
+
+  return project.referenceLibrary.objects;
+}
+
+function buildReferenceLibraryAssets(
+  projects: Project[],
+  kind: ReferenceAssetKind
+): ReferenceLibraryAssetItem[] {
+  return projects
+    .flatMap((project) =>
+      getReferenceCollection(project, kind)
+        .filter((item) => item.asset)
+        .map((item) => ({
+          id: `${project.id}-${kind}-${item.id}`,
+          kind,
+          projectId: project.id,
+          projectTitle: project.title,
+          createdAt: item.asset!.createdAt,
+          relativePath: item.asset!.relativePath,
+          prompt: item.generationPrompt,
+          name: item.name,
+          summary: item.summary
+        }))
+    )
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function referenceDraftKey(kind: ReferenceAssetKind, itemId: string): string {
+  return `${kind}:${itemId}`;
+}
+
 export function App() {
   const [meta, setMeta] = useState<AppMeta | null>(null);
+  const [activeTab, setActiveTab] = useState<MainTab>('projects');
+  const [assetLibrarySection, setAssetLibrarySection] = useState<AssetLibrarySection>('outputs');
+  const [assetFilter, setAssetFilter] = useState<'all' | AssetLibraryKind>('all');
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsPending, setSettingsPending] = useState(false);
+  const [llmModels, setLlmModels] = useState<string[]>([]);
+  const [llmModelsPending, setLlmModelsPending] = useState(false);
+  const [llmModelsError, setLlmModelsError] = useState('');
+  const [llmModelsReloadKey, setLlmModelsReloadKey] = useState(0);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [draft, setDraft] = useState<ProjectDraft | null>(null);
   const [draftDirty, setDraftDirty] = useState(false);
+  const [referencePromptDrafts, setReferencePromptDrafts] = useState<Record<string, string>>({});
+  const [videoPromptDrafts, setVideoPromptDrafts] = useState<Record<string, string>>({});
+  const [audioPromptDrafts, setAudioPromptDrafts] = useState<Record<string, ShotAudioPromptDraft>>({});
   const [createTitle, setCreateTitle] = useState('');
   const [createSource, setCreateSource] = useState('');
+  const [createScriptMode, setCreateScriptMode] = useState<ScriptMode>(DEFAULT_SETTINGS.scriptMode);
+  const [createAspectRatio, setCreateAspectRatio] = useState<ProjectSettings['aspectRatio']>(
+    DEFAULT_SETTINGS.aspectRatio
+  );
+  const [createResolutionPreset, setCreateResolutionPreset] = useState<ResolutionPresetId>(
+    resolveDefaultResolutionPreset(DEFAULT_SETTINGS)
+  );
   const [notice, setNotice] = useState<string>('');
   const [pending, setPending] = useState<string>('');
 
@@ -141,10 +515,23 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!meta) {
+      return;
+    }
+
+    setCreateScriptMode(meta.defaults.scriptMode);
+    setCreateAspectRatio(meta.defaults.aspectRatio);
+    setCreateResolutionPreset(resolveDefaultResolutionPreset(meta.defaults));
+  }, [meta]);
+
+  useEffect(() => {
     if (!selectedId) {
       return;
     }
 
+    setReferencePromptDrafts({});
+    setVideoPromptDrafts({});
+    setAudioPromptDrafts({});
     void loadProject(selectedId, false, false);
   }, [selectedId]);
 
@@ -161,14 +548,96 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [draftDirty, selectedId]);
 
+  useEffect(() => {
+    if (activeTab !== 'assets') {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadProjects(selectedId ?? undefined);
+    }, 3000);
+
+    return () => window.clearInterval(timer);
+  }, [activeTab, selectedId]);
+
+  useEffect(() => {
+    if (!settingsOpen || !settingsDraft) {
+      return;
+    }
+
+    const baseUrl = settingsDraft.llm.baseUrl.trim();
+    const apiKey = settingsDraft.llm.apiKey.trim();
+
+    if (!baseUrl || !apiKey) {
+      setLlmModels([]);
+      setLlmModelsPending(false);
+      setLlmModelsError('');
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setLlmModelsPending(true);
+      setLlmModelsError('');
+
+      void requestJson<LlmModelDiscoveryResponse>('/api/llm-models/discover', {
+        method: 'POST',
+        body: JSON.stringify({
+          baseUrl,
+          apiKey
+        }),
+        signal: controller.signal
+      })
+        .then((response) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+
+          setLlmModels(response.models);
+          setLlmModelsError(response.models.length ? '' : '接口未返回可用模型');
+        })
+        .catch((error) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+
+          setLlmModels([]);
+          setLlmModelsError(error instanceof Error ? error.message : '获取模型列表失败');
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setLlmModelsPending(false);
+          }
+        });
+    }, 700);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [
+    llmModelsReloadKey,
+    settingsDraft?.llm.apiKey,
+    settingsDraft?.llm.baseUrl,
+    settingsOpen
+  ]);
+
   async function handleCreateProject() {
+    const createSettings = buildCreateProjectSettings(
+      meta?.defaults ?? DEFAULT_SETTINGS,
+      createAspectRatio,
+      createScriptMode,
+      createResolutionPreset
+    );
+
     try {
       setPending('create');
       const created = await requestJson<Project>('/api/projects', {
         method: 'POST',
         body: JSON.stringify({
           title: createTitle,
-          sourceText: createSource
+          sourceText: createSource,
+          settings: createSettings
         })
       });
 
@@ -246,6 +715,7 @@ export function App() {
       setAppSettings(nextSettings);
       setSettingsDraft(nextSettings);
       setSettingsDirty(false);
+      setLlmModelsError('');
       setNotice('系统设置已保存');
       await loadMeta();
       setSettingsOpen(false);
@@ -256,6 +726,172 @@ export function App() {
     }
   }
 
+  async function handleGenerateReferenceAsset(kind: ReferenceAssetKind, item: ReferenceAssetItem) {
+    if (!selectedId) {
+      return;
+    }
+
+    const key = referenceDraftKey(kind, item.id);
+    const prompt = referencePromptDrafts[key]?.trim() || item.generationPrompt;
+
+    try {
+      setPending(`reference:${kind}:${item.id}`);
+      await requestJson<{ ok: true }>(
+        `/api/projects/${selectedId}/reference-library/${kind}/${item.id}/generate`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ prompt })
+        }
+      );
+      setNotice(
+        item.asset
+          ? `已提交${referenceKindLabel(kind)}“${item.name}”的重新生成任务`
+          : `已提交${referenceKindLabel(kind)}“${item.name}”的生成任务`
+      );
+      await loadProject(selectedId, true, true);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '参考资产生成失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleSaveVideoPrompt(shotId: string) {
+    if (!selectedId || !project) {
+      return;
+    }
+
+    const shot = project.storyboard.find((item) => item.id === shotId);
+    if (!shot) {
+      setNotice('镜头不存在');
+      return;
+    }
+
+    const videoPrompt = (videoPromptDrafts[shotId] ?? shot.videoPrompt).trim();
+    if (!videoPrompt) {
+      setNotice('视频生成 Prompt 不能为空');
+      return;
+    }
+
+    try {
+      setPending(`video-prompt:${shotId}`);
+      const updated = await requestJson<Project>(`/api/projects/${selectedId}/storyboard/${shotId}/prompts`, {
+        method: 'PUT',
+        body: JSON.stringify({ videoPrompt })
+      });
+      setProject(updated);
+      setVideoPromptDrafts((current) => {
+        const next = { ...current };
+        delete next[shotId];
+        return next;
+      });
+      setNotice('视频生成 Prompt 已保存，相关视频片段和成片需要重新生成');
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '保存视频生成 Prompt 失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleSaveAudioPrompts(shotId: string) {
+    if (!selectedId || !project) {
+      return;
+    }
+
+    const shot = project.storyboard.find((item) => item.id === shotId);
+    if (!shot) {
+      setNotice('镜头不存在');
+      return;
+    }
+
+    const draft = audioPromptDrafts[shotId];
+    const backgroundSoundPrompt = (draft?.backgroundSoundPrompt ?? shot.backgroundSoundPrompt).trim();
+    const speechPrompt = (draft?.speechPrompt ?? shot.speechPrompt).trim();
+
+    if (!backgroundSoundPrompt) {
+      setNotice('背景声音 Prompt 不能为空');
+      return;
+    }
+
+    if (!speechPrompt) {
+      setNotice('台词/旁白 Prompt 不能为空');
+      return;
+    }
+
+    try {
+      setPending(`audio-prompts:${shotId}`);
+      const updated = await requestJson<Project>(`/api/projects/${selectedId}/storyboard/${shotId}/prompts`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          backgroundSoundPrompt,
+          speechPrompt
+        })
+      });
+      setProject(updated);
+      setAudioPromptDrafts((current) => {
+        const next = { ...current };
+        delete next[shotId];
+        return next;
+      });
+      setNotice(
+        meta?.envStatus.ttsWorkflowExists
+          ? '背景声音和台词/旁白 Prompt 已保存；重新执行视频剪辑后会更新配音'
+          : '背景声音和台词/旁白 Prompt 已保存；未配置 TTS 时需重新生成视频片段和最终成片'
+      );
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '保存音频 Prompt 失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  const createResolvedSettings = buildCreateProjectSettings(
+    meta?.defaults ?? DEFAULT_SETTINGS,
+    createAspectRatio,
+    createScriptMode,
+    createResolutionPreset
+  );
+  const libraryAssets = buildLibraryAssets(projects);
+  const characterLibraryAssets = buildReferenceLibraryAssets(projects, 'character');
+  const sceneLibraryAssets = buildReferenceLibraryAssets(projects, 'scene');
+  const objectLibraryAssets = buildReferenceLibraryAssets(projects, 'object');
+  const filteredLibraryAssets =
+    assetFilter === 'all' ? libraryAssets : libraryAssets.filter((asset) => asset.kind === assetFilter);
+  const libraryCounts = {
+    total:
+      libraryAssets.length +
+      characterLibraryAssets.length +
+      sceneLibraryAssets.length +
+      objectLibraryAssets.length,
+    outputs: libraryAssets.length,
+    image: libraryAssets.filter((asset) => asset.kind === 'image').length,
+    video: libraryAssets.filter((asset) => asset.kind === 'video').length,
+    final: libraryAssets.filter((asset) => asset.kind === 'final').length,
+    characters: characterLibraryAssets.length,
+    scenes: sceneLibraryAssets.length,
+    objects: objectLibraryAssets.length
+  };
+  const currentReferenceAssets =
+    assetLibrarySection === 'characters'
+      ? characterLibraryAssets
+      : assetLibrarySection === 'scenes'
+        ? sceneLibraryAssets
+        : objectLibraryAssets;
+  const referenceWorkflowReadyCount = meta
+    ? [
+        meta.envStatus.characterWorkflowExists,
+        meta.envStatus.sceneWorkflowExists,
+        meta.envStatus.objectWorkflowExists
+      ].filter(Boolean).length
+    : 0;
+  const productionWorkflowReadyCount = meta
+    ? [meta.envStatus.storyboardWorkflowExists, meta.envStatus.videoWorkflowExists].filter(Boolean).length
+    : 0;
+  const ttsWorkflowReady = meta?.envStatus.ttsWorkflowExists ?? false;
+  const draftResolutionPreset = draft ? inferResolutionPreset(draft.settings) : 'custom';
   const imageMap = new Map(project?.assets.images.map((asset) => [asset.shotId, asset]) ?? []);
   const videoMap = new Map(project?.assets.videos.map((asset) => [asset.shotId, asset]) ?? []);
 
@@ -292,621 +928,1108 @@ export function App() {
 
       {notice ? <div className="notice">{notice}</div> : null}
 
-      <main className="workspace">
-        <aside className="sidebar panel">
-          <section className="create-block">
-            <div className="section-head">
-              <h2>新建项目</h2>
-              <span>输入梗概、草稿或原始文案</span>
-            </div>
-            <label className="field">
-              <span>项目标题</span>
-              <input
-                value={createTitle}
-                onChange={(event) => setCreateTitle(event.target.value)}
-                placeholder="例如：替身新娘复仇记"
-              />
-            </label>
-            <label className="field">
-              <span>原始文字</span>
-              <textarea
-                value={createSource}
-                onChange={(event) => setCreateSource(event.target.value)}
-                placeholder="输入故事梗概、现有剧本、角色设定或营销文案"
-                rows={9}
-              />
-            </label>
-            <button
-              className="button primary"
-              disabled={pending === 'create' || !createSource.trim()}
-              onClick={() => void handleCreateProject()}
-            >
-              {pending === 'create' ? '创建中...' : '创建项目'}
-            </button>
-          </section>
+      <section className="tabs-bar panel">
+        <button
+          className={`tab-button ${activeTab === 'projects' ? 'active' : ''}`}
+          onClick={() => setActiveTab('projects')}
+        >
+          项目
+        </button>
+        <button
+          className={`tab-button ${activeTab === 'assets' ? 'active' : ''}`}
+          onClick={() => setActiveTab('assets')}
+        >
+          资产库
+        </button>
+      </section>
 
-          <section className="project-list">
-            <div className="section-head">
-              <h2>项目列表</h2>
-              <span>{projects.length} 个项目</span>
-            </div>
-            {projects.length ? (
-              projects.map((item) => (
-                <button
-                  key={item.id}
-                  className={`project-card ${selectedId === item.id ? 'active' : ''}`}
-                  onClick={() => setSelectedId(item.id)}
+      {activeTab === 'projects' ? (
+        <main className="workspace">
+          <aside className="sidebar panel">
+            <section className="create-block">
+              <div className="section-head">
+                <h2>新建项目</h2>
+                <span>输入梗概、草稿或原始文案</span>
+              </div>
+              <label className="field">
+                <span>项目标题</span>
+                <input
+                  value={createTitle}
+                  onChange={(event) => setCreateTitle(event.target.value)}
+                  placeholder="例如：替身新娘复仇记"
+                />
+              </label>
+              <label className="field">
+                <span>剧本模式</span>
+                <select
+                  value={createScriptMode}
+                  onChange={(event) => setCreateScriptMode(event.target.value as ScriptMode)}
                 >
-                  <strong>{item.title}</strong>
-                  <span>{item.runState.isRunning ? `进行中: ${item.runState.currentStage ?? '排队'}` : '空闲'}</span>
-                  <small>{formatTime(item.updatedAt)}</small>
-                </button>
-              ))
-            ) : (
-              <div className="empty-card">还没有项目，先在上方创建一个。</div>
-            )}
-          </section>
-        </aside>
-
-        <section className="main panel">
-          {project && draft ? (
-            <>
-              <div className="project-header">
-                <div>
-                  <span className="eyebrow">Project Workspace</span>
-                  <h2>{project.title}</h2>
-                  <p>
-                    创建于 {formatTime(project.createdAt)}，最近更新 {formatTime(project.updatedAt)}
-                  </p>
-                </div>
-                <div className="header-actions">
-                  <button
-                    className="button ghost"
-                    disabled={Boolean(project.runState.isRunning) || pending === 'save'}
-                    onClick={() => void handleSaveProject()}
+                  {SCRIPT_MODES.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {SCRIPT_MODE_LABELS[mode]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>{createScriptMode === 'generate' ? '剧情输入' : '待优化文本'}</span>
+                <textarea
+                  value={createSource}
+                  onChange={(event) => setCreateSource(event.target.value)}
+                  placeholder={scriptModeSourcePlaceholder(createScriptMode)}
+                  rows={9}
+                />
+              </label>
+              <div className="preset-grid">
+                <label className="field">
+                  <span>画幅比例</span>
+                  <select
+                    value={createAspectRatio}
+                    onChange={(event) => setCreateAspectRatio(event.target.value as ProjectSettings['aspectRatio'])}
                   >
-                    {pending === 'save' ? '保存中...' : '保存项目'}
-                  </button>
-                  <button
-                    className="button primary"
-                    disabled={Boolean(project.runState.isRunning) || pending === 'all'}
-                    onClick={() => void handleRunStage('all')}
+                    {ASPECT_RATIOS.map((aspectRatio) => (
+                      <option key={aspectRatio} value={aspectRatio}>
+                        {ASPECT_RATIO_LABELS[aspectRatio]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>分辨率</span>
+                  <select
+                    value={createResolutionPreset}
+                    onChange={(event) => setCreateResolutionPreset(event.target.value as ResolutionPresetId)}
                   >
-                    {pending === 'all' ? '提交中...' : '执行全流程'}
+                    {RESOLUTION_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="format-preview">{createFormatSummary(createResolvedSettings)}</div>
+              <button
+                className="button primary"
+                disabled={pending === 'create' || !createSource.trim()}
+                onClick={() => void handleCreateProject()}
+              >
+                {pending === 'create' ? '创建中...' : '创建项目'}
+              </button>
+            </section>
+
+            <section className="project-list">
+              <div className="section-head">
+                <h2>项目列表</h2>
+                <span>{projects.length} 个项目</span>
+              </div>
+              {projects.length ? (
+                projects.map((item) => (
+                  <button
+                    key={item.id}
+                    className={`project-card ${selectedId === item.id ? 'active' : ''}`}
+                    onClick={() => setSelectedId(item.id)}
+                  >
+                    <strong>{item.title}</strong>
+                    <span>{item.runState.isRunning ? `进行中: ${item.runState.currentStage ?? '排队'}` : '空闲'}</span>
+                    <small>{formatTime(item.updatedAt)}</small>
                   </button>
+                ))
+              ) : (
+                <div className="empty-card">还没有项目，先在上方创建一个。</div>
+              )}
+            </section>
+          </aside>
+
+          <section className="main panel">
+            {project && draft ? (
+              <>
+                <div className="project-header">
+                  <div>
+                    <span className="eyebrow">Project Workspace</span>
+                    <h2>{project.title}</h2>
+                    <p>
+                      创建于 {formatTime(project.createdAt)}，最近更新 {formatTime(project.updatedAt)}
+                    </p>
+                  </div>
+                  <div className="header-actions">
+                    <button
+                      className="button ghost"
+                      disabled={Boolean(project.runState.isRunning) || pending === 'save'}
+                      onClick={() => void handleSaveProject()}
+                    >
+                      {pending === 'save' ? '保存中...' : '保存项目'}
+                    </button>
+                    <button
+                      className="button primary"
+                      disabled={Boolean(project.runState.isRunning) || pending === 'all'}
+                      onClick={() => void handleRunStage('all')}
+                    >
+                      {pending === 'all' ? '提交中...' : '执行全流程'}
+                    </button>
+                  </div>
                 </div>
-              </div>
 
-              <div className="status-strip">
-                {meta ? (
-                  <>
-                    <div className="status-item">
-                      <span>图片工作流</span>
-                      <strong>{meta.envStatus.imageWorkflowExists ? '已找到模板' : '模板缺失'}</strong>
-                    </div>
-                    <div className="status-item">
-                      <span>视频工作流</span>
-                      <strong>{meta.envStatus.videoWorkflowExists ? '已找到模板' : '模板缺失'}</strong>
-                    </div>
-                    <div className="status-item">
-                      <span>当前运行</span>
-                      <strong>
-                        {project.runState.isRunning
-                          ? project.runState.currentStage
-                            ? STAGE_LABELS[project.runState.currentStage]
-                            : '排队中'
-                          : '无'}
-                      </strong>
-                    </div>
-                  </>
-                ) : null}
-              </div>
-
-              <section className="stage-grid">
-                {STAGES.map((stage) => {
-                  const state = project.stages[stage];
-                  return (
-                    <article key={stage} className={`stage-card status-${state.status}`}>
-                      <div className="stage-top">
-                        <div>
-                          <span className="stage-index">
-                            {String(STAGES.indexOf(stage) + 1).padStart(2, '0')}
-                          </span>
-                          <h3>{STAGE_LABELS[stage]}</h3>
-                        </div>
-                        <span className={`pill ${state.status}`}>{statusLabel(state.status)}</span>
+                <div className="status-strip">
+                  {meta ? (
+                    <>
+                      <div className="status-item">
+                        <span>参考资产工作流</span>
+                        <strong>{referenceWorkflowReadyCount}/3 已就绪</strong>
                       </div>
-                      <p>
-                        开始：{formatTime(state.startedAt)}
-                        <br />
-                        完成：{formatTime(state.finishedAt)}
-                      </p>
-                      {state.error ? <div className="error-box">{state.error}</div> : null}
-                      <button
-                        className="button secondary"
-                        disabled={Boolean(project.runState.isRunning) || pending === stage}
-                        onClick={() => void handleRunStage(stage)}
-                      >
-                        {pending === stage ? '提交中...' : `执行${STAGE_LABELS[stage]}`}
-                      </button>
-                    </article>
-                  );
-                })}
-              </section>
+                      <div className="status-item">
+                        <span>分镜/视频工作流</span>
+                        <strong>{productionWorkflowReadyCount}/2 已就绪</strong>
+                      </div>
+                      <div className="status-item">
+                        <span>TTS 工作流</span>
+                        <strong>{ttsWorkflowReady ? '已就绪' : '未配置，回退到视频 Prompt'}</strong>
+                      </div>
+                      <div className="status-item">
+                        <span>当前运行</span>
+                        <strong>
+                          {project.runState.isRunning
+                            ? project.runState.currentStage
+                              ? STAGE_LABELS[project.runState.currentStage]
+                              : '排队中'
+                            : '无'}
+                        </strong>
+                      </div>
+                    </>
+                  ) : null}
+                </div>
 
-              <section className="content-grid">
-                <article className="panel inset">
+                <section className="stage-grid">
+                  {STAGES.map((stage) => {
+                    const state = project.stages[stage];
+                    return (
+                      <article key={stage} className={`stage-card status-${state.status}`}>
+                        <div className="stage-top">
+                          <div>
+                            <span className="stage-index">
+                              {String(STAGES.indexOf(stage) + 1).padStart(2, '0')}
+                            </span>
+                            <h3>{STAGE_LABELS[stage]}</h3>
+                          </div>
+                          <span className={`pill ${state.status}`}>{statusLabel(state.status)}</span>
+                        </div>
+                        <p>
+                          开始：{formatTime(state.startedAt)}
+                          <br />
+                          完成：{formatTime(state.finishedAt)}
+                        </p>
+                        {state.error ? <div className="error-box">{state.error}</div> : null}
+                        <button
+                          className="button secondary"
+                          disabled={Boolean(project.runState.isRunning) || pending === stage}
+                          onClick={() => void handleRunStage(stage)}
+                        >
+                          {pending === stage ? '提交中...' : `执行${STAGE_LABELS[stage]}`}
+                        </button>
+                      </article>
+                    );
+                  })}
+                </section>
+
+                <section className="content-grid">
+                  <article className="panel inset">
+                    <div className="section-head">
+                      <h3>项目设定</h3>
+                      <span>保存后用于后续所有阶段</span>
+                    </div>
+                    <div className="form-grid">
+                      <label className="field span-2">
+                        <span>项目标题</span>
+                        <input
+                          value={draft.title}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current ? { ...current, title: event.target.value } : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field span-2">
+                        <span>{draft.settings.scriptMode === 'generate' ? '剧情输入' : '待优化文本'}</span>
+                        <textarea
+                          rows={8}
+                          value={draft.sourceText}
+                          placeholder={scriptModeSourcePlaceholder(draft.settings.scriptMode)}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current ? { ...current, sourceText: event.target.value } : current;
+                            })
+                          }
+                        />
+                      </label>
+
+                      <label className="field">
+                        <span>剧本模式</span>
+                        <select
+                          value={draft.settings.scriptMode}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: {
+                                      ...current.settings,
+                                      scriptMode: event.target.value as ScriptMode
+                                    }
+                                  }
+                                : current;
+                            })
+                          }
+                        >
+                          {SCRIPT_MODES.map((mode) => (
+                            <option key={mode} value={mode}>
+                              {SCRIPT_MODE_LABELS[mode]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="field">
+                        <span>语气风格</span>
+                        <input
+                          value={draft.settings.tone}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? { ...current, settings: { ...current.settings, tone: event.target.value } }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>受众</span>
+                        <input
+                          value={draft.settings.audience}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: { ...current.settings, audience: event.target.value }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field span-2">
+                        <span>视觉风格</span>
+                        <textarea
+                          rows={3}
+                          value={draft.settings.visualStyle}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: { ...current.settings, visualStyle: event.target.value }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field span-2">
+                        <span>反向提示词</span>
+                        <textarea
+                          rows={2}
+                          value={draft.settings.negativePrompt}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: { ...current.settings, negativePrompt: event.target.value }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>语言</span>
+                        <input
+                          value={draft.settings.language}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? { ...current, settings: { ...current.settings, language: event.target.value } }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>画幅</span>
+                        <select
+                          value={draft.settings.aspectRatio}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: applyAspectRatio(
+                                      current.settings,
+                                      event.target.value as ProjectSettings['aspectRatio']
+                                    )
+                                  }
+                                : current;
+                            })
+                          }
+                        >
+                          {ASPECT_RATIOS.map((aspectRatio) => (
+                            <option key={aspectRatio} value={aspectRatio}>
+                              {ASPECT_RATIO_LABELS[aspectRatio]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span>分辨率</span>
+                        <select
+                          value={draftResolutionPreset}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              if (!current) {
+                                return current;
+                              }
+
+                              const nextPreset = event.target.value as ResolutionSelectValue;
+                              if (nextPreset === 'custom') {
+                                return current;
+                              }
+
+                              setDraftDirty(true);
+                              return {
+                                ...current,
+                                settings: applyResolutionPreset(current.settings, nextPreset)
+                              };
+                            })
+                          }
+                        >
+                          {RESOLUTION_PRESETS.map((preset) => (
+                            <option key={preset.id} value={preset.id}>
+                              {preset.label}
+                            </option>
+                          ))}
+                          <option value="custom">自定义</option>
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span>图片宽度</span>
+                        <input
+                          type="number"
+                          value={draft.settings.imageWidth}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: {
+                                      ...current.settings,
+                                      imageWidth: Number(event.target.value) || current.settings.imageWidth
+                                    }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>图片高度</span>
+                        <input
+                          type="number"
+                          value={draft.settings.imageHeight}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: {
+                                      ...current.settings,
+                                      imageHeight: Number(event.target.value) || current.settings.imageHeight
+                                    }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>视频宽度</span>
+                        <input
+                          type="number"
+                          value={draft.settings.videoWidth}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: {
+                                      ...current.settings,
+                                      videoWidth: Number(event.target.value) || current.settings.videoWidth
+                                    }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>视频高度</span>
+                        <input
+                          type="number"
+                          value={draft.settings.videoHeight}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: {
+                                      ...current.settings,
+                                      videoHeight: Number(event.target.value) || current.settings.videoHeight
+                                    }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>FPS</span>
+                        <input
+                          type="number"
+                          value={draft.settings.fps}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: {
+                                      ...current.settings,
+                                      fps: Number(event.target.value) || current.settings.fps
+                                    }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>默认镜头秒数</span>
+                        <input
+                          type="number"
+                          value={draft.settings.defaultShotDurationSeconds}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: {
+                                      ...current.settings,
+                                      defaultShotDurationSeconds:
+                                        Number(event.target.value) || current.settings.defaultShotDurationSeconds
+                                    }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>目标场景数</span>
+                        <input
+                          type="number"
+                          value={draft.settings.targetSceneCount}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: {
+                                      ...current.settings,
+                                      targetSceneCount:
+                                        Number(event.target.value) || current.settings.targetSceneCount
+                                    }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>每场最多镜头</span>
+                        <input
+                          type="number"
+                          value={draft.settings.maxShotsPerScene}
+                          onChange={(event) =>
+                            setDraft((current) => {
+                              setDraftDirty(true);
+                              return current
+                                ? {
+                                    ...current,
+                                    settings: {
+                                      ...current.settings,
+                                      maxShotsPerScene:
+                                        Number(event.target.value) || current.settings.maxShotsPerScene
+                                    }
+                                  }
+                                : current;
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+                  </article>
+
+                  <article className="panel inset">
+                    <div className="section-head">
+                      <h3>剧本</h3>
+                      <span>
+                        {project.artifacts.scriptJson ? (
+                          <a href={assetUrl(project.artifacts.scriptJson)} target="_blank" rel="noreferrer">
+                            查看 JSON
+                          </a>
+                        ) : (
+                          '等待生成'
+                        )}
+                      </span>
+                    </div>
+                    {project.script ? (
+                      <pre className="content-block">{project.script.markdown}</pre>
+                    ) : (
+                      <div className="empty-card">执行第一阶段后会在这里显示完整剧本。</div>
+                    )}
+                  </article>
+                </section>
+
+                <section className="panel inset">
                   <div className="section-head">
-                    <h3>项目设定</h3>
-                    <span>保存后用于后续所有阶段</span>
-                  </div>
-                  <div className="form-grid">
-                    <label className="field span-2">
-                      <span>项目标题</span>
-                      <input
-                        value={draft.title}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current ? { ...current, title: event.target.value } : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field span-2">
-                      <span>原始文字</span>
-                      <textarea
-                        rows={8}
-                        value={draft.sourceText}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current ? { ...current, sourceText: event.target.value } : current;
-                          })
-                        }
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>语气风格</span>
-                      <input
-                        value={draft.settings.tone}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? { ...current, settings: { ...current.settings, tone: event.target.value } }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>受众</span>
-                      <input
-                        value={draft.settings.audience}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: { ...current.settings, audience: event.target.value }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field span-2">
-                      <span>视觉风格</span>
-                      <textarea
-                        rows={3}
-                        value={draft.settings.visualStyle}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: { ...current.settings, visualStyle: event.target.value }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field span-2">
-                      <span>反向提示词</span>
-                      <textarea
-                        rows={2}
-                        value={draft.settings.negativePrompt}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: { ...current.settings, negativePrompt: event.target.value }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>语言</span>
-                      <input
-                        value={draft.settings.language}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? { ...current, settings: { ...current.settings, language: event.target.value } }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>画幅</span>
-                      <select
-                        value={draft.settings.aspectRatio}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: {
-                                    ...current.settings,
-                                    aspectRatio: event.target.value as ProjectSettings['aspectRatio']
-                                  }
-                                }
-                              : current;
-                          })
-                        }
-                      >
-                        <option value="9:16">9:16 竖屏</option>
-                        <option value="16:9">16:9 横屏</option>
-                        <option value="1:1">1:1 方屏</option>
-                      </select>
-                    </label>
-                    <label className="field">
-                      <span>图片宽度</span>
-                      <input
-                        type="number"
-                        value={draft.settings.imageWidth}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: {
-                                    ...current.settings,
-                                    imageWidth: Number(event.target.value) || current.settings.imageWidth
-                                  }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>图片高度</span>
-                      <input
-                        type="number"
-                        value={draft.settings.imageHeight}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: {
-                                    ...current.settings,
-                                    imageHeight: Number(event.target.value) || current.settings.imageHeight
-                                  }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>视频宽度</span>
-                      <input
-                        type="number"
-                        value={draft.settings.videoWidth}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: {
-                                    ...current.settings,
-                                    videoWidth: Number(event.target.value) || current.settings.videoWidth
-                                  }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>视频高度</span>
-                      <input
-                        type="number"
-                        value={draft.settings.videoHeight}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: {
-                                    ...current.settings,
-                                    videoHeight: Number(event.target.value) || current.settings.videoHeight
-                                  }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>FPS</span>
-                      <input
-                        type="number"
-                        value={draft.settings.fps}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: {
-                                    ...current.settings,
-                                    fps: Number(event.target.value) || current.settings.fps
-                                  }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>默认镜头秒数</span>
-                      <input
-                        type="number"
-                        value={draft.settings.defaultShotDurationSeconds}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: {
-                                    ...current.settings,
-                                    defaultShotDurationSeconds:
-                                      Number(event.target.value) || current.settings.defaultShotDurationSeconds
-                                  }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>目标场景数</span>
-                      <input
-                        type="number"
-                        value={draft.settings.targetSceneCount}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: {
-                                    ...current.settings,
-                                    targetSceneCount:
-                                      Number(event.target.value) || current.settings.targetSceneCount
-                                  }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                    <label className="field">
-                      <span>每场最多镜头</span>
-                      <input
-                        type="number"
-                        value={draft.settings.maxShotsPerScene}
-                        onChange={(event) =>
-                          setDraft((current) => {
-                            setDraftDirty(true);
-                            return current
-                              ? {
-                                  ...current,
-                                  settings: {
-                                    ...current.settings,
-                                    maxShotsPerScene:
-                                      Number(event.target.value) || current.settings.maxShotsPerScene
-                                  }
-                                }
-                              : current;
-                          })
-                        }
-                      />
-                    </label>
-                  </div>
-                </article>
-
-                <article className="panel inset">
-                  <div className="section-head">
-                    <h3>剧本</h3>
+                    <h3>资产提取</h3>
                     <span>
-                      {project.artifacts.scriptJson ? (
-                        <a href={assetUrl(project.artifacts.scriptJson)} target="_blank" rel="noreferrer">
-                          查看 JSON
+                      {project.artifacts.referenceLibraryJson ? (
+                        <a href={assetUrl(project.artifacts.referenceLibraryJson)} target="_blank" rel="noreferrer">
+                          查看提取结果
                         </a>
                       ) : (
-                        '等待生成'
+                        '剧本阶段会自动提取'
                       )}
                     </span>
                   </div>
-                  {project.script ? (
-                    <pre className="content-block">{project.script.markdown}</pre>
+                  <div className="reference-sections">
+                    {([
+                      ['character', project.referenceLibrary.characters],
+                      ['scene', project.referenceLibrary.scenes],
+                      ['object', project.referenceLibrary.objects]
+                    ] as Array<[ReferenceAssetKind, ReferenceAssetItem[]]>).map(([kind, items]) => (
+                      <article key={kind} className="reference-panel">
+                        <div className="section-head">
+                          <h4>{referenceKindLabel(kind)}</h4>
+                          <span>{items.length} 个候选</span>
+                        </div>
+                        {items.length ? (
+                          <div className="reference-list">
+                            {items.map((item) => {
+                              const key = referenceDraftKey(kind, item.id);
+                              const promptValue = referencePromptDrafts[key] ?? item.generationPrompt;
+
+                              return (
+                                <div key={item.id} className="reference-card">
+                                  <div className="reference-head">
+                                    <div>
+                                      <strong>{item.name}</strong>
+                                      <p>{item.summary}</p>
+                                    </div>
+                                    <span className={`pill ${item.status}`}>{statusLabel(item.status)}</span>
+                                  </div>
+                                  <label className="field">
+                                    <span>生成 Prompt</span>
+                                    <textarea
+                                      rows={4}
+                                      value={promptValue}
+                                      onChange={(event) =>
+                                        setReferencePromptDrafts((current) => ({
+                                          ...current,
+                                          [key]: event.target.value
+                                        }))
+                                      }
+                                    />
+                                  </label>
+                                  {item.error ? <div className="error-box">{item.error}</div> : null}
+                                  {item.asset ? (
+                                    <div className="reference-preview">
+                                      <img src={assetUrl(item.asset.relativePath)} alt={item.name} />
+                                      <a href={assetUrl(item.asset.relativePath)} target="_blank" rel="noreferrer">
+                                        打开参考图
+                                      </a>
+                                    </div>
+                                  ) : null}
+                                  <button
+                                    className="button secondary"
+                                    disabled={Boolean(project.runState.isRunning) || item.status === 'running'}
+                                    onClick={() => void handleGenerateReferenceAsset(kind, item)}
+                                  >
+                                    {item.status === 'running'
+                                      ? '生成中...'
+                                      : item.asset
+                                        ? '重新生成'
+                                        : '生成并保存到资产库'}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="empty-card">
+                            该类资产还没有提取结果。重新执行剧本生成后会自动提取。
+                          </div>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="panel inset">
+                  <div className="section-head">
+                    <h3>分镜与素材</h3>
+                    <span>
+                      {project.artifacts.storyboardJson ? (
+                        <a href={assetUrl(project.artifacts.storyboardJson)} target="_blank" rel="noreferrer">
+                          下载分镜 JSON
+                        </a>
+                      ) : (
+                        '等待分镜生成'
+                      )}
+                    </span>
+                  </div>
+                  {project.storyboard.length ? (
+                    <div className="shots-grid">
+                      {project.storyboard.map((shot) => {
+                        const imageAsset = imageMap.get(shot.id);
+                        const videoAsset = videoMap.get(shot.id);
+                        const videoPromptValue = videoPromptDrafts[shot.id] ?? shot.videoPrompt;
+                        const videoPromptDirty = videoPromptValue.trim() !== shot.videoPrompt.trim();
+                        const videoPromptPending = pending === `video-prompt:${shot.id}`;
+                        const audioPromptDraft = audioPromptDrafts[shot.id];
+                        const backgroundSoundPromptValue =
+                          audioPromptDraft?.backgroundSoundPrompt ?? shot.backgroundSoundPrompt;
+                        const speechPromptValue = audioPromptDraft?.speechPrompt ?? shot.speechPrompt;
+                        const audioPromptDirty =
+                          backgroundSoundPromptValue.trim() !== shot.backgroundSoundPrompt.trim() ||
+                          speechPromptValue.trim() !== shot.speechPrompt.trim();
+                        const audioPromptPending = pending === `audio-prompts:${shot.id}`;
+
+                        return (
+                          <article key={shot.id} className="shot-card">
+                            <div className="shot-head">
+                              <strong>
+                                S{shot.sceneNumber} · #{shot.shotNumber}
+                              </strong>
+                              <span>{shot.durationSeconds}s</span>
+                            </div>
+                            <h4>{shot.title}</h4>
+                            <p>{shot.purpose}</p>
+                            <dl className="shot-meta">
+                              <div>
+                                <dt>镜头</dt>
+                                <dd>{shot.camera}</dd>
+                              </div>
+                              <div>
+                                <dt>构图</dt>
+                                <dd>{shot.composition}</dd>
+                              </div>
+                              <div>
+                                <dt>对白</dt>
+                                <dd>{shot.dialogue || '无'}</dd>
+                              </div>
+                              <div>
+                                <dt>画外音</dt>
+                                <dd>{shot.voiceover || '无'}</dd>
+                              </div>
+                            </dl>
+                            <div className="prompt-block">
+                              <h5>首帧描述</h5>
+                              <p>{shot.firstFramePrompt}</p>
+                            </div>
+                            <div className="prompt-block">
+                              <div className="prompt-block-head">
+                                <h5>视频描述</h5>
+                                <button
+                                  className="button ghost mini-button"
+                                  disabled={
+                                    Boolean(project.runState.isRunning) ||
+                                    videoPromptPending ||
+                                    !videoPromptDirty ||
+                                    !videoPromptValue.trim()
+                                  }
+                                  onClick={() => void handleSaveVideoPrompt(shot.id)}
+                                >
+                                  {videoPromptPending ? '保存中...' : '保存视频 Prompt'}
+                                </button>
+                              </div>
+                              <textarea
+                                className="prompt-editor"
+                                rows={6}
+                                value={videoPromptValue}
+                                onChange={(event) =>
+                                  setVideoPromptDrafts((current) => ({
+                                    ...current,
+                                    [shot.id]: event.target.value
+                                  }))
+                                }
+                                placeholder="输入这个镜头的视频生成 Prompt"
+                              />
+                            </div>
+                            <div className="prompt-block">
+                              <div className="prompt-block-head">
+                                <h5>声音与台词 Prompt</h5>
+                                <button
+                                  className="button ghost mini-button"
+                                  disabled={
+                                    Boolean(project.runState.isRunning) ||
+                                    audioPromptPending ||
+                                    !audioPromptDirty ||
+                                    !backgroundSoundPromptValue.trim() ||
+                                    !speechPromptValue.trim()
+                                  }
+                                  onClick={() => void handleSaveAudioPrompts(shot.id)}
+                                >
+                                  {audioPromptPending ? '保存中...' : '保存声音 Prompt'}
+                                </button>
+                              </div>
+                              <label className="prompt-subfield">
+                                <span>背景声音 Prompt</span>
+                                <textarea
+                                  className="prompt-editor"
+                                  rows={5}
+                                  value={backgroundSoundPromptValue}
+                                  onChange={(event) =>
+                                    setAudioPromptDrafts((current) => ({
+                                      ...current,
+                                      [shot.id]: {
+                                        backgroundSoundPrompt: event.target.value,
+                                        speechPrompt: current[shot.id]?.speechPrompt ?? shot.speechPrompt
+                                      }
+                                    }))
+                                  }
+                                  placeholder="输入这个镜头的背景声音 Prompt"
+                                />
+                              </label>
+                              <label className="prompt-subfield">
+                                <span>台词/旁白 Prompt</span>
+                                <textarea
+                                  className="prompt-editor"
+                                  rows={5}
+                                  value={speechPromptValue}
+                                  onChange={(event) =>
+                                    setAudioPromptDrafts((current) => ({
+                                      ...current,
+                                      [shot.id]: {
+                                        backgroundSoundPrompt:
+                                          current[shot.id]?.backgroundSoundPrompt ?? shot.backgroundSoundPrompt,
+                                        speechPrompt: event.target.value
+                                      }
+                                    }))
+                                  }
+                                  placeholder="输入这个镜头的台词或旁白 Prompt"
+                                />
+                              </label>
+                            </div>
+                            <div className="asset-stack">
+                              <div className="asset-box">
+                                <span>图片</span>
+                                {imageAsset ? (
+                                  <>
+                                    <img src={assetUrl(imageAsset.relativePath)} alt={shot.title} />
+                                    <a href={assetUrl(imageAsset.relativePath)} target="_blank" rel="noreferrer">
+                                      打开原图
+                                    </a>
+                                  </>
+                                ) : (
+                                  <small>未生成</small>
+                                )}
+                              </div>
+                              <div className="asset-box">
+                                <span>视频</span>
+                                {videoAsset ? (
+                                  <>
+                                    <video src={assetUrl(videoAsset.relativePath)} controls playsInline />
+                                    <a href={assetUrl(videoAsset.relativePath)} target="_blank" rel="noreferrer">
+                                      打开片段
+                                    </a>
+                                  </>
+                                ) : (
+                                  <small>未生成</small>
+                                )}
+                              </div>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
                   ) : (
-                    <div className="empty-card">执行第一阶段后会在这里显示完整剧本。</div>
+                    <div className="empty-card">执行第二阶段后会在这里显示所有分镜、首帧图和视频片段。</div>
                   )}
-                </article>
-              </section>
+                </section>
+
+                <section className="bottom-grid">
+                  <article className="panel inset">
+                    <div className="section-head">
+                      <h3>最终成片</h3>
+                      <span>{project.assets.finalVideo ? '已导出' : '等待剪辑'}</span>
+                    </div>
+                    {project.assets.finalVideo ? (
+                      <div className="final-video">
+                        <video src={assetUrl(project.assets.finalVideo.relativePath)} controls playsInline />
+                        <a href={assetUrl(project.assets.finalVideo.relativePath)} target="_blank" rel="noreferrer">
+                          打开最终视频
+                        </a>
+                      </div>
+                    ) : (
+                      <div className="empty-card">执行第五阶段后会在这里预览完整视频。</div>
+                    )}
+                  </article>
+
+                  <article className="panel inset">
+                    <div className="section-head">
+                      <h3>执行日志</h3>
+                      <span>{project.logs.length} 条</span>
+                    </div>
+                    {project.logs.length ? (
+                      <div className="log-list">
+                        {[...project.logs].reverse().map((entry) => (
+                          <div key={entry.id} className={`log-item ${entry.level}`}>
+                            <strong>{entry.level.toUpperCase()}</strong>
+                            <span>{entry.message}</span>
+                            <small>{formatTime(entry.createdAt)}</small>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="empty-card">执行阶段后会在这里持续记录日志。</div>
+                    )}
+                  </article>
+                </section>
+              </>
+            ) : (
+              <div className="empty-state">
+                <span className="eyebrow">Ready</span>
+                <h2>先创建一个短剧项目</h2>
+                <p>左侧输入文字素材后创建项目，随后即可按阶段执行或直接跑完整条生产线。</p>
+              </div>
+            )}
+          </section>
+        </main>
+      ) : (
+        <main className="workspace workspace-single">
+          <section className="main panel">
+            <>
+              <div className="library-header">
+                <div>
+                  <span className="eyebrow">Asset Library</span>
+                  <h2>资产库</h2>
+                  <p>聚合全部项目的流程产物、角色、场景和物品资产，可快速预览并跳转到来源项目。</p>
+                </div>
+                <div className="hero-actions library-stats">
+                  <div className="env-card">
+                    <span>总资产</span>
+                    <strong>{libraryCounts.total}</strong>
+                  </div>
+                  <div className="env-card">
+                    <span>流程产物</span>
+                    <strong>{libraryCounts.outputs}</strong>
+                  </div>
+                  <div className="env-card">
+                    <span>角色/场景/物品</span>
+                    <strong>{libraryCounts.characters + libraryCounts.scenes + libraryCounts.objects}</strong>
+                  </div>
+                </div>
+              </div>
 
               <section className="panel inset">
-                <div className="section-head">
-                  <h3>分镜与素材</h3>
-                  <span>
-                    {project.artifacts.storyboardJson ? (
-                      <a href={assetUrl(project.artifacts.storyboardJson)} target="_blank" rel="noreferrer">
-                        下载分镜 JSON
-                      </a>
-                    ) : (
-                      '等待分镜生成'
-                    )}
-                  </span>
+                <div className="library-toolbar">
+                  <button
+                    className={`tab-button ${assetLibrarySection === 'outputs' ? 'active' : ''}`}
+                    onClick={() => setAssetLibrarySection('outputs')}
+                  >
+                    流程产物
+                  </button>
+                  <button
+                    className={`tab-button ${assetLibrarySection === 'characters' ? 'active' : ''}`}
+                    onClick={() => setAssetLibrarySection('characters')}
+                  >
+                    角色
+                  </button>
+                  <button
+                    className={`tab-button ${assetLibrarySection === 'scenes' ? 'active' : ''}`}
+                    onClick={() => setAssetLibrarySection('scenes')}
+                  >
+                    场景
+                  </button>
+                  <button
+                    className={`tab-button ${assetLibrarySection === 'objects' ? 'active' : ''}`}
+                    onClick={() => setAssetLibrarySection('objects')}
+                  >
+                    物品
+                  </button>
                 </div>
-                {project.storyboard.length ? (
-                  <div className="shots-grid">
-                    {project.storyboard.map((shot) => {
-                      const imageAsset = imageMap.get(shot.id);
-                      const videoAsset = videoMap.get(shot.id);
-
-                      return (
-                        <article key={shot.id} className="shot-card">
-                          <div className="shot-head">
-                            <strong>
-                              S{shot.sceneNumber} · #{shot.shotNumber}
-                            </strong>
-                            <span>{shot.durationSeconds}s</span>
-                          </div>
-                          <h4>{shot.title}</h4>
-                          <p>{shot.purpose}</p>
-                          <dl className="shot-meta">
-                            <div>
-                              <dt>镜头</dt>
-                              <dd>{shot.camera}</dd>
+                {assetLibrarySection === 'outputs' ? (
+                  <>
+                    <div className="library-subtoolbar">
+                      <button
+                        className={`tab-button ${assetFilter === 'all' ? 'active' : ''}`}
+                        onClick={() => setAssetFilter('all')}
+                      >
+                        全部
+                      </button>
+                      <button
+                        className={`tab-button ${assetFilter === 'image' ? 'active' : ''}`}
+                        onClick={() => setAssetFilter('image')}
+                      >
+                        首帧图
+                      </button>
+                      <button
+                        className={`tab-button ${assetFilter === 'video' ? 'active' : ''}`}
+                        onClick={() => setAssetFilter('video')}
+                      >
+                        片段视频
+                      </button>
+                      <button
+                        className={`tab-button ${assetFilter === 'final' ? 'active' : ''}`}
+                        onClick={() => setAssetFilter('final')}
+                      >
+                        最终成片
+                      </button>
+                    </div>
+                    {filteredLibraryAssets.length ? (
+                      <div className="library-grid">
+                        {filteredLibraryAssets.map((asset) => (
+                          <article key={asset.id} className="library-card">
+                            <div className="library-card-top">
+                              <span className={`pill ${asset.kind === 'final' ? 'success' : 'running'}`}>
+                                {assetKindLabel(asset.kind)}
+                              </span>
+                              <small>{formatTime(asset.createdAt)}</small>
                             </div>
-                            <div>
-                              <dt>构图</dt>
-                              <dd>{shot.composition}</dd>
+                            {asset.kind === 'image' ? (
+                              <img
+                                className="library-preview media-preview"
+                                src={assetUrl(asset.relativePath)}
+                                alt={asset.projectTitle}
+                              />
+                            ) : (
+                              <video
+                                className="library-preview media-preview"
+                                src={assetUrl(asset.relativePath)}
+                                controls
+                                playsInline
+                              />
+                            )}
+                            <div className="library-card-body">
+                              <strong>{asset.projectTitle}</strong>
+                              <span>
+                                {asset.sceneNumber ? `场景 ${asset.sceneNumber}` : '完整项目输出'}
+                                {asset.shotId ? ` · ${asset.shotId}` : ''}
+                              </span>
+                              <p>{asset.prompt || '无提示词'}</p>
                             </div>
-                            <div>
-                              <dt>对白</dt>
-                              <dd>{shot.dialogue || '无'}</dd>
+                            <div className="library-card-actions">
+                              <button
+                                className="button ghost mini-button"
+                                onClick={() => {
+                                  setSelectedId(asset.projectId);
+                                  setActiveTab('projects');
+                                }}
+                              >
+                                打开项目
+                              </button>
+                              <a href={assetUrl(asset.relativePath)} target="_blank" rel="noreferrer">
+                                打开资源
+                              </a>
                             </div>
-                            <div>
-                              <dt>画外音</dt>
-                              <dd>{shot.voiceover || '无'}</dd>
-                            </div>
-                          </dl>
-                          <div className="prompt-block">
-                            <h5>首帧描述</h5>
-                            <p>{shot.firstFramePrompt}</p>
-                          </div>
-                          <div className="prompt-block">
-                            <h5>视频描述</h5>
-                            <p>{shot.videoPrompt}</p>
-                          </div>
-                          <div className="asset-stack">
-                            <div className="asset-box">
-                              <span>图片</span>
-                              {imageAsset ? (
-                                <>
-                                  <img src={assetUrl(imageAsset.relativePath)} alt={shot.title} />
-                                  <a href={assetUrl(imageAsset.relativePath)} target="_blank" rel="noreferrer">
-                                    打开原图
-                                  </a>
-                                </>
-                              ) : (
-                                <small>未生成</small>
-                              )}
-                            </div>
-                            <div className="asset-box">
-                              <span>视频</span>
-                              {videoAsset ? (
-                                <>
-                                  <video src={assetUrl(videoAsset.relativePath)} controls playsInline />
-                                  <a href={assetUrl(videoAsset.relativePath)} target="_blank" rel="noreferrer">
-                                    打开片段
-                                  </a>
-                                </>
-                              ) : (
-                                <small>未生成</small>
-                              )}
-                            </div>
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="empty-card">当前筛选下还没有流程产物。先去项目页生成图片、视频或成片。</div>
+                    )}
+                  </>
                 ) : (
-                  <div className="empty-card">执行第二阶段后会在这里显示所有分镜、首帧图和视频片段。</div>
+                  <>
+                    <div className="library-subheader">
+                      <span>{referenceCollectionLabel(assetLibrarySection)}</span>
+                      <strong>{currentReferenceAssets.length} 个已生成资产</strong>
+                    </div>
+                    {currentReferenceAssets.length ? (
+                      <div className="library-grid">
+                        {currentReferenceAssets.map((asset) => (
+                          <article key={asset.id} className="library-card">
+                            <div className="library-card-top">
+                              <span className="pill success">{referenceKindLabel(asset.kind)}</span>
+                              <small>{formatTime(asset.createdAt)}</small>
+                            </div>
+                            <img
+                              className="library-preview media-preview"
+                              src={assetUrl(asset.relativePath)}
+                              alt={asset.name}
+                            />
+                            <div className="library-card-body">
+                              <strong>{asset.name}</strong>
+                              <span>{asset.projectTitle}</span>
+                              <p>{asset.summary}</p>
+                            </div>
+                            <div className="library-card-actions">
+                              <button
+                                className="button ghost mini-button"
+                                onClick={() => {
+                                  setSelectedId(asset.projectId);
+                                  setActiveTab('projects');
+                                }}
+                              >
+                                打开项目
+                              </button>
+                              <a href={assetUrl(asset.relativePath)} target="_blank" rel="noreferrer">
+                                打开资源
+                              </a>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="empty-card">
+                        当前还没有已生成的{referenceCollectionLabel(assetLibrarySection)}资产。先去项目页的“资产提取”里生成。
+                      </div>
+                    )}
+                  </>
                 )}
               </section>
-
-              <section className="bottom-grid">
-                <article className="panel inset">
-                  <div className="section-head">
-                    <h3>最终成片</h3>
-                    <span>{project.assets.finalVideo ? '已导出' : '等待剪辑'}</span>
-                  </div>
-                  {project.assets.finalVideo ? (
-                    <div className="final-video">
-                      <video src={assetUrl(project.assets.finalVideo.relativePath)} controls playsInline />
-                      <a href={assetUrl(project.assets.finalVideo.relativePath)} target="_blank" rel="noreferrer">
-                        打开最终视频
-                      </a>
-                    </div>
-                  ) : (
-                    <div className="empty-card">执行第五阶段后会在这里预览完整视频。</div>
-                  )}
-                </article>
-
-                <article className="panel inset">
-                  <div className="section-head">
-                    <h3>执行日志</h3>
-                    <span>{project.logs.length} 条</span>
-                  </div>
-                  {project.logs.length ? (
-                    <div className="log-list">
-                      {[...project.logs].reverse().map((entry) => (
-                        <div key={entry.id} className={`log-item ${entry.level}`}>
-                          <strong>{entry.level.toUpperCase()}</strong>
-                          <span>{entry.message}</span>
-                          <small>{formatTime(entry.createdAt)}</small>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="empty-card">执行阶段后会在这里持续记录日志。</div>
-                  )}
-                </article>
-              </section>
             </>
-          ) : (
-            <div className="empty-state">
-              <span className="eyebrow">Ready</span>
-              <h2>先创建一个短剧项目</h2>
-              <p>左侧输入文字素材后创建项目，随后即可按阶段执行或直接跑完整条生产线。</p>
-            </div>
-          )}
-        </section>
-      </main>
+          </section>
+        </main>
+      )}
 
       <SettingsDialog
         open={settingsOpen}
@@ -914,12 +2037,17 @@ export function App() {
         status={meta?.envStatus ?? null}
         dirty={settingsDirty}
         pending={settingsPending}
+        llmModels={llmModels}
+        llmModelsPending={llmModelsPending}
+        llmModelsError={llmModelsError}
         onClose={() => {
           setSettingsOpen(false);
           setSettingsDraft(appSettings);
           setSettingsDirty(false);
+          setLlmModelsError('');
         }}
         onSave={() => void handleSaveAppSettings()}
+        onRefreshModels={() => setLlmModelsReloadKey((current) => current + 1)}
         onChange={(next) => {
           setSettingsDraft(next);
           setSettingsDirty(true);

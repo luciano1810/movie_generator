@@ -149,6 +149,33 @@ select {
   margin-top: 20px;
 }
 
+.workspace-single {
+  grid-template-columns: 1fr;
+}
+
+.tabs-bar {
+  display: flex;
+  gap: 12px;
+  padding: 14px;
+  margin-top: 20px;
+}
+
+.tab-button {
+  border: 1px solid rgba(255, 215, 186, 0.14);
+  background: rgba(14, 11, 10, 0.42);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: 140ms ease;
+}
+
+.tab-button.active {
+  background: rgba(255, 122, 40, 0.16);
+  border-color: rgba(255, 177, 112, 0.32);
+  color: var(--text);
+}
+
 .sidebar,
 .main {
   padding: 20px;
@@ -184,11 +211,33 @@ select {
   font-size: 0.86rem;
 }
 
+.section-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .create-block,
 .project-list {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.format-preview {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 122, 40, 0.08);
+  border: 1px solid rgba(255, 177, 112, 0.12);
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.6;
 }
 
 .field {
@@ -257,6 +306,12 @@ select:focus {
   color: var(--text);
 }
 
+.mini-button {
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -309,6 +364,51 @@ select:focus {
   margin: 14px 0 0;
   color: var(--muted);
   line-height: 1.6;
+}
+
+.inline-note {
+  min-height: 1.4em;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.workflow-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.workflow-config-card {
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(10, 8, 8, 0.38);
+  border: 1px solid rgba(255, 215, 186, 0.08);
+}
+
+.workflow-config-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.workflow-config-head h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.workflow-config-head p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+  font-size: 0.84rem;
+}
+
+.workflow-config-note {
+  margin-top: 12px;
 }
 
 .modal-actions {
@@ -397,7 +497,7 @@ select:focus {
 
 .status-strip {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
 }
 
@@ -504,6 +604,68 @@ select:focus {
   padding: 18px;
 }
 
+.reference-sections {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.reference-panel {
+  border-radius: 20px;
+  padding: 16px;
+  background: rgba(14, 11, 10, 0.42);
+  border: 1px solid rgba(255, 215, 186, 0.08);
+}
+
+.reference-panel h4 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.reference-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.reference-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(10, 8, 8, 0.45);
+}
+
+.reference-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reference-head strong {
+  display: block;
+  font-size: 1rem;
+}
+
+.reference-head p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.reference-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.reference-preview img {
+  width: 100%;
+  border-radius: 14px;
+  background: #000;
+}
+
 .shots-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -565,10 +727,34 @@ select:focus {
   padding: 14px;
 }
 
+.prompt-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
 .prompt-block h5 {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 0.92rem;
   color: var(--accent-soft);
+}
+
+.prompt-editor {
+  min-height: 132px;
+}
+
+.prompt-subfield {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.prompt-subfield span {
+  color: var(--muted);
+  font-size: 0.84rem;
 }
 
 .asset-stack {
@@ -609,6 +795,113 @@ select:focus {
 .final-video {
   display: flex;
   flex-direction: column;
+  gap: 12px;
+}
+
+.library-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.library-header h2 {
+  margin: 8px 0 6px;
+  font-size: 2rem;
+}
+
+.library-header p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.library-stats {
+  width: min(460px, 100%);
+}
+
+.library-toolbar,
+.library-subtoolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.library-subtoolbar {
+  margin-top: 14px;
+}
+
+.library-subheader {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 14px;
+  color: var(--muted);
+}
+
+.library-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 16px;
+}
+
+.library-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 20px;
+  background: rgba(14, 11, 10, 0.42);
+  border: 1px solid rgba(255, 215, 186, 0.08);
+}
+
+.library-card-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.library-card-top small {
+  color: var(--muted);
+}
+
+.library-preview {
+  width: 100%;
+}
+
+.media-preview {
+  border-radius: 14px;
+  background: #000;
+  object-fit: cover;
+}
+
+.library-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.library-card-body strong {
+  font-size: 1rem;
+}
+
+.library-card-body span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.library-card-body p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.library-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
 
@@ -664,7 +957,10 @@ select:focus {
   .status-strip,
   .content-grid,
   .bottom-grid,
-  .shots-grid {
+  .shots-grid,
+  .reference-sections,
+  .library-grid,
+  .workflow-config-grid {
     grid-template-columns: 1fr;
   }
 
@@ -699,9 +995,12 @@ select:focus {
   .header-actions,
   .asset-stack,
   .form-grid,
+  .preset-grid,
+  .workflow-config-grid,
   .hero-actions,
   .modal-actions,
-  .modal-buttons {
+  .modal-buttons,
+  .library-card-actions {
     grid-template-columns: 1fr;
     display: grid;
   }
@@ -710,12 +1009,23 @@ select:focus {
     flex-direction: column;
   }
 
+  .section-side {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
   .modal-backdrop {
     padding: 12px;
   }
 
   .span-2 {
     grid-column: span 1;
+  }
+
+  .library-header,
+  .reference-head,
+  .library-subheader {
+    flex-direction: column;
   }
 
   .project-header {
