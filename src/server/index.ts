@@ -78,11 +78,12 @@ async function main(): Promise<void> {
       })),
       envStatus: getRuntimeStatus(appSettings),
       workflowPaths: {
-        character: appSettings.comfyui.workflows.character.workflowPath,
-        scene: appSettings.comfyui.workflows.scene.workflowPath,
-        object: appSettings.comfyui.workflows.object.workflowPath,
-        storyboard: appSettings.comfyui.workflows.storyboard.workflowPath,
-        video: appSettings.comfyui.workflows.video.workflowPath,
+        character_asset: appSettings.comfyui.workflows.character_asset.workflowPath,
+        text_to_image: appSettings.comfyui.workflows.text_to_image.workflowPath,
+        reference_image_to_image: appSettings.comfyui.workflows.reference_image_to_image.workflowPath,
+        image_edit: appSettings.comfyui.workflows.image_edit.workflowPath,
+        text_to_video: appSettings.comfyui.workflows.text_to_video.workflowPath,
+        image_to_video: appSettings.comfyui.workflows.image_to_video.workflowPath,
         tts: appSettings.comfyui.workflows.tts.workflowPath
       }
     };
@@ -262,6 +263,12 @@ async function main(): Promise<void> {
 
       response.json(
         await updateStoryboardShotPrompts(id, shotId, {
+          firstFramePrompt:
+            typeof request.body?.firstFramePrompt === 'string' ? String(request.body.firstFramePrompt) : undefined,
+          lastFramePrompt:
+            typeof request.body?.lastFramePrompt === 'string' ? String(request.body.lastFramePrompt) : undefined,
+          transitionHint:
+            typeof request.body?.transitionHint === 'string' ? String(request.body.transitionHint) : undefined,
           videoPrompt:
             typeof request.body?.videoPrompt === 'string' ? String(request.body.videoPrompt) : undefined,
           backgroundSoundPrompt:

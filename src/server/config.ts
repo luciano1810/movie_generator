@@ -31,46 +31,53 @@ export const envAppSettingsDefaults: AppSettings = {
   comfyui: {
     baseUrl: process.env.COMFYUI_BASE_URL ?? 'http://127.0.0.1:8188',
     workflows: {
-      character: {
+      character_asset: {
         workflowPath: resolveMaybeRelative(
-          process.env.COMFYUI_CHARACTER_WORKFLOW ?? process.env.COMFYUI_IMAGE_WORKFLOW,
+          process.env.COMFYUI_CHARACTER_ASSET_WORKFLOW ??
+            process.env.COMFYUI_CHARACTER_WORKFLOW ??
+            process.env.COMFYUI_IMAGE_WORKFLOW,
           'config/workflows/image-workflow.template.json'
-        ),
-        checkpointName: process.env.COMFYUI_CHARACTER_CHECKPOINT ?? process.env.COMFYUI_IMAGE_CHECKPOINT ?? ''
+        )
       },
-      scene: {
+      text_to_image: {
         workflowPath: resolveMaybeRelative(
-          process.env.COMFYUI_SCENE_WORKFLOW ?? process.env.COMFYUI_IMAGE_WORKFLOW,
+          process.env.COMFYUI_TEXT_TO_IMAGE_WORKFLOW ??
+            process.env.COMFYUI_SCENE_WORKFLOW ??
+            process.env.COMFYUI_OBJECT_WORKFLOW ??
+            process.env.COMFYUI_IMAGE_WORKFLOW,
           'config/workflows/image-workflow.template.json'
-        ),
-        checkpointName: process.env.COMFYUI_SCENE_CHECKPOINT ?? process.env.COMFYUI_IMAGE_CHECKPOINT ?? ''
+        )
       },
-      object: {
+      reference_image_to_image: {
         workflowPath: resolveMaybeRelative(
-          process.env.COMFYUI_OBJECT_WORKFLOW ?? process.env.COMFYUI_IMAGE_WORKFLOW,
+          process.env.COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW ??
+            process.env.COMFYUI_STORYBOARD_WORKFLOW ??
+            process.env.COMFYUI_IMAGE_WORKFLOW,
           'config/workflows/image-workflow.template.json'
-        ),
-        checkpointName: process.env.COMFYUI_OBJECT_CHECKPOINT ?? process.env.COMFYUI_IMAGE_CHECKPOINT ?? ''
+        )
       },
-      storyboard: {
+      image_edit: {
         workflowPath: resolveMaybeRelative(
-          process.env.COMFYUI_STORYBOARD_WORKFLOW ?? process.env.COMFYUI_IMAGE_WORKFLOW,
+          process.env.COMFYUI_IMAGE_EDIT_WORKFLOW ?? process.env.COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW,
           'config/workflows/image-workflow.template.json'
-        ),
-        checkpointName: process.env.COMFYUI_STORYBOARD_CHECKPOINT ?? process.env.COMFYUI_IMAGE_CHECKPOINT ?? ''
+        )
       },
-      video: {
+      text_to_video: {
         workflowPath: resolveMaybeRelative(
-          process.env.COMFYUI_VIDEO_WORKFLOW,
+          process.env.COMFYUI_TEXT_TO_VIDEO_WORKFLOW ?? process.env.COMFYUI_VIDEO_WORKFLOW,
           'config/workflows/video-workflow.template.json'
-        ),
-        checkpointName: process.env.COMFYUI_VIDEO_CHECKPOINT ?? ''
+        )
+      },
+      image_to_video: {
+        workflowPath: resolveMaybeRelative(
+          process.env.COMFYUI_IMAGE_TO_VIDEO_WORKFLOW ?? process.env.COMFYUI_VIDEO_WORKFLOW,
+          'config/workflows/video-workflow.template.json'
+        )
       },
       tts: {
         workflowPath: process.env.COMFYUI_TTS_WORKFLOW
           ? resolveMaybeRelative(process.env.COMFYUI_TTS_WORKFLOW, process.env.COMFYUI_TTS_WORKFLOW)
-          : '',
-        checkpointName: process.env.COMFYUI_TTS_CHECKPOINT ?? ''
+          : ''
       }
     },
     pollIntervalMs: Number(process.env.COMFYUI_POLL_INTERVAL_MS ?? 3000),

@@ -1,5 +1,13 @@
 export const STAGES = ['script', 'assets', 'storyboard', 'images', 'videos', 'edit'] as const;
-export const COMFYUI_WORKFLOW_TYPES = ['character', 'scene', 'object', 'storyboard', 'video', 'tts'] as const;
+export const COMFYUI_WORKFLOW_TYPES = [
+  'character_asset',
+  'text_to_image',
+  'reference_image_to_image',
+  'image_edit',
+  'text_to_video',
+  'image_to_video',
+  'tts'
+] as const;
 export const ASPECT_RATIOS = ['21:9', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4', '9:16'] as const;
 export const SCRIPT_MODES = ['generate', 'optimize'] as const;
 
@@ -14,7 +22,6 @@ export type ReferenceAssetKind = 'character' | 'scene' | 'object';
 
 export interface ComfyWorkflowSettings {
   workflowPath: string;
-  checkpointName: string;
 }
 
 export interface AppSettings {
@@ -37,11 +44,12 @@ export interface AppSettings {
 export interface RuntimeStatus {
   llmConfigured: boolean;
   comfyuiConfigured: boolean;
-  characterWorkflowExists: boolean;
-  sceneWorkflowExists: boolean;
-  objectWorkflowExists: boolean;
-  storyboardWorkflowExists: boolean;
-  videoWorkflowExists: boolean;
+  characterAssetWorkflowExists: boolean;
+  textToImageWorkflowExists: boolean;
+  referenceImageToImageWorkflowExists: boolean;
+  imageEditWorkflowExists: boolean;
+  textToVideoWorkflowExists: boolean;
+  imageToVideoWorkflowExists: boolean;
   ttsWorkflowExists: boolean;
   ffmpegReady: boolean;
 }
@@ -76,6 +84,7 @@ export interface ProjectSettings {
   videoHeight: number;
   fps: number;
   defaultShotDurationSeconds: number;
+  maxVideoSegmentDurationSeconds: number;
   targetSceneCount: number;
   maxShotsPerScene: number;
 }
@@ -121,12 +130,17 @@ export interface StoryboardShot {
   title: string;
   purpose: string;
   durationSeconds: number;
+  startTimeSeconds: number;
+  endTimeSeconds: number;
+  startTimecode: string;
+  endTimecode: string;
   dialogue: string;
   voiceover: string;
   camera: string;
   composition: string;
   transitionHint: string;
   firstFramePrompt: string;
+  lastFramePrompt: string;
   videoPrompt: string;
   backgroundSoundPrompt: string;
   speechPrompt: string;
@@ -230,6 +244,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   videoHeight: 1280,
   fps: 24,
   defaultShotDurationSeconds: 4,
+  maxVideoSegmentDurationSeconds: 4,
   targetSceneCount: 6,
   maxShotsPerScene: 3
 };
@@ -243,29 +258,26 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   comfyui: {
     baseUrl: 'http://127.0.0.1:8188',
     workflows: {
-      character: {
-        workflowPath: '',
-        checkpointName: ''
+      character_asset: {
+        workflowPath: ''
       },
-      scene: {
-        workflowPath: '',
-        checkpointName: ''
+      text_to_image: {
+        workflowPath: ''
       },
-      object: {
-        workflowPath: '',
-        checkpointName: ''
+      reference_image_to_image: {
+        workflowPath: ''
       },
-      storyboard: {
-        workflowPath: '',
-        checkpointName: ''
+      image_edit: {
+        workflowPath: ''
       },
-      video: {
-        workflowPath: '',
-        checkpointName: ''
+      text_to_video: {
+        workflowPath: ''
+      },
+      image_to_video: {
+        workflowPath: ''
       },
       tts: {
-        workflowPath: '',
-        checkpointName: ''
+        workflowPath: ''
       }
     },
     pollIntervalMs: 3000,
@@ -292,19 +304,12 @@ function normalizeEditableString(value: unknown, fallback: string): string {
 function normalizeComfyWorkflowSettings(
   input: unknown,
   fallback: ComfyWorkflowSettings,
-  legacy?: Partial<ComfyWorkflowSettings>
+  legacyWorkflowPath = ''
 ): ComfyWorkflowSettings {
   const normalizedInput = input && typeof input === 'object' ? (input as Partial<ComfyWorkflowSettings>) : {};
 
   return {
-    workflowPath: normalizeEditableString(
-      normalizedInput.workflowPath,
-      legacy?.workflowPath ?? fallback.workflowPath
-    ),
-    checkpointName: normalizeEditableString(
-      normalizedInput.checkpointName,
-      legacy?.checkpointName ?? fallback.checkpointName
-    )
+    workflowPath: normalizeEditableString(normalizedInput.workflowPath, legacyWorkflowPath || fallback.workflowPath)
   };
 }
 
@@ -335,6 +340,10 @@ export function normalizeSettings(input?: Partial<ProjectSettings>): ProjectSett
       merged.defaultShotDurationSeconds,
       DEFAULT_SETTINGS.defaultShotDurationSeconds
     ),
+    maxVideoSegmentDurationSeconds: normalizePositiveInteger(
+      merged.maxVideoSegmentDurationSeconds,
+      normalizePositiveInteger(merged.defaultShotDurationSeconds, DEFAULT_SETTINGS.defaultShotDurationSeconds)
+    ),
     targetSceneCount: normalizePositiveInteger(merged.targetSceneCount, DEFAULT_SETTINGS.targetSceneCount),
     maxShotsPerScene: normalizePositiveInteger(merged.maxShotsPerScene, DEFAULT_SETTINGS.maxShotsPerScene)
   };
@@ -348,7 +357,7 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
   const rawComfyui = ((input?.comfyui ?? {}) as Record<string, unknown>) ?? {};
   const rawWorkflows =
     rawComfyui.workflows && typeof rawComfyui.workflows === 'object'
-      ? (rawComfyui.workflows as Partial<Record<ComfyWorkflowType, Partial<ComfyWorkflowSettings>>>)
+      ? (rawComfyui.workflows as Record<string, Partial<ComfyWorkflowSettings>>)
       : {};
   const ffmpeg = {
     ...fallback.ffmpeg,
@@ -356,9 +365,19 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
   };
 
   const legacyImageWorkflowPath = normalizeEditableString(rawComfyui.imageWorkflowPath, '');
-  const legacyImageCheckpointName = normalizeEditableString(rawComfyui.imageCheckpointName, '');
   const legacyVideoWorkflowPath = normalizeEditableString(rawComfyui.videoWorkflowPath, '');
-  const legacyVideoCheckpointName = normalizeEditableString(rawComfyui.videoCheckpointName, '');
+  const legacyCharacterWorkflowPath = normalizeEditableString(rawComfyui.characterWorkflowPath, '');
+  const legacyTtsWorkflowPath = normalizeEditableString(rawComfyui.ttsWorkflowPath, '');
+
+  const pickWorkflowPath = (...candidates: Array<string | undefined>): string => {
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+
+    return '';
+  };
 
   return {
     llm: {
@@ -369,27 +388,45 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
     comfyui: {
       baseUrl: normalizeEditableString(rawComfyui.baseUrl, fallback.comfyui.baseUrl),
       workflows: {
-        character: normalizeComfyWorkflowSettings(rawWorkflows.character, fallback.comfyui.workflows.character, {
-          workflowPath: legacyImageWorkflowPath,
-          checkpointName: legacyImageCheckpointName
-        }),
-        scene: normalizeComfyWorkflowSettings(rawWorkflows.scene, fallback.comfyui.workflows.scene, {
-          workflowPath: legacyImageWorkflowPath,
-          checkpointName: legacyImageCheckpointName
-        }),
-        object: normalizeComfyWorkflowSettings(rawWorkflows.object, fallback.comfyui.workflows.object, {
-          workflowPath: legacyImageWorkflowPath,
-          checkpointName: legacyImageCheckpointName
-        }),
-        storyboard: normalizeComfyWorkflowSettings(rawWorkflows.storyboard, fallback.comfyui.workflows.storyboard, {
-          workflowPath: legacyImageWorkflowPath,
-          checkpointName: legacyImageCheckpointName
-        }),
-        video: normalizeComfyWorkflowSettings(rawWorkflows.video, fallback.comfyui.workflows.video, {
-          workflowPath: legacyVideoWorkflowPath,
-          checkpointName: legacyVideoCheckpointName
-        }),
-        tts: normalizeComfyWorkflowSettings(rawWorkflows.tts, fallback.comfyui.workflows.tts)
+        character_asset: normalizeComfyWorkflowSettings(
+          rawWorkflows.character_asset,
+          fallback.comfyui.workflows.character_asset,
+          pickWorkflowPath(rawWorkflows.character?.workflowPath, legacyCharacterWorkflowPath, legacyImageWorkflowPath)
+        ),
+        text_to_image: normalizeComfyWorkflowSettings(
+          rawWorkflows.text_to_image,
+          fallback.comfyui.workflows.text_to_image,
+          pickWorkflowPath(
+            rawWorkflows.scene?.workflowPath,
+            rawWorkflows.object?.workflowPath,
+            legacyImageWorkflowPath
+          )
+        ),
+        reference_image_to_image: normalizeComfyWorkflowSettings(
+          rawWorkflows.reference_image_to_image,
+          fallback.comfyui.workflows.reference_image_to_image,
+          pickWorkflowPath(rawWorkflows.storyboard?.workflowPath, legacyImageWorkflowPath)
+        ),
+        image_edit: normalizeComfyWorkflowSettings(
+          rawWorkflows.image_edit,
+          fallback.comfyui.workflows.image_edit,
+          pickWorkflowPath(rawWorkflows.reference_image_to_image?.workflowPath)
+        ),
+        text_to_video: normalizeComfyWorkflowSettings(
+          rawWorkflows.text_to_video,
+          fallback.comfyui.workflows.text_to_video,
+          pickWorkflowPath(rawWorkflows.video?.workflowPath, legacyVideoWorkflowPath)
+        ),
+        image_to_video: normalizeComfyWorkflowSettings(
+          rawWorkflows.image_to_video,
+          fallback.comfyui.workflows.image_to_video,
+          pickWorkflowPath(rawWorkflows.video?.workflowPath, legacyVideoWorkflowPath)
+        ),
+        tts: normalizeComfyWorkflowSettings(
+          rawWorkflows.tts,
+          fallback.comfyui.workflows.tts,
+          legacyTtsWorkflowPath
+        )
       },
       pollIntervalMs: normalizePositiveInteger(rawComfyui.pollIntervalMs, fallback.comfyui.pollIntervalMs),
       timeoutMs: normalizePositiveInteger(rawComfyui.timeoutMs, fallback.comfyui.timeoutMs)
@@ -422,6 +459,10 @@ export function normalizeStoryboardShot(
     title: normalizeString(input?.title, `场景${sceneNumber}镜头${shotNumber}`),
     purpose: normalizeString(input?.purpose, '推进剧情'),
     durationSeconds: normalizePositiveInteger(input?.durationSeconds, settings.defaultShotDurationSeconds),
+    startTimeSeconds: 0,
+    endTimeSeconds: 0,
+    startTimecode: '00:00',
+    endTimecode: '00:00',
     dialogue,
     voiceover,
     camera: normalizeString(input?.camera, '中近景，稳定推进'),
@@ -430,6 +471,10 @@ export function normalizeStoryboardShot(
     firstFramePrompt: normalizeString(
       input?.firstFramePrompt,
       `${settings.visualStyle}，场景${sceneNumber}镜头${shotNumber}首帧`
+    ),
+    lastFramePrompt: normalizeString(
+      input?.lastFramePrompt,
+      `${settings.visualStyle}，场景${sceneNumber}镜头${shotNumber}尾帧`
     ),
     videoPrompt: normalizeString(
       input?.videoPrompt,
@@ -446,6 +491,34 @@ export function normalizeStoryboardShot(
         : `场景${sceneNumber}镜头${shotNumber}无台词和旁白，不生成语音内容。`
     )
   };
+}
+
+function formatStoryboardTimecode(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+export function normalizeStoryboardShots(
+  inputs: Array<Partial<StoryboardShot> | undefined>,
+  settings: ProjectSettings
+): StoryboardShot[] {
+  let elapsedSeconds = 0;
+
+  return inputs.map((input, index) => {
+    const shot = normalizeStoryboardShot(input, index, settings);
+    const startTimeSeconds = elapsedSeconds;
+    const endTimeSeconds = startTimeSeconds + shot.durationSeconds;
+    elapsedSeconds = endTimeSeconds;
+
+    return {
+      ...shot,
+      startTimeSeconds,
+      endTimeSeconds,
+      startTimecode: formatStoryboardTimecode(startTimeSeconds),
+      endTimecode: formatStoryboardTimecode(endTimeSeconds)
+    };
+  });
 }
 
 export function createEmptyStageState(): StageState {

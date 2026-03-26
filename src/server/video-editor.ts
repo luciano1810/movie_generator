@@ -85,6 +85,20 @@ async function normalizeSegmentsWithAudio(
   return prepared;
 }
 
+export async function extractLastFrame(videoPath: string, outputImagePath: string): Promise<void> {
+  await mkdir(path.dirname(outputImagePath), { recursive: true });
+  await runFfmpeg([
+    '-y',
+    '-i',
+    videoPath,
+    '-update',
+    '1',
+    '-q:v',
+    '2',
+    outputImagePath
+  ]);
+}
+
 export async function stitchVideos(
   videoPaths: string[],
   outputPath: string,

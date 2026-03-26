@@ -10,7 +10,7 @@ import type {
   ScriptPackage,
   ScriptScene
 } from '../shared/types.js';
-import { normalizeStoryboardShot } from '../shared/types.js';
+import { normalizeStoryboardShots } from '../shared/types.js';
 import { getAppSettings } from './app-settings.js';
 
 type ChatCompletionMessageParam = {
@@ -547,6 +547,7 @@ export async function generateStoryboardFromScript(
       composition?: string;
       transitionHint?: string;
       firstFramePrompt?: string;
+      lastFramePrompt?: string;
       videoPrompt?: string;
       backgroundSoundPrompt?: string;
       speechPrompt?: string;
@@ -562,14 +563,15 @@ export async function generateStoryboardFromScript(
       content: `请根据下面的剧本生成完整分镜。
 
 要求：
-1. 每个镜头必须包含首帧生图描述 firstFramePrompt 和视频片段描述 videoPrompt
+1. 每个镜头必须包含首帧生图描述 firstFramePrompt、尾帧生图描述 lastFramePrompt，以及视频片段描述 videoPrompt
 2. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白
 3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果没有台词或旁白，要明确写“无语音内容”
 4. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
 5. 每场镜头数量由你根据戏剧节奏、信息密度和动作复杂度自行决定，不要机械套固定数量
-6. durationSeconds 以 ${settings.defaultShotDurationSeconds} 秒附近的整数为优先，但可按镜头内容自行调整
-7. 构图、镜头运动、光线、表情、动作都要写清楚
-8. 输出结构：
+6. durationSeconds 由你根据剧情节奏、动作复杂度、表演长度自行决定；${settings.defaultShotDurationSeconds} 秒只是常规参考，不是硬限制
+7. 单次视频生成上限是 ${settings.maxVideoSegmentDurationSeconds} 秒；如果镜头总时长超过这个上限，系统会自动拆段生成，所以你仍然要输出完整的镜头总时长，并且必须把 lastFramePrompt 写清楚，确保镜头结尾状态明确
+8. 构图、镜头运动、光线、表情、动作都要写清楚
+9. 输出结构：
 {
   "shots": [
     {
@@ -585,6 +587,7 @@ export async function generateStoryboardFromScript(
       "composition": "构图说明",
       "transitionHint": "转场方式",
       "firstFramePrompt": "用于首帧静态图生成的详细中文提示词",
+      "lastFramePrompt": "用于尾帧静态图生成的详细中文提示词，明确镜头结束时的构图、人物状态和环境状态",
       "videoPrompt": "用于视频生成的详细中文提示词",
       "backgroundSoundPrompt": "用于背景声音生成的详细中文提示词，不含人物对白",
       "speechPrompt": "用于台词或旁白配音的详细中文提示词，没有语音内容时明确写无语音"
@@ -597,5 +600,5 @@ ${JSON.stringify(script, null, 2)}`
     }
   ]);
 
-  return (payload.shots ?? []).map((shot, index) => normalizeStoryboardShot(shot, index, settings));
+  return normalizeStoryboardShots(payload.shots ?? [], settings);
 }

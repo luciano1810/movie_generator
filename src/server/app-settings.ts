@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
   type AppSettings,
+  COMFYUI_WORKFLOW_TYPES,
   type RuntimeStatus,
   normalizeAppSettings
 } from '../shared/types.js';
@@ -19,36 +20,21 @@ function normalizeWorkflowPath(value: string): string {
 }
 
 function normalizeRuntimePaths(settings: AppSettings): AppSettings {
+  const workflows = Object.fromEntries(
+    COMFYUI_WORKFLOW_TYPES.map((workflowType) => [
+      workflowType,
+      {
+        ...settings.comfyui.workflows[workflowType],
+        workflowPath: normalizeWorkflowPath(settings.comfyui.workflows[workflowType].workflowPath)
+      }
+    ])
+  ) as AppSettings['comfyui']['workflows'];
+
   return {
     ...settings,
     comfyui: {
       ...settings.comfyui,
-      workflows: {
-        character: {
-          ...settings.comfyui.workflows.character,
-          workflowPath: normalizeWorkflowPath(settings.comfyui.workflows.character.workflowPath)
-        },
-        scene: {
-          ...settings.comfyui.workflows.scene,
-          workflowPath: normalizeWorkflowPath(settings.comfyui.workflows.scene.workflowPath)
-        },
-        object: {
-          ...settings.comfyui.workflows.object,
-          workflowPath: normalizeWorkflowPath(settings.comfyui.workflows.object.workflowPath)
-        },
-        storyboard: {
-          ...settings.comfyui.workflows.storyboard,
-          workflowPath: normalizeWorkflowPath(settings.comfyui.workflows.storyboard.workflowPath)
-        },
-        video: {
-          ...settings.comfyui.workflows.video,
-          workflowPath: normalizeWorkflowPath(settings.comfyui.workflows.video.workflowPath)
-        },
-        tts: {
-          ...settings.comfyui.workflows.tts,
-          workflowPath: normalizeWorkflowPath(settings.comfyui.workflows.tts.workflowPath)
-        }
-      }
+      workflows
     }
   };
 }
@@ -95,7 +81,10 @@ export function getRuntimeStatus(settings = getAppSettings()): RuntimeStatus {
 
     try {
       const content = readFileSync(workflowPath, 'utf8');
-      return !content.includes('ReplaceMeWithYourVideoWorkflow');
+      return !(
+        content.includes('ReplaceMeWithYourVideoWorkflow') ||
+        content.includes('ReplaceWithYourCheckpointInWorkflow')
+      );
     } catch {
       return false;
     }
@@ -104,11 +93,14 @@ export function getRuntimeStatus(settings = getAppSettings()): RuntimeStatus {
   return {
     llmConfigured: Boolean(settings.llm.baseUrl && settings.llm.apiKey && settings.llm.model),
     comfyuiConfigured: Boolean(settings.comfyui.baseUrl),
-    characterWorkflowExists: workflowExists(settings.comfyui.workflows.character.workflowPath),
-    sceneWorkflowExists: workflowExists(settings.comfyui.workflows.scene.workflowPath),
-    objectWorkflowExists: workflowExists(settings.comfyui.workflows.object.workflowPath),
-    storyboardWorkflowExists: workflowExists(settings.comfyui.workflows.storyboard.workflowPath),
-    videoWorkflowExists: workflowExists(settings.comfyui.workflows.video.workflowPath),
+    characterAssetWorkflowExists: workflowExists(settings.comfyui.workflows.character_asset.workflowPath),
+    textToImageWorkflowExists: workflowExists(settings.comfyui.workflows.text_to_image.workflowPath),
+    referenceImageToImageWorkflowExists: workflowExists(
+      settings.comfyui.workflows.reference_image_to_image.workflowPath
+    ),
+    imageEditWorkflowExists: workflowExists(settings.comfyui.workflows.image_edit.workflowPath),
+    textToVideoWorkflowExists: workflowExists(settings.comfyui.workflows.text_to_video.workflowPath),
+    imageToVideoWorkflowExists: workflowExists(settings.comfyui.workflows.image_to_video.workflowPath),
     ttsWorkflowExists: workflowExists(settings.comfyui.workflows.tts.workflowPath),
     ffmpegReady: Boolean(settings.ffmpeg.binaryPath && existsSync(settings.ffmpeg.binaryPath))
   };

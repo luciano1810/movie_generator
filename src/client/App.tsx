@@ -58,6 +58,12 @@ interface ShotAudioPromptDraft {
   speechPrompt: string;
 }
 
+interface ShotTechnicalDraft {
+  firstFramePrompt: string;
+  lastFramePrompt: string;
+  transitionHint: string;
+}
+
 const ASPECT_RATIO_LABELS: Record<ProjectSettings['aspectRatio'], string> = {
   '21:9': '21:9 超宽横屏',
   '16:9': '16:9 横屏',
@@ -170,6 +176,10 @@ function formatTime(iso: string | null | undefined): string {
   return new Date(iso).toLocaleString('zh-CN', {
     hour12: false
   });
+}
+
+function formatShotTimeline(shot: Pick<Project['storyboard'][number], 'startTimecode' | 'endTimecode' | 'durationSeconds'>): string {
+  return `${shot.startTimecode} - ${shot.endTimecode} · ${shot.durationSeconds}s`;
 }
 
 function statusLabel(status: Project['stages'][StageId]['status']): string {
@@ -484,10 +494,39 @@ function inferProjectStageTab(project: Project): StageId {
   return 'edit';
 }
 
+function projectCardStatus(project: Project): {
+  badge: string;
+  badgeTone: '' | 'running' | 'success';
+  detail: string;
+} {
+  if (project.runState.isRunning) {
+    return {
+      badge: '运行中',
+      badgeTone: 'running',
+      detail: project.runState.currentStage ? `当前阶段 · ${STAGE_LABELS[project.runState.currentStage]}` : '当前阶段 · 排队中'
+    };
+  }
+
+  if (project.assets.finalVideo) {
+    return {
+      badge: '已完成',
+      badgeTone: 'success',
+      detail: '已导出最终成片'
+    };
+  }
+
+  return {
+    badge: '待处理',
+    badgeTone: '',
+    detail: `下一步 · ${STAGE_LABELS[inferProjectStageTab(project)]}`
+  };
+}
+
 export function App() {
   const [meta, setMeta] = useState<AppMeta | null>(null);
   const [activeTab, setActiveTab] = useState<MainTab>('projects');
   const [projectStageTab, setProjectStageTab] = useState<ProjectPanelTab>('script');
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [assetLibrarySection, setAssetLibrarySection] = useState<AssetLibrarySection>('outputs');
   const [assetFilter, setAssetFilter] = useState<'all' | AssetLibraryKind>('all');
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
@@ -503,10 +542,12 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [draft, setDraft] = useState<ProjectDraft | null>(null);
+  const [projectSettingsOpen, setProjectSettingsOpen] = useState(false);
   const [draftDirty, setDraftDirty] = useState(false);
   const [referencePromptDrafts, setReferencePromptDrafts] = useState<Record<string, string>>({});
   const [videoPromptDrafts, setVideoPromptDrafts] = useState<Record<string, string>>({});
   const [audioPromptDrafts, setAudioPromptDrafts] = useState<Record<string, ShotAudioPromptDraft>>({});
+  const [technicalPromptDrafts, setTechnicalPromptDrafts] = useState<Record<string, ShotTechnicalDraft>>({});
   const [createTitle, setCreateTitle] = useState('');
   const [createSource, setCreateSource] = useState('');
   const [createScriptMode, setCreateScriptMode] = useState<ScriptMode>(DEFAULT_SETTINGS.scriptMode);
@@ -518,6 +559,31 @@ export function App() {
   );
   const [notice, setNotice] = useState<string>('');
   const [pending, setPending] = useState<string>('');
+
+  function clearProjectWorkspace() {
+    setSelectedId(null);
+    setProject(null);
+    setDraft(null);
+    setProjectSettingsOpen(false);
+    setDraftDirty(false);
+    setReferencePromptDrafts({});
+    setVideoPromptDrafts({});
+    setAudioPromptDrafts({});
+    setTechnicalPromptDrafts({});
+  }
+
+  function handleOpenProject(projectId: string) {
+    setActiveTab('projects');
+    setProject(null);
+    setDraft(null);
+    setProjectSettingsOpen(false);
+    setDraftDirty(false);
+    setReferencePromptDrafts({});
+    setVideoPromptDrafts({});
+    setAudioPromptDrafts({});
+    setTechnicalPromptDrafts({});
+    setSelectedId(projectId);
+  }
 
   async function loadMeta() {
     setMeta(await requestJson<AppMeta>('/api/meta'));
@@ -536,15 +602,18 @@ export function App() {
 
     const nextSelectedId = preferredId ?? selectedId;
     if (!nextProjects.length) {
-      setSelectedId(null);
-      setProject(null);
-      setDraft(null);
+      clearProjectWorkspace();
       return;
     }
 
-    if (!nextSelectedId || !nextProjects.some((item) => item.id === nextSelectedId)) {
-      setSelectedId(nextProjects[0].id);
+    if (nextSelectedId && nextProjects.some((item) => item.id === nextSelectedId)) {
+      if (selectedId !== nextSelectedId) {
+        setSelectedId(nextSelectedId);
+      }
+      return;
     }
+
+    clearProjectWorkspace();
   }
 
   async function loadProject(projectId: string, silent = false, preserveDraft = false) {
@@ -590,6 +659,7 @@ export function App() {
     setReferencePromptDrafts({});
     setVideoPromptDrafts({});
     setAudioPromptDrafts({});
+    setTechnicalPromptDrafts({});
     void loadProject(selectedId, false, false);
   }, [selectedId]);
 
@@ -717,8 +787,10 @@ export function App() {
 
       setCreateTitle('');
       setCreateSource('');
+      setCreateProjectOpen(false);
       setNotice('项目已创建');
       await loadProjects(created.id);
+      setActiveTab('projects');
       setSelectedId(created.id);
       setProject(created);
       setDraft(createDraft(created));
@@ -730,7 +802,7 @@ export function App() {
     }
   }
 
-  async function handleSaveProject() {
+  async function handleSaveProject(options?: { closeAfterSave?: boolean }) {
     if (!selectedId || !draft) {
       return;
     }
@@ -745,6 +817,9 @@ export function App() {
       setProject(updated);
       setDraft(createDraft(updated));
       setDraftDirty(false);
+      if (options?.closeAfterSave) {
+        setProjectSettingsOpen(false);
+      }
       setNotice('项目参数已保存');
       await loadProjects(selectedId);
     } catch (error) {
@@ -922,6 +997,62 @@ export function App() {
     }
   }
 
+  async function handleSaveTechnicalPrompts(shotId: string) {
+    if (!selectedId || !project) {
+      return;
+    }
+
+    const shot = project.storyboard.find((item) => item.id === shotId);
+    if (!shot) {
+      setNotice('镜头不存在');
+      return;
+    }
+
+    const draft = technicalPromptDrafts[shotId];
+    const firstFramePrompt = (draft?.firstFramePrompt ?? shot.firstFramePrompt).trim();
+    const lastFramePrompt = (draft?.lastFramePrompt ?? shot.lastFramePrompt).trim();
+    const transitionHint = (draft?.transitionHint ?? shot.transitionHint).trim();
+
+    if (!firstFramePrompt) {
+      setNotice('首帧 Prompt 不能为空');
+      return;
+    }
+
+    if (!lastFramePrompt) {
+      setNotice('尾帧 Prompt 不能为空');
+      return;
+    }
+
+    if (!transitionHint) {
+      setNotice('转场提示不能为空');
+      return;
+    }
+
+    try {
+      setPending(`technical-prompts:${shotId}`);
+      const updated = await requestJson<Project>(`/api/projects/${selectedId}/storyboard/${shotId}/prompts`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          firstFramePrompt,
+          lastFramePrompt,
+          transitionHint
+        })
+      });
+      setProject(updated);
+      setTechnicalPromptDrafts((current) => {
+        const next = { ...current };
+        delete next[shotId];
+        return next;
+      });
+      setNotice('镜头技术面板已保存；请按提示重新生成受影响的图片、视频或成片');
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '保存镜头技术面板失败');
+    } finally {
+      setPending('');
+    }
+  }
+
   const createResolvedSettings = buildCreateProjectSettings(
     meta?.defaults ?? DEFAULT_SETTINGS,
     createAspectRatio,
@@ -955,17 +1086,15 @@ export function App() {
         ? sceneLibraryAssets
         : objectLibraryAssets;
   const referenceWorkflowReadyCount = meta
-    ? [
-        meta.envStatus.characterWorkflowExists,
-        meta.envStatus.sceneWorkflowExists,
-        meta.envStatus.objectWorkflowExists
-      ].filter(Boolean).length
+    ? [meta.envStatus.characterAssetWorkflowExists, meta.envStatus.textToImageWorkflowExists].filter(Boolean).length
     : 0;
   const productionWorkflowReadyCount = meta
-    ? [meta.envStatus.storyboardWorkflowExists, meta.envStatus.videoWorkflowExists].filter(Boolean).length
+    ? [meta.envStatus.referenceImageToImageWorkflowExists, meta.envStatus.imageToVideoWorkflowExists].filter(Boolean).length
     : 0;
   const ttsWorkflowReady = meta?.envStatus.ttsWorkflowExists ?? false;
   const draftResolutionPreset = draft ? inferResolutionPreset(draft.settings) : 'custom';
+  const draftSourceLabel = draft ? (draft.settings.scriptMode === 'generate' ? '剧情输入' : '待优化文本') : '项目输入';
+  const draftFormatSummary = draft ? createFormatSummary(draft.settings) : '未设置画幅';
   const imageMap = new Map(project?.assets.images.map((asset) => [asset.shotId, asset]) ?? []);
   const videoMap = new Map(project?.assets.videos.map((asset) => [asset.shotId, asset]) ?? []);
   const referenceItems = project ? allReferenceItems(project) : [];
@@ -1025,113 +1154,15 @@ export function App() {
       </section>
 
       {activeTab === 'projects' ? (
-        <main className="workspace">
-          <aside className="sidebar panel">
-            <section className="create-block">
-              <div className="section-head">
-                <h2>新建项目</h2>
-                <span>输入梗概、草稿或原始文案</span>
-              </div>
-              <label className="field">
-                <span>项目标题</span>
-                <input
-                  value={createTitle}
-                  onChange={(event) => setCreateTitle(event.target.value)}
-                  placeholder="例如：替身新娘复仇记"
-                />
-              </label>
-              <label className="field">
-                <span>剧本模式</span>
-                <select
-                  value={createScriptMode}
-                  onChange={(event) => setCreateScriptMode(event.target.value as ScriptMode)}
-                >
-                  {SCRIPT_MODES.map((mode) => (
-                    <option key={mode} value={mode}>
-                      {SCRIPT_MODE_LABELS[mode]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>{createScriptMode === 'generate' ? '剧情输入' : '待优化文本'}</span>
-                <textarea
-                  value={createSource}
-                  onChange={(event) => setCreateSource(event.target.value)}
-                  placeholder={scriptModeSourcePlaceholder(createScriptMode)}
-                  rows={9}
-                />
-              </label>
-              <div className="preset-grid">
-                <label className="field">
-                  <span>画幅比例</span>
-                  <select
-                    value={createAspectRatio}
-                    onChange={(event) => setCreateAspectRatio(event.target.value as ProjectSettings['aspectRatio'])}
-                  >
-                    {ASPECT_RATIOS.map((aspectRatio) => (
-                      <option key={aspectRatio} value={aspectRatio}>
-                        {ASPECT_RATIO_LABELS[aspectRatio]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>分辨率</span>
-                  <select
-                    value={createResolutionPreset}
-                    onChange={(event) => setCreateResolutionPreset(event.target.value as ResolutionPresetId)}
-                  >
-                    {RESOLUTION_PRESETS.map((preset) => (
-                      <option key={preset.id} value={preset.id}>
-                        {preset.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <div className="format-preview">{createFormatSummary(createResolvedSettings)}</div>
-              <button
-                className="button primary"
-                disabled={pending === 'create' || !createSource.trim()}
-                onClick={() => void handleCreateProject()}
-              >
-                {pending === 'create' ? '创建中...' : '创建项目'}
-              </button>
-            </section>
-
-            <section className="project-list">
-              <div className="section-head">
-                <h2>项目列表</h2>
-                <span>{projects.length} 个项目</span>
-              </div>
-              {projects.length ? (
-                projects.map((item) => (
-                  <button
-                    key={item.id}
-                    className={`project-card ${selectedId === item.id ? 'active' : ''}`}
-                    onClick={() => setSelectedId(item.id)}
-                  >
-                    <strong>{item.title}</strong>
-                    <span>
-                      {item.runState.isRunning
-                        ? `进行中: ${item.runState.currentStage ? STAGE_LABELS[item.runState.currentStage] : '排队'}`
-                        : '空闲'}
-                    </span>
-                    <small>{formatTime(item.updatedAt)}</small>
-                  </button>
-                ))
-              ) : (
-                <div className="empty-card">还没有项目，先在上方创建一个。</div>
-              )}
-            </section>
-          </aside>
-
+        <main className="workspace workspace-single">
           <section className="main panel">
-            {project && draft ? (
+            {selectedId && project && draft && project.id === selectedId ? (
               <>
                 <div className="project-header">
-                  <div>
+                  <div className="project-header-copy">
+                    <button className="button ghost project-back-button" onClick={() => clearProjectWorkspace()} type="button">
+                      返回项目列表
+                    </button>
                     <span className="eyebrow">Project Workspace</span>
                     <h2>{project.title}</h2>
                     <p>
@@ -1145,6 +1176,13 @@ export function App() {
                       type="button"
                     >
                       执行日志
+                    </button>
+                    <button
+                      className={`button ghost ${projectSettingsOpen ? 'active-view' : ''}`}
+                      onClick={() => setProjectSettingsOpen(true)}
+                      type="button"
+                    >
+                      项目设置
                     </button>
                     <button
                       className="button ghost"
@@ -1168,7 +1206,7 @@ export function App() {
                     <>
                       <div className="status-item">
                         <span>参考资产工作流</span>
-                        <strong>{referenceWorkflowReadyCount}/3 已就绪</strong>
+                        <strong>{referenceWorkflowReadyCount}/2 已就绪</strong>
                       </div>
                       <div className="status-item">
                         <span>分镜/视频工作流</span>
@@ -1266,332 +1304,50 @@ export function App() {
 
                 {projectStageTab === 'script' ? (
                   <section className="content-grid">
-                    <article className="panel inset">
-                    <div className="section-head">
-                      <h3>项目设定</h3>
-                      <span>保存后用于后续所有阶段</span>
-                    </div>
-                    <div className="form-grid">
-                      <label className="field span-2">
-                        <span>项目标题</span>
-                        <input
-                          value={draft.title}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current ? { ...current, title: event.target.value } : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field span-2">
-                        <span>{draft.settings.scriptMode === 'generate' ? '剧情输入' : '待优化文本'}</span>
-                        <textarea
-                          rows={8}
-                          value={draft.sourceText}
-                          placeholder={scriptModeSourcePlaceholder(draft.settings.scriptMode)}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current ? { ...current, sourceText: event.target.value } : current;
-                            })
-                          }
-                        />
-                      </label>
-
-                      <label className="field">
-                        <span>剧本模式</span>
-                        <select
-                          value={draft.settings.scriptMode}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: {
-                                      ...current.settings,
-                                      scriptMode: event.target.value as ScriptMode
-                                    }
-                                  }
-                                : current;
-                            })
-                          }
-                        >
-                          {SCRIPT_MODES.map((mode) => (
-                            <option key={mode} value={mode}>
-                              {SCRIPT_MODE_LABELS[mode]}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-
-                      <label className="field">
-                        <span>语气风格</span>
-                        <input
-                          value={draft.settings.tone}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? { ...current, settings: { ...current.settings, tone: event.target.value } }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>受众</span>
-                        <input
-                          value={draft.settings.audience}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: { ...current.settings, audience: event.target.value }
-                                  }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field span-2">
-                        <span>视觉风格</span>
-                        <textarea
-                          rows={3}
-                          value={draft.settings.visualStyle}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: { ...current.settings, visualStyle: event.target.value }
-                                  }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field span-2">
-                        <span>反向提示词</span>
-                        <textarea
-                          rows={2}
-                          value={draft.settings.negativePrompt}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: { ...current.settings, negativePrompt: event.target.value }
-                                  }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>语言</span>
-                        <input
-                          value={draft.settings.language}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? { ...current, settings: { ...current.settings, language: event.target.value } }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>画幅</span>
-                        <select
-                          value={draft.settings.aspectRatio}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: applyAspectRatio(
-                                      current.settings,
-                                      event.target.value as ProjectSettings['aspectRatio']
-                                    )
-                                  }
-                                : current;
-                            })
-                          }
-                        >
-                          {ASPECT_RATIOS.map((aspectRatio) => (
-                            <option key={aspectRatio} value={aspectRatio}>
-                              {ASPECT_RATIO_LABELS[aspectRatio]}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="field">
-                        <span>分辨率</span>
-                        <select
-                          value={draftResolutionPreset}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              if (!current) {
-                                return current;
-                              }
-
-                              const nextPreset = event.target.value as ResolutionSelectValue;
-                              if (nextPreset === 'custom') {
-                                return current;
-                              }
-
-                              setDraftDirty(true);
-                              return {
-                                ...current,
-                                settings: applyResolutionPreset(current.settings, nextPreset)
-                              };
-                            })
-                          }
-                        >
-                          {RESOLUTION_PRESETS.map((preset) => (
-                            <option key={preset.id} value={preset.id}>
-                              {preset.label}
-                            </option>
-                          ))}
-                          <option value="custom">自定义</option>
-                        </select>
-                      </label>
-                      <label className="field">
-                        <span>图片宽度</span>
-                        <input
-                          type="number"
-                          value={draft.settings.imageWidth}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: {
-                                      ...current.settings,
-                                      imageWidth: Number(event.target.value) || current.settings.imageWidth
-                                    }
-                                  }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>图片高度</span>
-                        <input
-                          type="number"
-                          value={draft.settings.imageHeight}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: {
-                                      ...current.settings,
-                                      imageHeight: Number(event.target.value) || current.settings.imageHeight
-                                    }
-                                  }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>视频宽度</span>
-                        <input
-                          type="number"
-                          value={draft.settings.videoWidth}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: {
-                                      ...current.settings,
-                                      videoWidth: Number(event.target.value) || current.settings.videoWidth
-                                    }
-                                  }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>视频高度</span>
-                        <input
-                          type="number"
-                          value={draft.settings.videoHeight}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: {
-                                      ...current.settings,
-                                      videoHeight: Number(event.target.value) || current.settings.videoHeight
-                                    }
-                                  }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>FPS</span>
-                        <input
-                          type="number"
-                          value={draft.settings.fps}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: {
-                                      ...current.settings,
-                                      fps: Number(event.target.value) || current.settings.fps
-                                    }
-                                  }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="field">
-                        <span>默认镜头秒数</span>
-                        <input
-                          type="number"
-                          value={draft.settings.defaultShotDurationSeconds}
-                          onChange={(event) =>
-                            setDraft((current) => {
-                              setDraftDirty(true);
-                              return current
-                                ? {
-                                    ...current,
-                                    settings: {
-                                      ...current.settings,
-                                      defaultShotDurationSeconds:
-                                        Number(event.target.value) || current.settings.defaultShotDurationSeconds
-                                    }
-                                  }
-                                : current;
-                            })
-                          }
-                        />
-                      </label>
-                    </div>
+                    <article className="panel inset project-script-summary">
+                      <div className="section-head">
+                        <h3>剧本输入</h3>
+                        <button className="button ghost mini-button" onClick={() => setProjectSettingsOpen(true)} type="button">
+                          编辑项目设置
+                        </button>
+                      </div>
+                      <div className="status-strip">
+                        <div className="status-item">
+                          <span>剧本模式</span>
+                          <strong>{SCRIPT_MODE_LABELS[draft.settings.scriptMode]}</strong>
+                        </div>
+                        <div className="status-item">
+                          <span>输出语言</span>
+                          <strong>{draft.settings.language}</strong>
+                        </div>
+                        <div className="status-item">
+                          <span>画幅与分辨率</span>
+                          <strong>{draftFormatSummary}</strong>
+                        </div>
+                        <div className="status-item">
+                          <span>默认镜头时长</span>
+                          <strong>{draft.settings.defaultShotDurationSeconds}s</strong>
+                        </div>
+                        <div className="status-item">
+                          <span>单次视频上限</span>
+                          <strong>{draft.settings.maxVideoSegmentDurationSeconds}s</strong>
+                        </div>
+                      </div>
+                      <div className="prompt-block">
+                        <h5>创作方向</h5>
+                        <p className="multiline-text">
+                          {`受众：${draft.settings.audience}
+语气：${draft.settings.tone}
+视觉：${draft.settings.visualStyle}
+反向提示词：${draft.settings.negativePrompt}`}
+                        </p>
+                      </div>
+                      <div className="prompt-block">
+                        <h5>{draftSourceLabel}</h5>
+                        <p className="multiline-text">
+                          {draft.sourceText.trim() || '当前项目还没有输入内容，请在“项目设置”里补充剧情素材或待优化文本。'}
+                        </p>
+                      </div>
                     </article>
 
                     <article className="panel inset">
@@ -1645,7 +1401,7 @@ export function App() {
                     </div>
                     <div className="status-item">
                       <span>工作流就绪</span>
-                      <strong>{referenceWorkflowReadyCount}/3</strong>
+                      <strong>{referenceWorkflowReadyCount}/2</strong>
                     </div>
                   </div>
                   <div className="reference-sections">
@@ -1758,7 +1514,7 @@ export function App() {
                               <strong>
                                 S{shot.sceneNumber} · #{shot.shotNumber}
                               </strong>
-                              <span>{shot.durationSeconds}s</span>
+                              <span>{formatShotTimeline(shot)}</span>
                             </div>
                             <h4>{shot.title}</h4>
                             <p>{shot.purpose}</p>
@@ -1783,6 +1539,10 @@ export function App() {
                             <div className="prompt-block">
                               <h5>首帧描述</h5>
                               <p>{shot.firstFramePrompt}</p>
+                            </div>
+                            <div className="prompt-block">
+                              <h5>尾帧描述</h5>
+                              <p>{shot.lastFramePrompt}</p>
                             </div>
                             <div className="prompt-block">
                               <h5>视频描述</h5>
@@ -1814,7 +1574,7 @@ export function App() {
                       </div>
                       <div className="status-item">
                         <span>图片工作流</span>
-                        <strong>{meta?.envStatus.storyboardWorkflowExists ? '已就绪' : '未配置'}</strong>
+                        <strong>{meta?.envStatus.referenceImageToImageWorkflowExists ? '已就绪' : '未配置'}</strong>
                       </div>
                     </div>
                     {project.storyboard.length ? (
@@ -1873,6 +1633,16 @@ export function App() {
                           const videoPromptDirty = videoPromptValue.trim() !== shot.videoPrompt.trim();
                           const videoPromptPending = pending === `video-prompt:${shot.id}`;
                           const audioPromptDraft = audioPromptDrafts[shot.id];
+                          const technicalPromptDraft = technicalPromptDrafts[shot.id];
+                          const firstFramePromptValue =
+                            technicalPromptDraft?.firstFramePrompt ?? shot.firstFramePrompt;
+                          const lastFramePromptValue = technicalPromptDraft?.lastFramePrompt ?? shot.lastFramePrompt;
+                          const transitionHintValue = technicalPromptDraft?.transitionHint ?? shot.transitionHint;
+                          const technicalPromptDirty =
+                            firstFramePromptValue.trim() !== shot.firstFramePrompt.trim() ||
+                            lastFramePromptValue.trim() !== shot.lastFramePrompt.trim() ||
+                            transitionHintValue.trim() !== shot.transitionHint.trim();
+                          const technicalPromptPending = pending === `technical-prompts:${shot.id}`;
                           const backgroundSoundPromptValue =
                             audioPromptDraft?.backgroundSoundPrompt ?? shot.backgroundSoundPrompt;
                           const speechPromptValue = audioPromptDraft?.speechPrompt ?? shot.speechPrompt;
@@ -1883,12 +1653,12 @@ export function App() {
 
                           return (
                             <article key={shot.id} className="shot-card">
-                              <div className="shot-head">
-                                <strong>
-                                  S{shot.sceneNumber} · #{shot.shotNumber}
-                                </strong>
-                                <span>{shot.durationSeconds}s</span>
-                              </div>
+                            <div className="shot-head">
+                              <strong>
+                                S{shot.sceneNumber} · #{shot.shotNumber}
+                              </strong>
+                                <span>{formatShotTimeline(shot)}</span>
+                            </div>
                               <h4>{shot.title}</h4>
                               <p>{shot.purpose}</p>
                               <dl className="shot-meta">
@@ -1937,6 +1707,82 @@ export function App() {
                                   }
                                   placeholder="输入这个镜头的视频生成 Prompt"
                                 />
+                              </div>
+                              <div className="prompt-block">
+                                <div className="prompt-block-head">
+                                  <h5>镜头技术面板</h5>
+                                  <button
+                                    className="button ghost mini-button"
+                                    disabled={
+                                      Boolean(project.runState.isRunning) ||
+                                      technicalPromptPending ||
+                                      !technicalPromptDirty ||
+                                      !firstFramePromptValue.trim() ||
+                                      !lastFramePromptValue.trim() ||
+                                      !transitionHintValue.trim()
+                                    }
+                                    onClick={() => void handleSaveTechnicalPrompts(shot.id)}
+                                  >
+                                    {technicalPromptPending ? '保存中...' : '保存技术面板'}
+                                  </button>
+                                </div>
+                                <label className="prompt-subfield">
+                                  <span>首帧 Prompt</span>
+                                  <textarea
+                                    className="prompt-editor"
+                                    rows={5}
+                                    value={firstFramePromptValue}
+                                    onChange={(event) =>
+                                      setTechnicalPromptDrafts((current) => ({
+                                        ...current,
+                                        [shot.id]: {
+                                          firstFramePrompt: event.target.value,
+                                          lastFramePrompt: current[shot.id]?.lastFramePrompt ?? shot.lastFramePrompt,
+                                          transitionHint: current[shot.id]?.transitionHint ?? shot.transitionHint
+                                        }
+                                      }))
+                                    }
+                                    placeholder="输入这个镜头的首帧 Prompt"
+                                  />
+                                </label>
+                                <label className="prompt-subfield">
+                                  <span>尾帧 Prompt</span>
+                                  <textarea
+                                    className="prompt-editor"
+                                    rows={5}
+                                    value={lastFramePromptValue}
+                                    onChange={(event) =>
+                                      setTechnicalPromptDrafts((current) => ({
+                                        ...current,
+                                        [shot.id]: {
+                                          firstFramePrompt:
+                                            current[shot.id]?.firstFramePrompt ?? shot.firstFramePrompt,
+                                          lastFramePrompt: event.target.value,
+                                          transitionHint: current[shot.id]?.transitionHint ?? shot.transitionHint
+                                        }
+                                      }))
+                                    }
+                                    placeholder="输入这个镜头的尾帧 Prompt"
+                                  />
+                                </label>
+                                <label className="prompt-subfield">
+                                  <span>转场提示</span>
+                                  <input
+                                    value={transitionHintValue}
+                                    onChange={(event) =>
+                                      setTechnicalPromptDrafts((current) => ({
+                                        ...current,
+                                        [shot.id]: {
+                                          firstFramePrompt:
+                                            current[shot.id]?.firstFramePrompt ?? shot.firstFramePrompt,
+                                          lastFramePrompt: current[shot.id]?.lastFramePrompt ?? shot.lastFramePrompt,
+                                          transitionHint: event.target.value
+                                        }
+                                      }))
+                                    }
+                                    placeholder="例如：cut / match cut / fade in"
+                                  />
+                                </label>
                               </div>
                               <div className="prompt-block">
                                 <div className="prompt-block-head">
@@ -2087,11 +1933,57 @@ export function App() {
                 ) : null}
               </>
             ) : (
-              <div className="empty-state">
-                <span className="eyebrow">Ready</span>
-                <h2>先创建一个短剧项目</h2>
-                <p>左侧输入文字素材后创建项目，随后即可按阶段执行或直接跑完整条生产线。</p>
-              </div>
+              <section className="project-browser">
+                <div className="project-browser-head">
+                  <div>
+                    <span className="eyebrow">Projects</span>
+                    <h2>项目列表</h2>
+                    <p>所有项目都在这里平铺展示。点击任一项目卡片后，整个项目 tab 会切换到该项目的工作区。</p>
+                  </div>
+                  <span className="project-browser-count">{projects.length} 个项目</span>
+                </div>
+
+                <div className="project-browser-grid">
+                  <button className="project-card project-card-create" onClick={() => setCreateProjectOpen(true)} type="button">
+                    <div className="project-card-top">
+                      <span className="pill success">快速开始</span>
+                      <small>New Project</small>
+                    </div>
+                    <div className="project-card-body">
+                      <strong>新增项目</strong>
+                      <p>打开创建菜单，填写素材、剧本模式、画幅和分辨率，创建后直接进入项目工作区。</p>
+                    </div>
+                    <div className="project-card-meta">
+                      <span>支持先设定输入文本，再逐阶段推进完整生产流程。</span>
+                      <small>创建后可在项目设置中继续调整参数</small>
+                    </div>
+                  </button>
+
+                  {projects.map((item) => {
+                    const status = projectCardStatus(item);
+
+                    return (
+                      <button key={item.id} className="project-card" onClick={() => handleOpenProject(item.id)} type="button">
+                        <div className="project-card-top">
+                          <span className={`pill ${status.badgeTone}`}>{status.badge}</span>
+                          <small>{SCRIPT_MODE_LABELS[item.settings.scriptMode]}</small>
+                        </div>
+                        <div className="project-card-body">
+                          <strong>{item.title}</strong>
+                          <p>{createFormatSummary(item.settings)}</p>
+                        </div>
+                        <div className="project-card-meta">
+                          <span>{status.detail}</span>
+                          <span>{`分镜 ${item.storyboard.length} · 图片 ${item.assets.images.length} · 视频 ${item.assets.videos.length}`}</span>
+                          <small>{`更新于 ${formatTime(item.updatedAt)}`}</small>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {!projects.length ? <div className="empty-card">还没有项目，先创建一个。</div> : null}
+              </section>
             )}
           </section>
         </main>
@@ -2211,10 +2103,7 @@ export function App() {
                             <div className="library-card-actions">
                               <button
                                 className="button ghost mini-button"
-                                onClick={() => {
-                                  setSelectedId(asset.projectId);
-                                  setActiveTab('projects');
-                                }}
+                                onClick={() => handleOpenProject(asset.projectId)}
                               >
                                 打开项目
                               </button>
@@ -2256,10 +2145,7 @@ export function App() {
                             <div className="library-card-actions">
                               <button
                                 className="button ghost mini-button"
-                                onClick={() => {
-                                  setSelectedId(asset.projectId);
-                                  setActiveTab('projects');
-                                }}
+                                onClick={() => handleOpenProject(asset.projectId)}
                               >
                                 打开项目
                               </button>
@@ -2305,6 +2191,538 @@ export function App() {
           setSettingsDirty(true);
         }}
       />
+
+      {projectSettingsOpen && draft && project ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (pending !== 'save') {
+              setProjectSettingsOpen(false);
+            }
+          }}
+        >
+          <div
+            className="modal-panel panel"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div className="modal-header">
+              <div>
+                <span className="eyebrow">Project Settings</span>
+                <h2>项目设置</h2>
+                <p>统一管理项目标题、输入素材和生成参数。保存后会影响后续所有阶段。</p>
+              </div>
+              <button
+                className="button ghost"
+                disabled={pending === 'save'}
+                onClick={() => setProjectSettingsOpen(false)}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+
+            <section className="settings-section">
+              <div className="section-head">
+                <h3>项目信息</h3>
+                <span>这里的内容会直接影响剧本生成入口和项目展示。</span>
+              </div>
+              <div className="form-grid">
+                <label className="field span-2">
+                  <span>项目标题</span>
+                  <input
+                    value={draft.title}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current ? { ...current, title: event.target.value } : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>剧本模式</span>
+                  <select
+                    value={draft.settings.scriptMode}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                scriptMode: event.target.value as ScriptMode
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  >
+                    {SCRIPT_MODES.map((mode) => (
+                      <option key={mode} value={mode}>
+                        {SCRIPT_MODE_LABELS[mode]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="format-preview">{draftFormatSummary}</div>
+                <label className="field span-2">
+                  <span>{draftSourceLabel}</span>
+                  <textarea
+                    rows={10}
+                    value={draft.sourceText}
+                    placeholder={scriptModeSourcePlaceholder(draft.settings.scriptMode)}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current ? { ...current, sourceText: event.target.value } : current;
+                      })
+                    }
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="settings-section">
+              <div className="section-head">
+                <h3>生成参数</h3>
+                <span>用于剧本、资产、分镜、图片和视频阶段的统一默认参数。</span>
+              </div>
+              <div className="form-grid">
+                <label className="field">
+                  <span>语气风格</span>
+                  <input
+                    value={draft.settings.tone}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? { ...current, settings: { ...current.settings, tone: event.target.value } }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>受众</span>
+                  <input
+                    value={draft.settings.audience}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: { ...current.settings, audience: event.target.value }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field span-2">
+                  <span>视觉风格</span>
+                  <textarea
+                    rows={3}
+                    value={draft.settings.visualStyle}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: { ...current.settings, visualStyle: event.target.value }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field span-2">
+                  <span>反向提示词</span>
+                  <textarea
+                    rows={2}
+                    value={draft.settings.negativePrompt}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: { ...current.settings, negativePrompt: event.target.value }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>语言</span>
+                  <input
+                    value={draft.settings.language}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? { ...current, settings: { ...current.settings, language: event.target.value } }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>画幅</span>
+                  <select
+                    value={draft.settings.aspectRatio}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: applyAspectRatio(
+                                current.settings,
+                                event.target.value as ProjectSettings['aspectRatio']
+                              )
+                            }
+                          : current;
+                      })
+                    }
+                  >
+                    {ASPECT_RATIOS.map((aspectRatio) => (
+                      <option key={aspectRatio} value={aspectRatio}>
+                        {ASPECT_RATIO_LABELS[aspectRatio]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>分辨率</span>
+                  <select
+                    value={draftResolutionPreset}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        if (!current) {
+                          return current;
+                        }
+
+                        const nextPreset = event.target.value as ResolutionSelectValue;
+                        if (nextPreset === 'custom') {
+                          return current;
+                        }
+
+                        setDraftDirty(true);
+                        return {
+                          ...current,
+                          settings: applyResolutionPreset(current.settings, nextPreset)
+                        };
+                      })
+                    }
+                  >
+                    {RESOLUTION_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>图片宽度</span>
+                  <input
+                    type="number"
+                    value={draft.settings.imageWidth}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                imageWidth: Number(event.target.value) || current.settings.imageWidth
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>图片高度</span>
+                  <input
+                    type="number"
+                    value={draft.settings.imageHeight}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                imageHeight: Number(event.target.value) || current.settings.imageHeight
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>视频宽度</span>
+                  <input
+                    type="number"
+                    value={draft.settings.videoWidth}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                videoWidth: Number(event.target.value) || current.settings.videoWidth
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>视频高度</span>
+                  <input
+                    type="number"
+                    value={draft.settings.videoHeight}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                videoHeight: Number(event.target.value) || current.settings.videoHeight
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>FPS</span>
+                  <input
+                    type="number"
+                    value={draft.settings.fps}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                fps: Number(event.target.value) || current.settings.fps
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>默认镜头秒数</span>
+                  <input
+                    type="number"
+                    value={draft.settings.defaultShotDurationSeconds}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                defaultShotDurationSeconds:
+                                  Number(event.target.value) || current.settings.defaultShotDurationSeconds
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>单次生成最长视频秒数</span>
+                  <input
+                    type="number"
+                    value={draft.settings.maxVideoSegmentDurationSeconds}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                maxVideoSegmentDurationSeconds:
+                                  Number(event.target.value) || current.settings.maxVideoSegmentDurationSeconds
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+              </div>
+            </section>
+
+            <div className="modal-actions">
+              <span className="settings-dirty">{draftDirty ? '有未保存修改' : '项目设置已同步'}</span>
+              <div className="modal-buttons">
+                <button
+                  className="button ghost"
+                  disabled={pending === 'save'}
+                  onClick={() => setProjectSettingsOpen(false)}
+                  type="button"
+                >
+                  关闭
+                </button>
+                <button
+                  className="button primary"
+                  disabled={Boolean(project.runState.isRunning) || pending === 'save'}
+                  onClick={() => void handleSaveProject({ closeAfterSave: true })}
+                  type="button"
+                >
+                  {pending === 'save' ? '保存中...' : '保存项目设置'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {createProjectOpen ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (pending !== 'create') {
+              setCreateProjectOpen(false);
+            }
+          }}
+        >
+          <div
+            className="modal-panel panel"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div className="modal-header">
+              <div>
+                <span className="eyebrow">New Project</span>
+                <h2>新增项目</h2>
+                <p>在这里填写素材和基础参数，确认后创建项目。</p>
+              </div>
+              <button
+                className="button ghost"
+                disabled={pending === 'create'}
+                onClick={() => setCreateProjectOpen(false)}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+
+            <section className="settings-section">
+              <div className="form-grid">
+                <label className="field span-2">
+                  <span>项目标题</span>
+                  <input
+                    value={createTitle}
+                    onChange={(event) => setCreateTitle(event.target.value)}
+                    placeholder="例如：替身新娘复仇记"
+                  />
+                </label>
+                <label className="field">
+                  <span>剧本模式</span>
+                  <select
+                    value={createScriptMode}
+                    onChange={(event) => setCreateScriptMode(event.target.value as ScriptMode)}
+                  >
+                    {SCRIPT_MODES.map((mode) => (
+                      <option key={mode} value={mode}>
+                        {SCRIPT_MODE_LABELS[mode]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>画幅比例</span>
+                  <select
+                    value={createAspectRatio}
+                    onChange={(event) => setCreateAspectRatio(event.target.value as ProjectSettings['aspectRatio'])}
+                  >
+                    {ASPECT_RATIOS.map((aspectRatio) => (
+                      <option key={aspectRatio} value={aspectRatio}>
+                        {ASPECT_RATIO_LABELS[aspectRatio]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field span-2">
+                  <span>{createScriptMode === 'generate' ? '剧情输入' : '待优化文本'}</span>
+                  <textarea
+                    value={createSource}
+                    onChange={(event) => setCreateSource(event.target.value)}
+                    placeholder={scriptModeSourcePlaceholder(createScriptMode)}
+                    rows={10}
+                  />
+                </label>
+                <label className="field">
+                  <span>分辨率</span>
+                  <select
+                    value={createResolutionPreset}
+                    onChange={(event) => setCreateResolutionPreset(event.target.value as ResolutionPresetId)}
+                  >
+                    {RESOLUTION_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="format-preview span-2">{createFormatSummary(createResolvedSettings)}</div>
+              </div>
+            </section>
+
+            <div className="modal-actions">
+              <span className="settings-dirty">创建后可在项目页继续调整参数。</span>
+              <div className="modal-buttons">
+                <button
+                  className="button ghost"
+                  disabled={pending === 'create'}
+                  onClick={() => setCreateProjectOpen(false)}
+                  type="button"
+                >
+                  取消
+                </button>
+                <button
+                  className="button primary"
+                  disabled={pending === 'create' || !createSource.trim()}
+                  onClick={() => void handleCreateProject()}
+                  type="button"
+                >
+                  {pending === 'create' ? '创建中...' : '创建项目'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

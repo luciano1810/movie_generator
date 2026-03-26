@@ -7,7 +7,7 @@ import {
   createEmptyReferenceLibrary,
   createStageStateMap,
   normalizeSettings,
-  normalizeStoryboardShot
+  normalizeStoryboardShots
 } from '../shared/types.js';
 import { appConfig, toStorageRelative } from './config.js';
 
@@ -72,7 +72,7 @@ function hydrateProject(project: Project): Project {
     ...project,
     settings,
     stages,
-    storyboard: (project.storyboard ?? []).map((shot, index) => normalizeStoryboardShot(shot, index, settings)),
+    storyboard: normalizeStoryboardShots(project.storyboard ?? [], settings),
     assets: {
       images: project.assets?.images ?? [],
       videos: project.assets?.videos ?? [],

@@ -36,11 +36,12 @@ export function SettingsDialog(props: SettingsDialogProps) {
   }
 
   const workflowStatusMap = {
-    character: status?.characterWorkflowExists ?? false,
-    scene: status?.sceneWorkflowExists ?? false,
-    object: status?.objectWorkflowExists ?? false,
-    video: status?.videoWorkflowExists ?? false,
-    storyboard: status?.storyboardWorkflowExists ?? false,
+    character_asset: status?.characterAssetWorkflowExists ?? false,
+    text_to_image: status?.textToImageWorkflowExists ?? false,
+    reference_image_to_image: status?.referenceImageToImageWorkflowExists ?? false,
+    image_edit: status?.imageEditWorkflowExists ?? false,
+    text_to_video: status?.textToVideoWorkflowExists ?? false,
+    image_to_video: status?.imageToVideoWorkflowExists ?? false,
     tts: status?.ttsWorkflowExists ?? false
   } satisfies Record<ComfyWorkflowType, boolean>;
 
@@ -49,49 +50,48 @@ export function SettingsDialog(props: SettingsDialogProps) {
     label: string;
     description: string;
     workflowPlaceholder: string;
-    checkpointPlaceholder: string;
   }> = [
     {
-      key: 'character',
-      label: '人物资产生成',
+      key: 'character_asset',
+      label: '人物资产',
       description: '用于角色参考图生成',
-      workflowPlaceholder: '/absolute/path/to/character-workflow.json',
-      checkpointPlaceholder: 'character-model.safetensors'
+      workflowPlaceholder: '/absolute/path/to/character-asset-workflow.json'
     },
     {
-      key: 'scene',
-      label: '场景资产生成',
-      description: '用于场景参考图生成',
-      workflowPlaceholder: '/absolute/path/to/scene-workflow.json',
-      checkpointPlaceholder: 'scene-model.safetensors'
+      key: 'text_to_image',
+      label: '文生图',
+      description: '用于纯文本驱动的图片生成，比如场景或物品资产',
+      workflowPlaceholder: '/absolute/path/to/text-to-image-workflow.json'
     },
     {
-      key: 'object',
-      label: '物品资产生成',
-      description: '用于物品参考图生成',
-      workflowPlaceholder: '/absolute/path/to/object-workflow.json',
-      checkpointPlaceholder: 'object-model.safetensors'
+      key: 'reference_image_to_image',
+      label: '参考图生图',
+      description: '用于带参考资产约束的首帧图片生成',
+      workflowPlaceholder: '/absolute/path/to/reference-image-to-image-workflow.json'
     },
     {
-      key: 'video',
-      label: '视频生成',
-      description: '用于基于首帧图生成视频片段',
-      workflowPlaceholder: '/absolute/path/to/video-workflow.json',
-      checkpointPlaceholder: 'video-model.safetensors'
+      key: 'image_edit',
+      label: '图片编辑',
+      description: '用于局部重绘、修图或后续图片编辑流程',
+      workflowPlaceholder: '/absolute/path/to/image-edit-workflow.json'
     },
     {
-      key: 'storyboard',
-      label: '分镜图片生成',
-      description: '用于分镜阶段首帧图生成',
-      workflowPlaceholder: '/absolute/path/to/storyboard-workflow.json',
-      checkpointPlaceholder: 'storyboard-model.safetensors'
+      key: 'text_to_video',
+      label: '文生视频',
+      description: '用于纯文本驱动的视频生成',
+      workflowPlaceholder: '/absolute/path/to/text-to-video-workflow.json'
+    },
+    {
+      key: 'image_to_video',
+      label: '图生视频',
+      description: '用于基于首帧图或参考图生成视频片段',
+      workflowPlaceholder: '/absolute/path/to/image-to-video-workflow.json'
     },
     {
       key: 'tts',
-      label: 'TTS / 声音生成',
+      label: 'TTS 工作流',
       description: '可选；用于台词、旁白或声音生成。不配置时会回退为把声音 prompt 合并到视频 prompt',
-      workflowPlaceholder: '/absolute/path/to/tts-workflow.json',
-      checkpointPlaceholder: 'tts-model.safetensors'
+      workflowPlaceholder: '/absolute/path/to/tts-workflow.json'
     }
   ];
 
@@ -228,7 +228,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
         <section className="settings-section">
           <div className="section-head">
             <h3>ComfyUI API</h3>
-            <span>统一地址，六类任务分别绑定各自工作流和检查点，其中 TTS 为可选项</span>
+            <span>统一地址，七类任务分别绑定各自工作流；工作流内自行固定 checkpoint</span>
           </div>
           <div className="form-grid">
             <label className="field span-2">
@@ -305,18 +305,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
                           })
                         }
                         placeholder={workflow.workflowPlaceholder}
-                      />
-                    </label>
-                    <label className="field span-2">
-                      <span>检查点名称</span>
-                      <input
-                        value={workflowDraft.checkpointName}
-                        onChange={(event) =>
-                          updateWorkflow(workflow.key, {
-                            checkpointName: event.target.value
-                          })
-                        }
-                        placeholder={workflow.checkpointPlaceholder}
                       />
                     </label>
                   </div>

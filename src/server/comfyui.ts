@@ -9,7 +9,13 @@ export interface ComfyOutputFile {
   type: string;
 }
 
-type TemplateVariable = string | number | boolean;
+export type TemplateVariable =
+  | string
+  | number
+  | boolean
+  | null
+  | TemplateVariable[]
+  | { [key: string]: TemplateVariable };
 
 function fillTemplateValue(value: unknown, variables: Record<string, TemplateVariable>): unknown {
   if (Array.isArray(value)) {

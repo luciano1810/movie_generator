@@ -1,13 +1,17 @@
 {
-  "note": "请将本文件替换为你从 ComfyUI 导出的 API Workflow JSON，并保留 {{input_image}} {{prompt}} {{negative_prompt}} {{output_prefix}} 等变量占位符。",
+  "note": "请将本文件替换为你从 ComfyUI 导出的 API Workflow JSON，并在工作流内部自行固定 checkpoint；保留 {{input_image}} {{last_frame_image}} {{last_frame_prompt}} {{reference_context}} {{reference_images}} {{reference_assets}} {{prompt}} {{negative_prompt}} {{output_prefix}} 等变量占位符。",
   "workflow_placeholder": {
     "class_type": "ReplaceMeWithYourVideoWorkflow",
     "inputs": {
       "input_image": "{{input_image}}",
+      "last_frame_image": "{{last_frame_image}}",
+      "last_frame_prompt": "{{last_frame_prompt}}",
+      "reference_context": "{{reference_context}}",
+      "reference_images": "{{reference_images}}",
+      "reference_assets": "{{reference_assets}}",
       "prompt": "{{prompt}}",
       "negative_prompt": "{{negative_prompt}}",
       "output_prefix": "{{output_prefix}}",
-      "checkpoint_name": "{{checkpoint_name}}",
       "fps": "{{fps}}",
       "duration_seconds": "{{duration_seconds}}"
     }
