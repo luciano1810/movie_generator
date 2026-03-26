@@ -116,6 +116,24 @@ function createReferenceItem(
   };
 }
 
+function normalizeSceneReferencePrompt(
+  value: unknown,
+  settings: ProjectSettings,
+  fallbackName: string
+): string {
+  const base = normalizeString(
+    value,
+    `${settings.visualStyle}，${fallbackName}，场景空间设定图，空镜环境，无人物，无剧情行为，无事件瞬间，突出建筑结构、空间层次、材质、光线与氛围`
+  );
+
+  const requiredHints = ['空镜环境', '无人物', '无剧情行为', '无事件瞬间'];
+  if (requiredHints.every((hint) => base.includes(hint))) {
+    return base;
+  }
+
+  return `${base}。场景参考图要求：空镜环境，无人物，无剧情行为，无事件瞬间，仅表现可复用的空间结构、材质、灯光与氛围。`;
+}
+
 async function requestJson<T>(messages: ChatCompletionMessageParam[]): Promise<T> {
   const client = createClient();
   const settings = getAppSettings();
@@ -198,9 +216,11 @@ export async function extractReferenceLibraryFromScript(
 1. generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一
 2. generationPrompt 需要体现视觉风格：${settings.visualStyle}
 3. 人物 prompt 要强调外观、服装、年龄感、表情基调、镜头视角
-4. 场景 prompt 要强调空间结构、时间、光线、氛围、机位
-5. 物品 prompt 要强调材质、状态、摆放方式、特写形式
-6. 只输出 JSON，结构如下：
+4. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
+5. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版
+6. 物品 prompt 要强调材质、状态、摆放方式、特写形式
+7. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
+8. 只输出 JSON，结构如下：
 {
   "characters": [
     {
@@ -245,7 +265,11 @@ ${JSON.stringify(script, null, 2)}`
       'scene',
       normalizeString(item.name, `场景${index + 1}`),
       normalizeString(item.summary, '核心场景设定'),
-      normalizeString(item.generationPrompt, `${settings.visualStyle}，场景设定图`),
+      normalizeSceneReferencePrompt(
+        item.generationPrompt,
+        settings,
+        normalizeString(item.name, `场景${index + 1}`)
+      ),
       index
     )
   );
@@ -321,6 +345,10 @@ ${scenes}
 `;
 }
 
+function defaultSceneDurationExample(settings: ProjectSettings): number {
+  return Math.max(8, settings.defaultShotDurationSeconds * 2);
+}
+
 function buildScriptOutputSchema(settings: ProjectSettings): string {
   return `{
   "title": "标题",
@@ -343,7 +371,7 @@ function buildScriptOutputSchema(settings: ProjectSettings): string {
       "summary": "本场剧情",
       "emotionalBeat": "情绪推进",
       "voiceover": "画外音，没有则留空",
-      "durationSeconds": ${settings.defaultShotDurationSeconds * settings.maxShotsPerScene},
+      "durationSeconds": ${defaultSceneDurationExample(settings)},
       "dialogue": [
         {
           "character": "角色名",
@@ -362,12 +390,11 @@ function buildScriptPromptContext(settings: ProjectSettings): string {
 2. 语气风格：${settings.tone}
 3. 视觉调性：${settings.visualStyle}
 4. 输出语言：${settings.language}
-5. 目标场景数：${settings.targetSceneCount}
-6. 单场建议总时长：${settings.defaultShotDurationSeconds * settings.maxShotsPerScene} 秒左右
-7. 每场应具备明确冲突、推进、情绪变化和可分镜化动作
-8. durationSeconds 必须给出正整数秒
-9. 人物外观和身份要稳定，便于后续持续生成画面
-10. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
+5. 场景数量由你根据故事复杂度、节奏和信息密度自行决定，不要机械凑固定场次数
+6. 每场应具备明确冲突、推进、情绪变化和可分镜化动作
+7. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定
+8. 人物外观和身份要稳定，便于后续持续生成画面
+9. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
 }
 
 function buildScriptMessages(sourceText: string, settings: ProjectSettings): ChatCompletionMessageParam[] {
@@ -396,7 +423,7 @@ ${sharedContext}
 6. 画外音只在必要时使用，避免重复解释画面已经表达的信息
 7. 如果原文结构混乱，可以重组场次顺序，但不要丢失关键剧情信息
 8. 如果原文缺少必要细节，可以补足角色动机、场景信息和情绪推进，使其成为完整可拍的短剧
-9. 输出场景数尽量接近 ${settings.targetSceneCount} 场
+9. 场景数量由你根据素材复杂度和叙事节奏自行决定
 10. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
@@ -426,7 +453,7 @@ ${sharedContext}
 5. 角色数量控制在必要范围内，每个核心角色都要有鲜明身份、稳定外观和清晰动机
 6. 场景信息要具体到地点、时间和动作状态，方便后续直接拆分镜
 7. 对白要短、准、狠，符合短剧节奏，尽量避免大段说明性台词
-8. 输出场景数尽量接近 ${settings.targetSceneCount} 场
+8. 场景数量由你根据故事长度、节奏和转折密度自行决定
 9. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
@@ -474,10 +501,7 @@ export async function generateScriptFromText(
     summary: normalizeString(scene.summary, '暂无剧情描述'),
     emotionalBeat: normalizeString(scene.emotionalBeat, '情绪持续推进'),
     voiceover: normalizeString(scene.voiceover, ''),
-    durationSeconds: normalizeDuration(
-      scene.durationSeconds,
-      settings.defaultShotDurationSeconds * settings.maxShotsPerScene
-    ),
+    durationSeconds: normalizeDuration(scene.durationSeconds, defaultSceneDurationExample(settings)),
     dialogue: (scene.dialogue ?? []).map((line) => ({
       character: normalizeString(line.character, '旁白'),
       line: normalizeString(line.line, ''),
@@ -542,8 +566,8 @@ export async function generateStoryboardFromScript(
 2. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白
 3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果没有台词或旁白，要明确写“无语音内容”
 4. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
-5. 镜头数量控制在每场最多 ${settings.maxShotsPerScene} 个
-6. durationSeconds 尽量使用 ${settings.defaultShotDurationSeconds} 秒附近的整数
+5. 每场镜头数量由你根据戏剧节奏、信息密度和动作复杂度自行决定，不要机械套固定数量
+6. durationSeconds 以 ${settings.defaultShotDurationSeconds} 秒附近的整数为优先，但可按镜头内容自行调整
 7. 构图、镜头运动、光线、表情、动作都要写清楚
 8. 输出结构：
 {

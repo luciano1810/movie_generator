@@ -108,10 +108,17 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
     project.artifacts.scriptJson = null;
     project.artifacts.storyboardJson = null;
     project.artifacts.referenceLibraryJson = null;
+    resetStage(project, 'assets');
     resetStage(project, 'storyboard');
     resetStage(project, 'images');
     resetStage(project, 'videos');
     resetStage(project, 'edit');
+    return;
+  }
+
+  if (stage === 'assets') {
+    project.referenceLibrary = createEmptyReferenceLibrary();
+    project.artifacts.referenceLibraryJson = null;
     return;
   }
 
@@ -342,6 +349,14 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
     return;
   }
 
+  if (stage === 'assets') {
+    if (!project.script) {
+      throw new Error('请先生成剧本，再执行资产生成。');
+    }
+
+    return;
+  }
+
   if (stage === 'storyboard') {
     if (!project.script) {
       throw new Error('请先生成剧本，再生成分镜。');
@@ -412,24 +427,161 @@ async function runScriptStage(project: Project): Promise<void> {
   project.artifacts.scriptJson = jsonFile.relativePath;
 
   appendLog(project, `剧本生成完成，共 ${script.scenes.length} 场戏。`);
+}
+
+async function extractReferenceLibraryForProject(project: Project): Promise<void> {
+  if (!project.script) {
+    throw new Error('请先生成剧本，再提取资产候选。');
+  }
+
+  appendLog(project, '开始提取角色、场景和关键物品候选。');
+  await saveProject(project);
+
+  project.referenceLibrary = await extractReferenceLibraryFromScript(project.script, project.settings);
+  await persistReferenceLibrary(project);
+
+  appendLog(
+    project,
+    `资产候选提取完成：角色 ${project.referenceLibrary.characters.length} 个，场景 ${project.referenceLibrary.scenes.length} 个，物品 ${project.referenceLibrary.objects.length} 个。`
+  );
+}
+
+async function generateReferenceAssetForProject(
+  project: Project,
+  kind: ReferenceAssetKind,
+  itemId: string,
+  prompt?: string
+): Promise<void> {
+  const appSettings = getAppSettings();
+  const workflowKind = getReferenceWorkflowKind(kind);
+  const workflow = appSettings.comfyui.workflows[workflowKind];
+
+  if (!workflow.workflowPath) {
+    throw new Error(`系统设置中未配置 ComfyUI ${assetKindLabel(kind)}资产生成工作流路径。`);
+  }
+
+  let generationPrompt = '';
+  let itemName = '';
+
+  updateReferenceItem(project, kind, itemId, (item) => {
+    generationPrompt = prompt?.trim() || item.generationPrompt;
+    itemName = item.name;
+
+    return {
+      ...item,
+      generationPrompt,
+      status: 'running',
+      error: null,
+      updatedAt: now()
+    };
+  });
+  appendLog(project, `开始生成${itemName}${assetKindLabel(kind)}参考图。`);
+  await persistReferenceLibrary(project);
+  await saveProject(project);
 
   try {
-    appendLog(project, '开始自动提取角色、场景和关键物品。');
-    await saveProject(project);
+    const outputFiles = await runComfyWorkflow(workflow.workflowPath, {
+      prompt: generationPrompt,
+      negative_prompt: project.settings.negativePrompt,
+      output_prefix: `${project.id}_${kind}_${itemId}_reference`,
+      image_width: project.settings.imageWidth,
+      image_height: project.settings.imageHeight,
+      video_width: project.settings.videoWidth,
+      video_height: project.settings.videoHeight,
+      duration_seconds: project.settings.defaultShotDurationSeconds,
+      fps: project.settings.fps,
+      checkpoint_name: workflow.checkpointName,
+      input_image: '',
+      scene_number: 0,
+      shot_number: 0,
+      seed: Math.floor(Math.random() * 9_000_000_000)
+    });
 
-    project.referenceLibrary = await extractReferenceLibraryFromScript(script, project.settings);
-    await persistReferenceLibrary(project);
+    const outputFile = pickOutputFile(outputFiles, 'image');
+    const buffer = await fetchComfyOutputFile(outputFile);
+    const extension = path.extname(outputFile.filename) || '.png';
+    const folderName = kind === 'character' ? 'characters' : kind === 'scene' ? 'scenes' : 'objects';
+    const saved = await writeProjectFile(project.id, `references/${folderName}/${itemId}${extension}`, buffer);
 
-    appendLog(
-      project,
-      `资产候选提取完成：角色 ${project.referenceLibrary.characters.length} 个，场景 ${project.referenceLibrary.scenes.length} 个，物品 ${project.referenceLibrary.objects.length} 个。`
-    );
+    updateReferenceItem(project, kind, itemId, (item) => ({
+      ...item,
+      generationPrompt,
+      status: 'success',
+      error: null,
+      updatedAt: now(),
+      asset: buildAsset(saved.relativePath, generationPrompt, null, null)
+    }));
+    appendLog(project, `${itemName}${assetKindLabel(kind)}参考图生成完成。`);
   } catch (error) {
     const message = error instanceof Error ? error.message : '未知错误';
-    project.referenceLibrary = createEmptyReferenceLibrary();
-    project.artifacts.referenceLibraryJson = null;
-    appendLog(project, `资产候选提取失败，可稍后重试：${message}`, 'warn');
+
+    updateReferenceItem(project, kind, itemId, (item) => ({
+      ...item,
+      generationPrompt,
+      status: 'error',
+      error: message,
+      updatedAt: now()
+    }));
+    appendLog(project, `${itemName}${assetKindLabel(kind)}参考图生成失败：${message}`, 'error');
+    await persistReferenceLibrary(project);
+    await saveProject(project);
+    throw error;
   }
+
+  await persistReferenceLibrary(project);
+  await saveProject(project);
+}
+
+async function runAssetStage(project: Project): Promise<void> {
+  await extractReferenceLibraryForProject(project);
+
+  const appSettings = getAppSettings();
+  const referenceGroups: Array<[ReferenceAssetKind, ReferenceAssetItem[]]> = [
+    ['character', project.referenceLibrary.characters],
+    ['scene', project.referenceLibrary.scenes],
+    ['object', project.referenceLibrary.objects]
+  ];
+
+  if (!referenceGroups.some(([, items]) => items.length)) {
+    appendLog(project, '未提取到可生成的参考资产，资产阶段结束。', 'warn');
+    return;
+  }
+
+  let generatedCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+
+  for (const [kind, items] of referenceGroups) {
+    if (!items.length) {
+      continue;
+    }
+
+    const workflow = appSettings.comfyui.workflows[getReferenceWorkflowKind(kind)];
+    if (!workflow.workflowPath) {
+      skippedCount += items.length;
+      appendLog(
+        project,
+        `未配置${assetKindLabel(kind)}参考图工作流，跳过 ${items.length} 个${assetKindLabel(kind)}候选。`,
+        'warn'
+      );
+      continue;
+    }
+
+    for (const item of items) {
+      try {
+        await generateReferenceAssetForProject(project, kind, item.id);
+        generatedCount += 1;
+      } catch {
+        failedCount += 1;
+      }
+    }
+  }
+
+  appendLog(
+    project,
+    `资产生成阶段完成：成功 ${generatedCount} 个，失败 ${failedCount} 个，跳过 ${skippedCount} 个。`,
+    failedCount > 0 || skippedCount > 0 ? 'warn' : 'info'
+  );
 }
 
 async function runStoryboardStage(project: Project): Promise<void> {
@@ -627,6 +779,8 @@ async function executeStage(projectId: string, stage: StageId): Promise<void> {
   try {
     if (stage === 'script') {
       await runScriptStage(project);
+    } else if (stage === 'assets') {
+      await runAssetStage(project);
     } else if (stage === 'storyboard') {
       await runStoryboardStage(project);
     } else if (stage === 'images') {
@@ -656,84 +810,7 @@ async function executeReferenceGeneration(
   prompt?: string
 ): Promise<void> {
   const project = await readProject(projectId);
-  const appSettings = getAppSettings();
-  const workflowKind = getReferenceWorkflowKind(kind);
-  const workflow = appSettings.comfyui.workflows[workflowKind];
-
-  if (!workflow.workflowPath) {
-    throw new Error(`系统设置中未配置 ComfyUI ${assetKindLabel(kind)}资产生成工作流路径。`);
-  }
-
-  let generationPrompt = '';
-  let itemName = '';
-
-  updateReferenceItem(project, kind, itemId, (item) => {
-    generationPrompt = prompt?.trim() || item.generationPrompt;
-    itemName = item.name;
-
-    return {
-      ...item,
-      generationPrompt,
-      status: 'running',
-      error: null,
-      updatedAt: now()
-    };
-  });
-  appendLog(project, `开始生成${itemName}${assetKindLabel(kind)}参考图。`);
-  await persistReferenceLibrary(project);
-  await saveProject(project);
-
-  try {
-    const outputFiles = await runComfyWorkflow(workflow.workflowPath, {
-      prompt: generationPrompt,
-      negative_prompt: project.settings.negativePrompt,
-      output_prefix: `${project.id}_${kind}_${itemId}_reference`,
-      image_width: project.settings.imageWidth,
-      image_height: project.settings.imageHeight,
-      video_width: project.settings.videoWidth,
-      video_height: project.settings.videoHeight,
-      duration_seconds: project.settings.defaultShotDurationSeconds,
-      fps: project.settings.fps,
-      checkpoint_name: workflow.checkpointName,
-      input_image: '',
-      scene_number: 0,
-      shot_number: 0,
-      seed: Math.floor(Math.random() * 9_000_000_000)
-    });
-
-    const outputFile = pickOutputFile(outputFiles, 'image');
-    const buffer = await fetchComfyOutputFile(outputFile);
-    const extension = path.extname(outputFile.filename) || '.png';
-    const folderName = kind === 'character' ? 'characters' : kind === 'scene' ? 'scenes' : 'objects';
-    const saved = await writeProjectFile(project.id, `references/${folderName}/${itemId}${extension}`, buffer);
-
-    updateReferenceItem(project, kind, itemId, (item) => ({
-      ...item,
-      generationPrompt,
-      status: 'success',
-      error: null,
-      updatedAt: now(),
-      asset: buildAsset(saved.relativePath, generationPrompt, null, null)
-    }));
-    appendLog(project, `${itemName}${assetKindLabel(kind)}参考图生成完成。`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '未知错误';
-
-    updateReferenceItem(project, kind, itemId, (item) => ({
-      ...item,
-      generationPrompt,
-      status: 'error',
-      error: message,
-      updatedAt: now()
-    }));
-    appendLog(project, `${itemName}${assetKindLabel(kind)}参考图生成失败：${message}`, 'error');
-    await persistReferenceLibrary(project);
-    await saveProject(project);
-    throw error;
-  }
-
-  await persistReferenceLibrary(project);
-  await saveProject(project);
+  await generateReferenceAssetForProject(project, kind, itemId, prompt);
 }
 
 async function setRunState(projectId: string, requestedStage: RunStage | null, currentStage: StageId | null): Promise<void> {

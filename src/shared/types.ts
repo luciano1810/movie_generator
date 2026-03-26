@@ -1,4 +1,4 @@
-export const STAGES = ['script', 'storyboard', 'images', 'videos', 'edit'] as const;
+export const STAGES = ['script', 'assets', 'storyboard', 'images', 'videos', 'edit'] as const;
 export const COMFYUI_WORKFLOW_TYPES = ['character', 'scene', 'object', 'storyboard', 'video', 'tts'] as const;
 export const ASPECT_RATIOS = ['21:9', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4', '9:16'] as const;
 export const SCRIPT_MODES = ['generate', 'optimize'] as const;
@@ -209,6 +209,7 @@ export interface AppMeta {
 
 export const STAGE_LABELS: Record<StageId, string> = {
   script: '剧本生成',
+  assets: '资产生成',
   storyboard: '分镜生成',
   images: '图片生成',
   videos: '视频生成',
@@ -404,11 +405,8 @@ export function normalizeStoryboardShot(
   index: number,
   settings: ProjectSettings
 ): StoryboardShot {
-  const sceneNumber = normalizePositiveInteger(
-    input?.sceneNumber,
-    Math.floor(index / settings.maxShotsPerScene) + 1
-  );
-  const shotNumber = normalizePositiveInteger(input?.shotNumber, (index % settings.maxShotsPerScene) + 1);
+  const sceneNumber = normalizePositiveInteger(input?.sceneNumber, index + 1);
+  const shotNumber = normalizePositiveInteger(input?.shotNumber, 1);
   const id =
     normalizeString(input?.id, `scene-${sceneNumber}-shot-${shotNumber}`)
       .toLowerCase()
@@ -462,6 +460,7 @@ export function createEmptyStageState(): StageState {
 export function createStageStateMap(): Record<StageId, StageState> {
   return {
     script: createEmptyStageState(),
+    assets: createEmptyStageState(),
     storyboard: createEmptyStageState(),
     images: createEmptyStageState(),
     videos: createEmptyStageState(),

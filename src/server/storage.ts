@@ -50,11 +50,28 @@ async function ensureProjectLayout(projectId: string): Promise<void> {
 
 function hydrateProject(project: Project): Project {
   const settings = normalizeSettings(project.settings);
+  const defaultStages = createStageStateMap();
+  const rawStages = project.stages ?? {};
+  const stages = Object.fromEntries(
+    Object.entries(defaultStages).map(([stageId, fallbackState]) => {
+      const currentState = rawStages[stageId as keyof typeof rawStages];
+
+      return [
+        stageId,
+        {
+          status: currentState?.status ?? fallbackState.status,
+          startedAt: currentState?.startedAt ?? fallbackState.startedAt,
+          finishedAt: currentState?.finishedAt ?? fallbackState.finishedAt,
+          error: currentState?.error ?? fallbackState.error
+        }
+      ];
+    })
+  ) as Project['stages'];
 
   return {
     ...project,
     settings,
-    stages: project.stages ?? createStageStateMap(),
+    stages,
     storyboard: (project.storyboard ?? []).map((shot, index) => normalizeStoryboardShot(shot, index, settings)),
     assets: {
       images: project.assets?.images ?? [],
