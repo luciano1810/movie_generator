@@ -170,12 +170,17 @@ export async function fetchComfyOutputFile(file: ComfyOutputFile): Promise<Buffe
 }
 
 export async function uploadImageToComfy(localPath: string): Promise<string> {
-  const settings = getAppSettings();
   const buffer = await readFile(localPath);
   const filename = path.basename(localPath);
+  return uploadImageBufferToComfy(buffer, filename);
+}
+
+export async function uploadImageBufferToComfy(buffer: Buffer, filename: string): Promise<string> {
+  const settings = getAppSettings();
+  const binary = new Uint8Array(buffer);
   const form = new FormData();
 
-  form.set('image', new Blob([buffer]), filename);
+  form.set('image', new Blob([binary]), filename);
   form.set('overwrite', 'true');
 
   const response = await fetch(`${settings.comfyui.baseUrl}/upload/image`, {

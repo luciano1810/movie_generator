@@ -58,7 +58,7 @@ function extractTextContent(content: unknown): string {
   return '';
 }
 
-function parseJsonPayload<T>(raw: string): T {
+function extractJsonCandidate(raw: string): string {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidate = fenced?.[1]?.trim() ?? raw.trim();
 
@@ -75,7 +75,215 @@ function parseJsonPayload<T>(raw: string): T {
     jsonText = candidate.slice(arrayStart, arrayEnd + 1);
   }
 
-  return JSON.parse(jsonText) as T;
+  return jsonText;
+}
+
+function findNextSignificantChar(text: string, startIndex: number): string | null {
+  const index = findNextSignificantIndex(text, startIndex);
+  return index === -1 ? null : text[index];
+}
+
+function findNextSignificantIndex(text: string, startIndex: number): number {
+  for (let index = startIndex; index < text.length; index += 1) {
+    const char = text[index];
+    if (!/\s/.test(char)) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function looksLikeStandaloneQuotedToken(text: string, startIndex: number): boolean {
+  let escapeNext = false;
+
+  for (let index = startIndex + 1; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escapeNext = true;
+      continue;
+    }
+
+    if (char === '"') {
+      const nextSignificantChar = findNextSignificantChar(text, index + 1);
+      return (
+        nextSignificantChar === null ||
+        nextSignificantChar === ':' ||
+        nextSignificantChar === ',' ||
+        nextSignificantChar === '}' ||
+        nextSignificantChar === ']'
+      );
+    }
+  }
+
+  return false;
+}
+
+function isValueStartChar(char: string): boolean {
+  return (
+    char === '"' ||
+    char === '{' ||
+    char === '[' ||
+    char === '-' ||
+    (char >= '0' && char <= '9') ||
+    char === 't' ||
+    char === 'f' ||
+    char === 'n'
+  );
+}
+
+function isValueTerminatorChar(char: string | null): boolean {
+  if (!char) {
+    return false;
+  }
+
+  return (
+    char === '"' ||
+    char === '}' ||
+    char === ']' ||
+    char === 'e' ||
+    char === 'l' ||
+    (char >= '0' && char <= '9')
+  );
+}
+
+function repairJsonText(text: string): string {
+  let result = '';
+  let inString = false;
+  let escapeNext = false;
+  let lastSignificantChar: string | null = null;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escapeNext) {
+        result += char;
+        escapeNext = false;
+        continue;
+      }
+
+      if (char === '\\') {
+        result += char;
+        escapeNext = true;
+        continue;
+      }
+
+      if (char === '"') {
+        const nextSignificantIndex = findNextSignificantIndex(text, index + 1);
+        const nextSignificantChar = nextSignificantIndex === -1 ? null : text[nextSignificantIndex];
+
+        if (
+          nextSignificantChar === null ||
+          nextSignificantChar === ',' ||
+          nextSignificantChar === ':' ||
+          nextSignificantChar === '}' ||
+          nextSignificantChar === ']' ||
+          (nextSignificantChar === '"' && looksLikeStandaloneQuotedToken(text, nextSignificantIndex))
+        ) {
+          result += char;
+          inString = false;
+          lastSignificantChar = char;
+        } else {
+          result += '\\"';
+        }
+
+        continue;
+      }
+
+      if (char === '\r') {
+        result += text[index + 1] === '\n' ? '\\n' : '\\r';
+        if (text[index + 1] === '\n') {
+          index += 1;
+        }
+        continue;
+      }
+
+      if (char === '\n') {
+        result += '\\n';
+        continue;
+      }
+
+      if (char === '\t') {
+        result += '\\t';
+        continue;
+      }
+
+      result += char;
+      continue;
+    }
+
+    if (isValueStartChar(char) && isValueTerminatorChar(lastSignificantChar)) {
+      result += ',';
+      lastSignificantChar = ',';
+    }
+
+    if (char === '"') {
+      result += char;
+      inString = true;
+      continue;
+    }
+
+    if (char === ',') {
+      const nextSignificantChar = findNextSignificantChar(text, index + 1);
+      if (nextSignificantChar === '}' || nextSignificantChar === ']') {
+        continue;
+      }
+    }
+
+    result += char;
+
+    if (!/\s/.test(char)) {
+      lastSignificantChar = char;
+    }
+  }
+
+  return result;
+}
+
+function buildJsonParseError(error: unknown, jsonText: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const positionMatch = message.match(/position (\d+)/);
+
+  if (!positionMatch) {
+    return new Error(`JSON 解析失败：${message}`);
+  }
+
+  const position = Number(positionMatch[1]);
+  const snippetStart = Math.max(0, position - 80);
+  const snippetEnd = Math.min(jsonText.length, position + 80);
+  const snippet = jsonText
+    .slice(snippetStart, snippetEnd)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return new Error(`JSON 解析失败：${message}。出错附近片段：${snippet}`);
+}
+
+function parseJsonPayload<T>(raw: string): T {
+  const jsonText = extractJsonCandidate(raw);
+
+  try {
+    return JSON.parse(jsonText) as T;
+  } catch (initialError) {
+    const repairedJsonText = repairJsonText(jsonText);
+
+    if (repairedJsonText !== jsonText) {
+      try {
+        return JSON.parse(repairedJsonText) as T;
+      } catch (repairedError) {
+        throw buildJsonParseError(repairedError, repairedJsonText);
+      }
+    }
+
+    throw buildJsonParseError(initialError, jsonText);
+  }
 }
 
 function normalizeString(value: unknown, fallback: string): string {
@@ -112,7 +320,9 @@ function createReferenceItem(
     status: 'idle',
     error: null,
     updatedAt: new Date().toISOString(),
-    asset: null
+    referenceImage: null,
+    asset: null,
+    assetHistory: []
   };
 }
 
@@ -213,20 +423,19 @@ export async function extractReferenceLibraryFromScript(
 3. objects：关键物品或道具，只保留推动剧情的重要物件
 
 要求：
-1. generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一
-2. generationPrompt 需要体现视觉风格：${settings.visualStyle}
-3. 人物 prompt 要强调外观、服装、年龄感、表情基调、镜头视角
-4. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
-5. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版
-6. 物品 prompt 要强调材质、状态、摆放方式、特写形式
-7. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
-8. 只输出 JSON，结构如下：
+1. characters.generationPrompt 由你在这个阶段直接生成人物外貌特点，供“无参考图角色三视图生成”与后续首帧/视频生成功能共用；只写稳定的人物外观与身份特征，重点描述年龄感、脸型五官、发型、体型、服装、气质、常态表情，不要写三视图、镜头运动或具体剧情动作
+2. scenes.generationPrompt 和 objects.generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一，并体现视觉风格：${settings.visualStyle}
+3. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
+4. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版
+5. 物品 prompt 要强调材质、状态、摆放方式、特写形式
+6. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
+7. 只输出 JSON，结构如下：
 {
   "characters": [
     {
       "name": "角色名",
       "summary": "角色作用和外观摘要",
-      "generationPrompt": "用于生图的详细提示词"
+      "generationPrompt": "人物外貌特点提示词，用于无参考图角色三视图生成和后续首帧/视频约束"
     }
   ],
   "scenes": [
@@ -255,7 +464,7 @@ ${JSON.stringify(script, null, 2)}`
       'character',
       normalizeString(item.name, `角色${index + 1}`),
       normalizeString(item.summary, '核心角色设定'),
-      normalizeString(item.generationPrompt, `${settings.visualStyle}，角色设定图`),
+      normalizeString(item.generationPrompt, normalizeString(item.summary, `${settings.visualStyle}，人物外观与服装特征稳定设定`)),
       index
     )
   );
@@ -347,6 +556,13 @@ ${scenes}
 
 function defaultSceneDurationExample(settings: ProjectSettings): number {
   return Math.max(8, settings.defaultShotDurationSeconds * 2);
+}
+
+function getEffectiveMaxVideoSegmentDurationSeconds(settings: ProjectSettings): number {
+  return Math.max(
+    1,
+    getAppSettings().comfyui.maxVideoSegmentDurationSeconds || settings.maxVideoSegmentDurationSeconds
+  );
 }
 
 function buildScriptOutputSchema(settings: ProjectSettings): string {
@@ -533,6 +749,8 @@ export async function generateStoryboardFromScript(
   script: ScriptPackage,
   settings: ProjectSettings
 ): Promise<StoryboardShot[]> {
+  const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
+
   const payload = await requestJson<{
     shots?: Array<{
       id?: string;
@@ -564,12 +782,12 @@ export async function generateStoryboardFromScript(
 
 要求：
 1. 每个镜头必须包含首帧生图描述 firstFramePrompt、尾帧生图描述 lastFramePrompt，以及视频片段描述 videoPrompt
-2. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白
-3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果没有台词或旁白，要明确写“无语音内容”
+2. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
+3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写“无语音内容”
 4. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
 5. 每场镜头数量由你根据戏剧节奏、信息密度和动作复杂度自行决定，不要机械套固定数量
 6. durationSeconds 由你根据剧情节奏、动作复杂度、表演长度自行决定；${settings.defaultShotDurationSeconds} 秒只是常规参考，不是硬限制
-7. 单次视频生成上限是 ${settings.maxVideoSegmentDurationSeconds} 秒；如果镜头总时长超过这个上限，系统会自动拆段生成，所以你仍然要输出完整的镜头总时长，并且必须把 lastFramePrompt 写清楚，确保镜头结尾状态明确
+7. 当前视频工作流的单次生成上限是 ${maxVideoSegmentDurationSeconds} 秒；这是单次调用上限，不是镜头总时长上限。你必须先按叙事需要决定每个镜头的完整总时长；如果镜头总时长超过这个上限，系统会自动拆段生成并拼接，所以你仍然要输出完整的镜头总时长，并且必须把 lastFramePrompt 写清楚，确保镜头结尾状态明确
 8. 构图、镜头运动、光线、表情、动作都要写清楚
 9. 输出结构：
 {
@@ -589,8 +807,8 @@ export async function generateStoryboardFromScript(
       "firstFramePrompt": "用于首帧静态图生成的详细中文提示词",
       "lastFramePrompt": "用于尾帧静态图生成的详细中文提示词，明确镜头结束时的构图、人物状态和环境状态",
       "videoPrompt": "用于视频生成的详细中文提示词",
-      "backgroundSoundPrompt": "用于背景声音生成的详细中文提示词，不含人物对白",
-      "speechPrompt": "用于台词或旁白配音的详细中文提示词，没有语音内容时明确写无语音"
+      "backgroundSoundPrompt": "用于背景声音生成的详细中文提示词；无对白时也要写自然环境声、动作声和空间氛围声，不含人物对白",
+      "speechPrompt": "用于台词或旁白配音的详细中文提示词；有语音内容时通过人物特征明确说话者，没有语音内容时明确写无语音"
     }
   ]
 }

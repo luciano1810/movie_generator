@@ -445,6 +445,17 @@ select:focus {
   color: var(--text);
 }
 
+.button.danger {
+  background: rgba(255, 110, 124, 0.1);
+  border-color: rgba(255, 110, 124, 0.22);
+  color: #ffd2d8;
+}
+
+.button.danger:hover:not(:disabled) {
+  border-color: rgba(255, 110, 124, 0.34);
+  color: #ffe4e8;
+}
+
 .mini-button {
   padding: 8px 12px;
   border-radius: 12px;
@@ -572,6 +583,15 @@ select:focus {
   font-size: 0.9rem;
 }
 
+.project-card-shell {
+  position: relative;
+}
+
+.project-card-shell .project-card {
+  padding-top: 56px;
+  padding-right: 88px;
+}
+
 .project-card {
   text-align: left;
   position: relative;
@@ -591,6 +611,7 @@ select:focus {
     background 140ms ease,
     border-color 140ms ease,
     box-shadow 140ms ease;
+  width: 100%;
 }
 
 .project-card::before {
@@ -622,6 +643,13 @@ select:focus {
   background:
     radial-gradient(circle at top right, rgba(88, 208, 161, 0.14), transparent 34%),
     linear-gradient(180deg, rgba(10, 20, 28, 0.96) 0%, rgba(5, 10, 18, 0.9) 100%);
+}
+
+.project-card-delete {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 2;
 }
 
 .project-card-top {
@@ -1025,6 +1053,17 @@ select:focus {
   width: 100%;
   border-radius: 12px;
   background: #000;
+}
+
+.inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.version-indicator {
+  color: var(--muted);
 }
 
 .shots-grid {

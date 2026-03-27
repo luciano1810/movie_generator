@@ -1,9 +1,14 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {
+  type GeneratedAsset,
+  type ReferenceAssetItem,
   type Project,
+  type ProjectRunState,
   type ProjectSettings,
+  type ShotAssetHistoryMap,
+  createIdleRunState,
   createEmptyReferenceLibrary,
   createStageStateMap,
   normalizeSettings,
@@ -48,6 +53,55 @@ async function ensureProjectLayout(projectId: string): Promise<void> {
   ]);
 }
 
+function hydrateReferenceAssetItem(item: ReferenceAssetItem): ReferenceAssetItem {
+  return {
+    ...item,
+    error: item.error ?? null,
+    referenceImage: item.referenceImage ?? null,
+    asset: item.asset ?? null,
+    assetHistory: item.assetHistory ?? []
+  };
+}
+
+function hydrateGeneratedAsset(asset: GeneratedAsset | null | undefined): GeneratedAsset | null {
+  if (!asset?.relativePath) {
+    return null;
+  }
+
+  return {
+    shotId: asset.shotId ?? null,
+    sceneNumber: asset.sceneNumber ?? null,
+    relativePath: asset.relativePath,
+    prompt: asset.prompt ?? '',
+    createdAt: asset.createdAt ?? now()
+  };
+}
+
+function hydrateGeneratedAssetList(assets: Array<GeneratedAsset | undefined> | undefined): GeneratedAsset[] {
+  return (assets ?? [])
+    .map((asset) => hydrateGeneratedAsset(asset))
+    .filter((asset): asset is GeneratedAsset => asset !== null);
+}
+
+function hydrateShotAssetHistoryMap(history: ShotAssetHistoryMap | undefined): ShotAssetHistoryMap {
+  return Object.fromEntries(
+    Object.entries(history ?? {}).map(([shotId, assets]) => [shotId, hydrateGeneratedAssetList(assets)])
+  );
+}
+
+function hydrateProjectRunState(runState: ProjectRunState | undefined): ProjectRunState {
+  const fallback = createIdleRunState();
+
+  return {
+    isRunning: runState?.isRunning ?? fallback.isRunning,
+    requestedStage: runState?.requestedStage ?? fallback.requestedStage,
+    currentStage: runState?.currentStage ?? fallback.currentStage,
+    startedAt: runState?.startedAt ?? fallback.startedAt,
+    pauseRequested: runState?.pauseRequested ?? fallback.pauseRequested,
+    isPaused: runState?.isPaused ?? fallback.isPaused
+  };
+}
+
 function hydrateProject(project: Project): Project {
   const settings = normalizeSettings(project.settings);
   const defaultStages = createStageStateMap();
@@ -74,14 +128,16 @@ function hydrateProject(project: Project): Project {
     stages,
     storyboard: normalizeStoryboardShots(project.storyboard ?? [], settings),
     assets: {
-      images: project.assets?.images ?? [],
-      videos: project.assets?.videos ?? [],
-      finalVideo: project.assets?.finalVideo ?? null
+      images: hydrateGeneratedAssetList(project.assets?.images),
+      imageHistory: hydrateShotAssetHistoryMap(project.assets?.imageHistory),
+      videos: hydrateGeneratedAssetList(project.assets?.videos),
+      videoHistory: hydrateShotAssetHistoryMap(project.assets?.videoHistory),
+      finalVideo: hydrateGeneratedAsset(project.assets?.finalVideo) ?? null
     },
     referenceLibrary: {
-      characters: project.referenceLibrary?.characters ?? [],
-      scenes: project.referenceLibrary?.scenes ?? [],
-      objects: project.referenceLibrary?.objects ?? []
+      characters: (project.referenceLibrary?.characters ?? []).map(hydrateReferenceAssetItem),
+      scenes: (project.referenceLibrary?.scenes ?? []).map(hydrateReferenceAssetItem),
+      objects: (project.referenceLibrary?.objects ?? []).map(hydrateReferenceAssetItem)
     },
     artifacts: {
       scriptMarkdown: project.artifacts?.scriptMarkdown ?? null,
@@ -90,12 +146,7 @@ function hydrateProject(project: Project): Project {
       referenceLibraryJson: project.artifacts?.referenceLibraryJson ?? null
     },
     logs: project.logs ?? [],
-    runState: project.runState ?? {
-      isRunning: false,
-      requestedStage: null,
-      currentStage: null,
-      startedAt: null
-    }
+    runState: hydrateProjectRunState(project.runState)
   };
 }
 
@@ -151,7 +202,9 @@ export async function createProject(input: {
     storyboard: [],
     assets: {
       images: [],
+      imageHistory: {},
       videos: [],
+      videoHistory: {},
       finalVideo: null
     },
     referenceLibrary: createEmptyReferenceLibrary(),
@@ -162,12 +215,7 @@ export async function createProject(input: {
       referenceLibraryJson: null
     },
     logs: [],
-    runState: {
-      isRunning: false,
-      requestedStage: null,
-      currentStage: null,
-      startedAt: null
-    }
+    runState: createIdleRunState()
   };
 
   await writeProject(project);
@@ -193,6 +241,11 @@ export async function updateProject(
   project.updatedAt = now();
   await writeProject(project);
   return project;
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  await readProject(projectId);
+  await rm(getProjectDir(projectId), { recursive: true, force: true });
 }
 
 export async function writeProjectFile(

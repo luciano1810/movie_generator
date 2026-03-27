@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type {
   AppMeta,
   AppSettings,
+  GeneratedAsset,
   LlmModelDiscoveryResponse,
   Project,
   ProjectSettings,
@@ -44,6 +45,7 @@ interface LibraryAssetItem {
 interface ReferenceLibraryAssetItem {
   id: string;
   kind: ReferenceAssetKind;
+  itemId: string;
   projectId: string;
   projectTitle: string;
   createdAt: string;
@@ -84,7 +86,7 @@ const TAB_LABELS: Record<ProjectPanelTab, string> = {
   script: '剧本生成',
   assets: '资产生成',
   storyboard: '分镜生成',
-  images: '图片生成',
+  images: '首帧生成',
   videos: '视频生成',
   edit: '视频剪辑',
   logs: '执行日志'
@@ -94,7 +96,7 @@ const TAB_DESCRIPTIONS: Record<ProjectPanelTab, string> = {
   script: '根据输入文案生成或优化完整短剧剧本。',
   assets: '提取角色、场景、物品候选，并批量生成参考资产。',
   storyboard: '基于剧本拆分镜头，输出镜头信息和首帧描述。',
-  images: '按分镜批量生成首帧图片。',
+  images: '按分镜批量生成镜头首帧。',
   videos: '基于图片和镜头 Prompt 生成视频片段。',
   edit: '拼接视频片段，输出最终成片。',
   logs: '查看整个项目流水线的实时执行日志和错误信息。'
@@ -158,6 +160,24 @@ async function requestJson<T>(pathname: string, init?: RequestInit): Promise<T> 
   }
 
   return (await response.json()) as T;
+}
+
+async function fileToDataUrl(file: File): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error('读取参考图失败'));
+        return;
+      }
+
+      resolve(reader.result);
+    };
+    reader.onerror = () => {
+      reject(new Error('读取参考图失败'));
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function createDraft(project: Project): ProjectDraft {
@@ -442,6 +462,7 @@ function buildReferenceLibraryAssets(
         .map((item) => ({
           id: `${project.id}-${kind}-${item.id}`,
           kind,
+          itemId: item.id,
           projectId: project.id,
           projectTitle: project.title,
           createdAt: item.asset!.createdAt,
@@ -458,6 +479,10 @@ function referenceDraftKey(kind: ReferenceAssetKind, itemId: string): string {
   return `${kind}:${itemId}`;
 }
 
+function referenceLibrarySelectionKey(kind: ReferenceAssetKind, itemId: string): string {
+  return `library:${kind}:${itemId}`;
+}
+
 function isStageTab(tab: ProjectPanelTab): tab is StageId {
   return STAGES.includes(tab as StageId);
 }
@@ -468,6 +493,39 @@ function allReferenceItems(project: Project): ReferenceAssetItem[] {
 
 function countGeneratedReferenceAssets(project: Project): number {
   return allReferenceItems(project).filter((item) => item.asset).length;
+}
+
+function getReferenceAssetVersions(item: ReferenceAssetItem): GeneratedAsset[] {
+  return item.asset ? [item.asset, ...item.assetHistory] : [];
+}
+
+function getShotAssetVersions(project: Project, stage: 'images' | 'videos', shotId: string): GeneratedAsset[] {
+  const activeAsset =
+    stage === 'images'
+      ? project.assets.images.find((asset) => asset.shotId === shotId) ?? null
+      : project.assets.videos.find((asset) => asset.shotId === shotId) ?? null;
+  const history = stage === 'images' ? project.assets.imageHistory[shotId] ?? [] : project.assets.videoHistory[shotId] ?? [];
+
+  return activeAsset ? [activeAsset, ...history] : history;
+}
+
+function getReferenceLibraryAssetPool(
+  kind: ReferenceAssetKind,
+  assets: {
+    character: ReferenceLibraryAssetItem[];
+    scene: ReferenceLibraryAssetItem[];
+    object: ReferenceLibraryAssetItem[];
+  }
+): ReferenceLibraryAssetItem[] {
+  if (kind === 'character') {
+    return assets.character;
+  }
+
+  if (kind === 'scene') {
+    return assets.scene;
+  }
+
+  return assets.object;
 }
 
 function inferProjectStageTab(project: Project): StageId {
@@ -494,6 +552,10 @@ function inferProjectStageTab(project: Project): StageId {
   return 'edit';
 }
 
+function nextProjectStage(project: Project): StageId {
+  return STAGES.find((stage) => project.stages[stage].status !== 'success') ?? inferProjectStageTab(project);
+}
+
 function projectCardStatus(project: Project): {
   badge: string;
   badgeTone: '' | 'running' | 'success';
@@ -503,7 +565,19 @@ function projectCardStatus(project: Project): {
     return {
       badge: '运行中',
       badgeTone: 'running',
-      detail: project.runState.currentStage ? `当前阶段 · ${STAGE_LABELS[project.runState.currentStage]}` : '当前阶段 · 排队中'
+      detail: project.runState.currentStage
+        ? `当前阶段 · ${STAGE_LABELS[project.runState.currentStage]}${project.runState.pauseRequested ? '（暂停中）' : ''}`
+        : project.runState.pauseRequested
+          ? '当前阶段 · 排队中（暂停中）'
+          : '当前阶段 · 排队中'
+    };
+  }
+
+  if (project.runState.isPaused) {
+    return {
+      badge: '已暂停',
+      badgeTone: 'running',
+      detail: `等待继续 · ${STAGE_LABELS[nextProjectStage(project)]}`
     };
   }
 
@@ -545,6 +619,10 @@ export function App() {
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false);
   const [draftDirty, setDraftDirty] = useState(false);
   const [referencePromptDrafts, setReferencePromptDrafts] = useState<Record<string, string>>({});
+  const [referenceLibrarySelections, setReferenceLibrarySelections] = useState<Record<string, string>>({});
+  const [referenceAssetVersionIndices, setReferenceAssetVersionIndices] = useState<Record<string, number>>({});
+  const [imageAssetVersionIndices, setImageAssetVersionIndices] = useState<Record<string, number>>({});
+  const [videoAssetVersionIndices, setVideoAssetVersionIndices] = useState<Record<string, number>>({});
   const [videoPromptDrafts, setVideoPromptDrafts] = useState<Record<string, string>>({});
   const [audioPromptDrafts, setAudioPromptDrafts] = useState<Record<string, ShotAudioPromptDraft>>({});
   const [technicalPromptDrafts, setTechnicalPromptDrafts] = useState<Record<string, ShotTechnicalDraft>>({});
@@ -567,6 +645,10 @@ export function App() {
     setProjectSettingsOpen(false);
     setDraftDirty(false);
     setReferencePromptDrafts({});
+    setReferenceLibrarySelections({});
+    setReferenceAssetVersionIndices({});
+    setImageAssetVersionIndices({});
+    setVideoAssetVersionIndices({});
     setVideoPromptDrafts({});
     setAudioPromptDrafts({});
     setTechnicalPromptDrafts({});
@@ -579,6 +661,10 @@ export function App() {
     setProjectSettingsOpen(false);
     setDraftDirty(false);
     setReferencePromptDrafts({});
+    setReferenceLibrarySelections({});
+    setReferenceAssetVersionIndices({});
+    setImageAssetVersionIndices({});
+    setVideoAssetVersionIndices({});
     setVideoPromptDrafts({});
     setAudioPromptDrafts({});
     setTechnicalPromptDrafts({});
@@ -657,6 +743,9 @@ export function App() {
     }
 
     setReferencePromptDrafts({});
+    setReferenceLibrarySelections({});
+    setImageAssetVersionIndices({});
+    setVideoAssetVersionIndices({});
     setVideoPromptDrafts({});
     setAudioPromptDrafts({});
     setTechnicalPromptDrafts({});
@@ -829,6 +918,38 @@ export function App() {
     }
   }
 
+  async function handleDeleteProject(projectId: string, title: string) {
+    const confirmed = window.confirm(
+      `确认删除项目“${title}”吗？此操作会移除该项目的全部分镜、素材和导出文件，且不可恢复。`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setPending(`delete-project:${projectId}`);
+      await requestJson<{ ok: true }>(`/api/projects/${projectId}`, {
+        method: 'DELETE'
+      });
+
+      if (selectedId === projectId) {
+        clearProjectWorkspace();
+        setActiveTab('projects');
+        setProjectStageTab('script');
+        await loadProjects();
+      } else {
+        await loadProjects(selectedId ?? undefined);
+      }
+
+      setNotice(`项目“${title}”已删除`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '删除项目失败');
+    } finally {
+      setPending('');
+    }
+  }
+
   async function handleRunStage(stage: RunStage) {
     if (!selectedId) {
       return;
@@ -845,6 +966,46 @@ export function App() {
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '执行失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handlePauseProjectRun() {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending('pause-all');
+      await requestJson<{ ok: true }>(`/api/projects/${selectedId}/pause`, {
+        method: 'POST'
+      });
+      setNotice('已请求暂停；系统会在当前阶段安全结束后暂停全流程');
+      await loadProject(selectedId, true, true);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '请求暂停失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleResumeProjectRun() {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending('resume-all');
+      await requestJson<{ ok: true }>(`/api/projects/${selectedId}/resume`, {
+        method: 'POST'
+      });
+      setNotice('已继续全流程任务');
+      await loadProject(selectedId, true, true);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '继续全流程失败');
     } finally {
       setPending('');
     }
@@ -875,32 +1036,331 @@ export function App() {
     }
   }
 
-  async function handleGenerateReferenceAsset(kind: ReferenceAssetKind, item: ReferenceAssetItem) {
+  async function handleGenerateReferenceAsset(
+    kind: ReferenceAssetKind,
+    item: ReferenceAssetItem
+  ) {
     if (!selectedId) {
       return;
     }
 
     const key = referenceDraftKey(kind, item.id);
     const prompt = referencePromptDrafts[key]?.trim() || item.generationPrompt;
+    const shouldUseReferenceImage = Boolean(item.referenceImage);
 
     try {
       setPending(`reference:${kind}:${item.id}`);
+      setReferenceAssetVersionIndices((current) => ({
+        ...current,
+        [key]: 0
+      }));
       await requestJson<{ ok: true }>(
         `/api/projects/${selectedId}/reference-library/${kind}/${item.id}/generate`,
         {
           method: 'POST',
-          body: JSON.stringify({ prompt })
+          body: JSON.stringify({
+            prompt,
+            useReferenceImage: shouldUseReferenceImage
+          })
         }
       );
       setNotice(
-        item.asset
-          ? `已提交${referenceKindLabel(kind)}“${item.name}”的重新生成任务`
-          : `已提交${referenceKindLabel(kind)}“${item.name}”的生成任务`
+        kind === 'character'
+          ? shouldUseReferenceImage
+            ? `已提交角色“${item.name}”的三视图生成任务，将按参考图和固定三视图模板生成；人物特点 Prompt 会并入后续视频生成提示词`
+            : item.asset
+              ? `已提交角色“${item.name}”的三视图重新生成任务，将使用默认三视图姿态参考和人物外貌特点`
+              : `已提交角色“${item.name}”的三视图生成任务，将使用默认三视图姿态参考和人物外貌特点`
+          : shouldUseReferenceImage
+            ? `已提交${referenceKindLabel(kind)}“${item.name}”的“参考图 + Prompt”生成任务，成功后会自动清除临时参考图`
+            : item.asset
+              ? `已提交${referenceKindLabel(kind)}“${item.name}”的 Prompt 重新生成任务`
+              : `已提交${referenceKindLabel(kind)}“${item.name}”的 Prompt 生成任务`
       );
       await loadProject(selectedId, true, true);
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '参考资产生成失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleUploadReferenceImage(kind: ReferenceAssetKind, item: ReferenceAssetItem, file: File) {
+    if (!selectedId) {
+      return;
+    }
+
+    if (!file.type.startsWith('image/')) {
+      setNotice('只能上传图片文件');
+      return;
+    }
+
+    try {
+      setPending(`reference-upload:${kind}:${item.id}`);
+      const dataUrl = await fileToDataUrl(file);
+      const updated = await requestJson<Project>(
+        `/api/projects/${selectedId}/reference-library/${kind}/${item.id}/reference-image`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            filename: file.name,
+            dataUrl
+          })
+        }
+      );
+      setProject(updated);
+      setReferenceAssetVersionIndices((current) => ({
+        ...current,
+        [referenceDraftKey(kind, item.id)]: 0
+      }));
+      setNotice(
+        kind === 'character'
+          ? `角色“${item.name}”的参考图已上传；下次生成会按参考图和固定三视图模板处理，成功后会自动清除这张临时参考图`
+          : `${referenceKindLabel(kind)}“${item.name}”的参考图已上传；生成按钮会自动按“参考图 + Prompt”处理，成功后会自动清除这张临时参考图`
+      );
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '上传参考图失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleRemoveReferenceImage(kind: ReferenceAssetKind, item: ReferenceAssetItem) {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending(`reference-remove:${kind}:${item.id}`);
+      const updated = await requestJson<Project>(
+        `/api/projects/${selectedId}/reference-library/${kind}/${item.id}/reference-image`,
+        {
+          method: 'DELETE'
+        }
+      );
+      setProject(updated);
+      setReferenceAssetVersionIndices((current) => ({
+        ...current,
+        [referenceDraftKey(kind, item.id)]: 0
+      }));
+      setNotice(`${referenceKindLabel(kind)}“${item.name}”的参考图已移除`);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '移除参考图失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleSelectLibraryReferenceAsset(
+    kind: ReferenceAssetKind,
+    item: ReferenceAssetItem,
+    sourceProjectId: string,
+    sourceItemId: string
+  ) {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending(`reference-library:${kind}:${item.id}`);
+      const updated = await requestJson<Project>(
+        `/api/projects/${selectedId}/reference-library/${kind}/${item.id}/select-library-asset`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            sourceProjectId,
+            sourceItemId,
+            sourceKind: kind
+          })
+        }
+      );
+      setProject(updated);
+      setReferenceAssetVersionIndices((current) => ({
+        ...current,
+        [referenceDraftKey(kind, item.id)]: 0
+      }));
+      setNotice(`已为${referenceKindLabel(kind)}“${item.name}”选用资产库素材，后续图片、视频和成片请重新生成`);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '选用资产库素材失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleSaveImagePrompt(shotId: string) {
+    if (!selectedId || !project) {
+      return;
+    }
+
+    const shot = project.storyboard.find((item) => item.id === shotId);
+    if (!shot) {
+      setNotice('镜头不存在');
+      return;
+    }
+
+    const draft = technicalPromptDrafts[shotId];
+    const firstFramePrompt = (draft?.firstFramePrompt ?? shot.firstFramePrompt).trim();
+
+    if (!firstFramePrompt) {
+      setNotice('首帧生成 Prompt 不能为空');
+      return;
+    }
+
+    try {
+      setPending(`image-prompt:${shotId}`);
+      const updated = await requestJson<Project>(`/api/projects/${selectedId}/storyboard/${shotId}/prompts`, {
+        method: 'PUT',
+        body: JSON.stringify({ firstFramePrompt })
+      });
+      setProject(updated);
+      setTechnicalPromptDrafts((current) => {
+        const existing = current[shotId];
+
+        if (!existing) {
+          return current;
+        }
+
+        const next = { ...current };
+        const nextLastFramePrompt = existing.lastFramePrompt ?? shot.lastFramePrompt;
+        const nextTransitionHint = existing.transitionHint ?? shot.transitionHint;
+
+        if (
+          nextLastFramePrompt.trim() === shot.lastFramePrompt.trim() &&
+          nextTransitionHint.trim() === shot.transitionHint.trim()
+        ) {
+          delete next[shotId];
+          return next;
+        }
+
+        next[shotId] = {
+          firstFramePrompt,
+          lastFramePrompt: nextLastFramePrompt,
+          transitionHint: nextTransitionHint
+        };
+        return next;
+      });
+      setImageAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      setVideoAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      setNotice('首帧生成 Prompt 已保存；当前图片、视频和最终成片需要按提示重新生成或重新选择版本');
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '保存首帧生成 Prompt 失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleGenerateShotImage(shotId: string) {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending(`image-generate:${shotId}`);
+      setImageAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      setVideoAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      await requestJson<{ ok: true }>(`/api/projects/${selectedId}/storyboard/${shotId}/image/generate`, {
+        method: 'POST'
+      });
+      setNotice('已提交当前镜头的首帧生成任务，完成后可在版本列表中切换');
+      await loadProject(selectedId, true, true);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '提交首帧生成任务失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleSelectShotImageVersion(shotId: string, relativePath: string) {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending(`image-select:${shotId}`);
+      const updated = await requestJson<Project>(`/api/projects/${selectedId}/storyboard/${shotId}/image/select`, {
+        method: 'PUT',
+        body: JSON.stringify({ relativePath })
+      });
+      setProject(updated);
+      setImageAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      setVideoAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      setNotice('已切换当前镜头的首帧版本；如需保持匹配，请重新生成或重新选择对应视频版本');
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '切换首帧版本失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleGenerateShotVideo(shotId: string) {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending(`video-generate:${shotId}`);
+      setVideoAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      await requestJson<{ ok: true }>(`/api/projects/${selectedId}/storyboard/${shotId}/video/generate`, {
+        method: 'POST'
+      });
+      setNotice('已提交当前镜头的视频生成任务，完成后可在版本列表中切换');
+      await loadProject(selectedId, true, true);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '提交视频生成任务失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleSelectShotVideoVersion(shotId: string, relativePath: string) {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending(`video-select:${shotId}`);
+      const updated = await requestJson<Project>(`/api/projects/${selectedId}/storyboard/${shotId}/video/select`, {
+        method: 'PUT',
+        body: JSON.stringify({ relativePath })
+      });
+      setProject(updated);
+      setVideoAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      setNotice('已切换当前镜头的视频版本；重新执行第 6 阶段后会按当前版本剪辑');
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '切换视频版本失败');
     } finally {
       setPending('');
     }
@@ -935,6 +1395,10 @@ export function App() {
         delete next[shotId];
         return next;
       });
+      setVideoAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
       setNotice('视频生成 Prompt 已保存，相关视频片段和成片需要重新生成');
       await loadProjects(selectedId);
     } catch (error) {
@@ -984,6 +1448,10 @@ export function App() {
         delete next[shotId];
         return next;
       });
+      setVideoAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
       setNotice(
         meta?.envStatus.ttsWorkflowExists
           ? '背景声音和台词/旁白 Prompt 已保存；重新执行视频剪辑后会更新配音'
@@ -1044,6 +1512,14 @@ export function App() {
         delete next[shotId];
         return next;
       });
+      setImageAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      setVideoAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
       setNotice('镜头技术面板已保存；请按提示重新生成受影响的图片、视频或成片');
       await loadProjects(selectedId);
     } catch (error) {
@@ -1063,6 +1539,11 @@ export function App() {
   const characterLibraryAssets = buildReferenceLibraryAssets(projects, 'character');
   const sceneLibraryAssets = buildReferenceLibraryAssets(projects, 'scene');
   const objectLibraryAssets = buildReferenceLibraryAssets(projects, 'object');
+  const referenceLibraryAssetPools = {
+    character: characterLibraryAssets,
+    scene: sceneLibraryAssets,
+    object: objectLibraryAssets
+  };
   const filteredLibraryAssets =
     assetFilter === 'all' ? libraryAssets : libraryAssets.filter((asset) => asset.kind === assetFilter);
   const libraryCounts = {
@@ -1088,13 +1569,23 @@ export function App() {
   const referenceWorkflowReadyCount = meta
     ? [meta.envStatus.characterAssetWorkflowExists, meta.envStatus.textToImageWorkflowExists].filter(Boolean).length
     : 0;
+  const storyboardImageWorkflowReady =
+    (meta?.envStatus.storyboardImageWorkflowExists ?? false) || (meta?.envStatus.imageEditWorkflowExists ?? false);
   const productionWorkflowReadyCount = meta
-    ? [meta.envStatus.referenceImageToImageWorkflowExists, meta.envStatus.imageToVideoWorkflowExists].filter(Boolean).length
+    ? [
+        storyboardImageWorkflowReady,
+        meta.envStatus.referenceImageToImageWorkflowExists,
+        meta.envStatus.imageToVideoWorkflowExists
+      ].filter(Boolean).length
     : 0;
   const ttsWorkflowReady = meta?.envStatus.ttsWorkflowExists ?? false;
   const draftResolutionPreset = draft ? inferResolutionPreset(draft.settings) : 'custom';
   const draftSourceLabel = draft ? (draft.settings.scriptMode === 'generate' ? '剧情输入' : '待优化文本') : '项目输入';
   const draftFormatSummary = draft ? createFormatSummary(draft.settings) : '未设置画幅';
+  const effectiveMaxVideoSegmentDurationSeconds =
+    appSettings?.comfyui.maxVideoSegmentDurationSeconds ??
+    draft?.settings.maxVideoSegmentDurationSeconds ??
+    DEFAULT_SETTINGS.maxVideoSegmentDurationSeconds;
   const imageMap = new Map(project?.assets.images.map((asset) => [asset.shotId, asset]) ?? []);
   const videoMap = new Map(project?.assets.videos.map((asset) => [asset.shotId, asset]) ?? []);
   const referenceItems = project ? allReferenceItems(project) : [];
@@ -1185,19 +1676,48 @@ export function App() {
                       项目设置
                     </button>
                     <button
+                      className="button danger"
+                      disabled={Boolean(project.runState.isRunning) || pending === `delete-project:${project.id}`}
+                      onClick={() => void handleDeleteProject(project.id, project.title)}
+                      type="button"
+                    >
+                      {pending === `delete-project:${project.id}` ? '删除中...' : '删除项目'}
+                    </button>
+                    <button
                       className="button ghost"
                       disabled={Boolean(project.runState.isRunning) || pending === 'save'}
                       onClick={() => void handleSaveProject()}
                     >
                       {pending === 'save' ? '保存中...' : '保存项目'}
                     </button>
-                    <button
-                      className="button primary"
-                      disabled={Boolean(project.runState.isRunning) || pending === 'all'}
-                      onClick={() => void handleRunStage('all')}
-                    >
-                      {pending === 'all' ? '提交中...' : '执行全流程'}
-                    </button>
+                    {project.runState.isRunning && project.runState.requestedStage === 'all' ? (
+                      <button
+                        className="button secondary"
+                        disabled={project.runState.pauseRequested || pending === 'pause-all'}
+                        onClick={() => void handlePauseProjectRun()}
+                        type="button"
+                      >
+                        {project.runState.pauseRequested || pending === 'pause-all' ? '暂停中...' : '暂停'}
+                      </button>
+                    ) : project.runState.isPaused && project.runState.requestedStage === 'all' ? (
+                      <button
+                        className="button primary"
+                        disabled={pending === 'resume-all'}
+                        onClick={() => void handleResumeProjectRun()}
+                        type="button"
+                      >
+                        {pending === 'resume-all' ? '继续中...' : '继续全流程'}
+                      </button>
+                    ) : (
+                      <button
+                        className="button primary"
+                        disabled={Boolean(project.runState.isRunning) || pending === 'all'}
+                        onClick={() => void handleRunStage('all')}
+                        type="button"
+                      >
+                        {pending === 'all' ? '提交中...' : '执行全流程'}
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1221,9 +1741,13 @@ export function App() {
                         <strong>
                           {project.runState.isRunning
                             ? project.runState.currentStage
-                              ? STAGE_LABELS[project.runState.currentStage]
-                              : '排队中'
-                            : '无'}
+                              ? `${STAGE_LABELS[project.runState.currentStage]}${project.runState.pauseRequested ? '（暂停中）' : ''}`
+                              : project.runState.pauseRequested
+                                ? '排队中（暂停中）'
+                                : '排队中'
+                            : project.runState.isPaused
+                              ? `已暂停 · 下一阶段 ${STAGE_LABELS[nextProjectStage(project)]}`
+                              : '无'}
                         </strong>
                       </div>
                     </>
@@ -1329,8 +1853,8 @@ export function App() {
                           <strong>{draft.settings.defaultShotDurationSeconds}s</strong>
                         </div>
                         <div className="status-item">
-                          <span>单次视频上限</span>
-                          <strong>{draft.settings.maxVideoSegmentDurationSeconds}s</strong>
+                          <span>单次视频上限（系统）</span>
+                          <strong>{effectiveMaxVideoSegmentDurationSeconds}s</strong>
                         </div>
                       </div>
                       <div className="prompt-block">
@@ -1419,7 +1943,27 @@ export function App() {
                           <div className="reference-list">
                             {items.map((item) => {
                               const key = referenceDraftKey(kind, item.id);
+                              const librarySelectionKey = referenceLibrarySelectionKey(kind, item.id);
                               const promptValue = referencePromptDrafts[key] ?? item.generationPrompt;
+                              const assetVersions = getReferenceAssetVersions(item);
+                              const selectedAssetIndex = Math.min(
+                                referenceAssetVersionIndices[key] ?? 0,
+                                Math.max(assetVersions.length - 1, 0)
+                              );
+                              const selectedAsset = assetVersions[selectedAssetIndex] ?? null;
+                              const availableLibraryAssets = getReferenceLibraryAssetPool(kind, referenceLibraryAssetPools)
+                                .filter((asset) => !(asset.projectId === selectedId && asset.itemId === item.id))
+                                .filter((asset) => asset.relativePath !== item.asset?.relativePath);
+                              const selectedLibraryValue =
+                                referenceLibrarySelections[librarySelectionKey] ??
+                                (availableLibraryAssets[0]
+                                  ? `${availableLibraryAssets[0].projectId}::${availableLibraryAssets[0].itemId}`
+                                  : '');
+                              const selectedLibraryAsset =
+                                availableLibraryAssets.find(
+                                  (asset) => `${asset.projectId}::${asset.itemId}` === selectedLibraryValue
+                                ) ?? null;
+                              const selectLibraryPending = pending === `reference-library:${kind}:${item.id}`;
 
                               return (
                                 <div key={item.id} className="reference-card">
@@ -1431,7 +1975,7 @@ export function App() {
                                     <span className={`pill ${item.status}`}>{statusLabel(item.status)}</span>
                                   </div>
                                   <label className="field">
-                                    <span>生成 Prompt</span>
+                                    <span>{kind === 'character' ? '人物特点 Prompt' : '生成 Prompt'}</span>
                                     <textarea
                                       rows={4}
                                       value={promptValue}
@@ -1442,26 +1986,194 @@ export function App() {
                                         }))
                                       }
                                     />
+                                    {kind === 'character' ? (
+                                      <small className="inline-note">
+                                        无参考图时，角色三视图会使用固定模板加人物外貌特点；这里的人物特点 Prompt 也会并入后续视频生成提示词。
+                                      </small>
+                                    ) : null}
                                   </label>
-                                  {item.error ? <div className="error-box">{item.error}</div> : null}
-                                  {item.asset ? (
+                                  <div className="form-grid">
+                                    <label className="field span-2">
+                                      <span>{item.referenceImage ? '上传/更换参考图' : '上传参考图'}</span>
+                                      <input
+                                        type="file"
+                                        accept="image/*"
+                                        disabled={
+                                          Boolean(project.runState.isRunning) ||
+                                          item.status === 'running' ||
+                                          pending === `reference-upload:${kind}:${item.id}`
+                                        }
+                                        onChange={(event) => {
+                                          const file = event.currentTarget.files?.[0];
+                                          event.currentTarget.value = '';
+                                          if (!file) {
+                                            return;
+                                          }
+
+                                          void handleUploadReferenceImage(kind, item, file);
+                                        }}
+                                      />
+                                    </label>
+                                    <label className="field span-2">
+                                      <span>从资产库直接选用</span>
+                                      <select
+                                        disabled={Boolean(project.runState.isRunning) || item.status === 'running' || !availableLibraryAssets.length}
+                                        value={selectedLibraryValue}
+                                        onChange={(event) =>
+                                          setReferenceLibrarySelections((current) => ({
+                                            ...current,
+                                            [librarySelectionKey]: event.target.value
+                                          }))
+                                        }
+                                      >
+                                        {availableLibraryAssets.length ? (
+                                          availableLibraryAssets.map((asset) => (
+                                            <option
+                                              key={`${asset.projectId}:${asset.itemId}`}
+                                              value={`${asset.projectId}::${asset.itemId}`}
+                                            >
+                                              {`${asset.name} · ${asset.projectTitle} · ${formatTime(asset.createdAt)}`}
+                                            </option>
+                                          ))
+                                        ) : (
+                                          <option value="">当前资产库没有可直接选用的同类素材</option>
+                                        )}
+                                      </select>
+                                    </label>
+                                  </div>
+                                  {selectedLibraryAsset ? (
                                     <div className="reference-preview">
-                                      <img src={assetUrl(item.asset.relativePath)} alt={item.name} />
-                                      <a href={assetUrl(item.asset.relativePath)} target="_blank" rel="noreferrer">
-                                        打开参考图
+                                      <img src={assetUrl(selectedLibraryAsset.relativePath)} alt={selectedLibraryAsset.name} />
+                                      <a href={assetUrl(selectedLibraryAsset.relativePath)} target="_blank" rel="noreferrer">
+                                        打开资产库素材
                                       </a>
+                                      <small className="version-indicator">
+                                        {selectedLibraryAsset.projectTitle} · {selectedLibraryAsset.summary}
+                                      </small>
+                                      <button
+                                        className="button ghost mini-button"
+                                        disabled={
+                                          Boolean(project.runState.isRunning) ||
+                                          item.status === 'running' ||
+                                          selectLibraryPending ||
+                                          !selectedLibraryAsset
+                                        }
+                                        onClick={() => {
+                                          const [sourceProjectId, sourceItemId] = selectedLibraryValue.split('::');
+                                          if (!sourceProjectId || !sourceItemId) {
+                                            return;
+                                          }
+
+                                          void handleSelectLibraryReferenceAsset(kind, item, sourceProjectId, sourceItemId);
+                                        }}
+                                        type="button"
+                                      >
+                                        {selectLibraryPending ? '选用中...' : '选用这份素材'}
+                                      </button>
+                                    </div>
+                                  ) : null}
+                                  {item.referenceImage ? (
+                                    <div className="reference-preview">
+                                      <img src={assetUrl(item.referenceImage.relativePath)} alt={`${item.name} 上传参考图`} />
+                                      <a href={assetUrl(item.referenceImage.relativePath)} target="_blank" rel="noreferrer">
+                                        打开上传参考图
+                                      </a>
+                                      <button
+                                        className="button ghost mini-button"
+                                        disabled={
+                                          Boolean(project.runState.isRunning) ||
+                                          item.status === 'running' ||
+                                          pending === `reference-remove:${kind}:${item.id}`
+                                        }
+                                        onClick={() => void handleRemoveReferenceImage(kind, item)}
+                                        type="button"
+                                      >
+                                        {pending === `reference-remove:${kind}:${item.id}` ? '移除中...' : '移除参考图'}
+                                      </button>
+                                    </div>
+                                  ) : null}
+                                  {item.referenceImage ? (
+                                    <p className="settings-hint">
+                                      {kind === 'character'
+                                        ? '已上传参考图；角色三视图会按参考图和固定三视图模板生成，成功后会自动清除这张临时参考图。继续上传即可更换。'
+                                        : '已上传参考图；生成按钮会自动按“参考图 + Prompt”处理，成功后会自动清除这张临时参考图。继续上传即可更换。'}
+                                    </p>
+                                  ) : kind === 'character' ? (
+                                    <p className="settings-hint">
+                                      未上传人物参考图时，角色三视图会按“根据参考三视图生成提供人物的三视图，特点为
+                                      {'{外貌特点}'}”生成；这里的人物特点 Prompt 也会并入后续视频生成提示词。
+                                    </p>
+                                  ) : null}
+                                  {item.error ? <div className="error-box">{item.error}</div> : null}
+                                  {selectedAsset ? (
+                                    <div className="reference-preview">
+                                      <img src={assetUrl(selectedAsset.relativePath)} alt={item.name} />
+                                      <a href={assetUrl(selectedAsset.relativePath)} target="_blank" rel="noreferrer">
+                                        打开生成资产
+                                      </a>
+                                      {assetVersions.length > 1 ? (
+                                        <div className="inline-actions">
+                                          <button
+                                            className="button ghost mini-button"
+                                            disabled={selectedAssetIndex <= 0}
+                                            onClick={() =>
+                                              setReferenceAssetVersionIndices((current) => ({
+                                                ...current,
+                                                [key]: Math.max(0, selectedAssetIndex - 1)
+                                              }))
+                                            }
+                                            type="button"
+                                          >
+                                            较新
+                                          </button>
+                                          <button
+                                            className="button ghost mini-button"
+                                            disabled={selectedAssetIndex >= assetVersions.length - 1}
+                                            onClick={() =>
+                                              setReferenceAssetVersionIndices((current) => ({
+                                                ...current,
+                                                [key]: Math.min(assetVersions.length - 1, selectedAssetIndex + 1)
+                                              }))
+                                            }
+                                            type="button"
+                                          >
+                                            较旧
+                                          </button>
+                                          <small className="version-indicator">
+                                            {selectedAssetIndex + 1}/{assetVersions.length} · {formatTime(selectedAsset.createdAt)}
+                                          </small>
+                                        </div>
+                                      ) : null}
                                     </div>
                                   ) : null}
                                   <button
                                     className="button secondary"
-                                    disabled={Boolean(project.runState.isRunning) || item.status === 'running'}
+                                    disabled={
+                                      Boolean(project.runState.isRunning) ||
+                                      item.status === 'running' ||
+                                      pending === `reference-upload:${kind}:${item.id}` ||
+                                      pending === `reference-remove:${kind}:${item.id}`
+                                    }
                                     onClick={() => void handleGenerateReferenceAsset(kind, item)}
+                                    type="button"
                                   >
                                     {item.status === 'running'
                                       ? '生成中...'
-                                      : item.asset
-                                        ? '重新生成'
-                                        : '生成并保存到资产库'}
+                                      : kind === 'character'
+                                        ? item.referenceImage
+                                          ? item.asset
+                                            ? '按参考图重新生成三视图'
+                                            : '按参考图生成三视图'
+                                          : item.asset
+                                            ? '重新生成三视图'
+                                            : '生成三视图'
+                                        : item.referenceImage
+                                          ? item.asset
+                                            ? '按参考图 + Prompt 重新生成'
+                                            : '按参考图 + Prompt 生成'
+                                          : item.asset
+                                            ? '按 Prompt 重新生成'
+                                            : '按 Prompt 生成'}
                                   </button>
                                 </div>
                               );
@@ -1573,14 +2285,27 @@ export function App() {
                         <strong>{project.storyboard.length}</strong>
                       </div>
                       <div className="status-item">
-                        <span>图片工作流</span>
-                        <strong>{meta?.envStatus.referenceImageToImageWorkflowExists ? '已就绪' : '未配置'}</strong>
+                          <span>首帧工作流</span>
+                        <strong>{storyboardImageWorkflowReady ? '已就绪' : '未配置'}</strong>
                       </div>
                     </div>
                     {project.storyboard.length ? (
                       <div className="shots-grid">
                         {project.storyboard.map((shot) => {
-                          const imageAsset = imageMap.get(shot.id);
+                          const technicalPromptDraft = technicalPromptDrafts[shot.id];
+                          const firstFramePromptValue = technicalPromptDraft?.firstFramePrompt ?? shot.firstFramePrompt;
+                          const imagePromptDirty = firstFramePromptValue.trim() !== shot.firstFramePrompt.trim();
+                          const imagePromptPending = pending === `image-prompt:${shot.id}`;
+                          const imageGeneratePending = pending === `image-generate:${shot.id}`;
+                          const imageSelectPending = pending === `image-select:${shot.id}`;
+                          const imageAsset = imageMap.get(shot.id) ?? null;
+                          const imageVersions = getShotAssetVersions(project, 'images', shot.id);
+                          const selectedImageIndex = Math.min(
+                            imageAssetVersionIndices[shot.id] ?? 0,
+                            Math.max(imageVersions.length - 1, 0)
+                          );
+                          const selectedImage = imageVersions[selectedImageIndex] ?? null;
+                          const selectedImageIsCurrent = imageAsset?.relativePath === selectedImage?.relativePath;
 
                           return (
                             <article key={shot.id} className="shot-card">
@@ -1588,26 +2313,118 @@ export function App() {
                                 <strong>
                                   S{shot.sceneNumber} · #{shot.shotNumber}
                                 </strong>
-                                <span>{imageAsset ? '已生成' : '未生成'}</span>
+                                <span>{imageAsset ? '当前版本已就绪' : selectedImage ? '可从历史版本恢复' : '未生成'}</span>
                               </div>
                               <h4>{shot.title}</h4>
                               <div className="prompt-block">
-                                <h5>首帧描述</h5>
-                                <p>{shot.firstFramePrompt}</p>
+                                <div className="prompt-block-head">
+                                  <h5>首帧生成 Prompt</h5>
+                                  <button
+                                    className="button ghost mini-button"
+                                    disabled={
+                                      Boolean(project.runState.isRunning) ||
+                                      imagePromptPending ||
+                                      !imagePromptDirty ||
+                                      !firstFramePromptValue.trim()
+                                    }
+                                    onClick={() => void handleSaveImagePrompt(shot.id)}
+                                    type="button"
+                                  >
+                                    {imagePromptPending ? '保存中...' : '保存首帧 Prompt'}
+                                  </button>
+                                </div>
+                                <textarea
+                                  className="prompt-editor"
+                                  rows={5}
+                                  value={firstFramePromptValue}
+                                  onChange={(event) =>
+                                    setTechnicalPromptDrafts((current) => ({
+                                      ...current,
+                                      [shot.id]: {
+                                        firstFramePrompt: event.target.value,
+                                        lastFramePrompt: current[shot.id]?.lastFramePrompt ?? shot.lastFramePrompt,
+                                        transitionHint: current[shot.id]?.transitionHint ?? shot.transitionHint
+                                      }
+                                    }))
+                                  }
+                                  placeholder="输入这个镜头的首帧生成 Prompt"
+                                />
                               </div>
                               <div className="asset-box">
-                                <span>图片预览</span>
-                                {imageAsset ? (
+                                <span>首帧版本</span>
+                                {selectedImage ? (
                                   <>
-                                    <img src={assetUrl(imageAsset.relativePath)} alt={shot.title} />
-                                    <a href={assetUrl(imageAsset.relativePath)} target="_blank" rel="noreferrer">
+                                    <img src={assetUrl(selectedImage.relativePath)} alt={shot.title} />
+                                    <a href={assetUrl(selectedImage.relativePath)} target="_blank" rel="noreferrer">
                                       打开原图
                                     </a>
+                                    {imageVersions.length > 1 ? (
+                                      <div className="inline-actions">
+                                        <button
+                                          className="button ghost mini-button"
+                                          disabled={selectedImageIndex <= 0}
+                                          onClick={() =>
+                                            setImageAssetVersionIndices((current) => ({
+                                              ...current,
+                                              [shot.id]: Math.max(0, selectedImageIndex - 1)
+                                            }))
+                                          }
+                                          type="button"
+                                        >
+                                          较新
+                                        </button>
+                                        <button
+                                          className="button ghost mini-button"
+                                          disabled={selectedImageIndex >= imageVersions.length - 1}
+                                          onClick={() =>
+                                            setImageAssetVersionIndices((current) => ({
+                                              ...current,
+                                              [shot.id]: Math.min(imageVersions.length - 1, selectedImageIndex + 1)
+                                            }))
+                                          }
+                                          type="button"
+                                        >
+                                          较旧
+                                        </button>
+                                        <small className="version-indicator">
+                                          {selectedImageIndex + 1}/{imageVersions.length} · {formatTime(selectedImage.createdAt)}
+                                        </small>
+                                      </div>
+                                    ) : null}
+                                    {!selectedImageIsCurrent ? (
+                                      <button
+                                        className="button ghost mini-button"
+                                        disabled={
+                                          Boolean(project.runState.isRunning) ||
+                                          imageSelectPending ||
+                                          imagePromptDirty
+                                        }
+                                        onClick={() => void handleSelectShotImageVersion(shot.id, selectedImage.relativePath)}
+                                        type="button"
+                                      >
+                                        {imageSelectPending ? '切换中...' : '设为当前版本'}
+                                      </button>
+                                    ) : null}
                                   </>
                                 ) : (
                                   <small>当前镜头还没有首帧图片。</small>
                                 )}
                               </div>
+                              <button
+                                className="button secondary"
+                                disabled={
+                                  Boolean(project.runState.isRunning) ||
+                                  imageGeneratePending ||
+                                  imagePromptPending ||
+                                  imageSelectPending ||
+                                  imagePromptDirty ||
+                                  !firstFramePromptValue.trim()
+                                }
+                                onClick={() => void handleGenerateShotImage(shot.id)}
+                                type="button"
+                              >
+                                {imageGeneratePending ? '生成中...' : imageAsset ? '重新生成当前镜头' : '生成当前镜头'}
+                              </button>
                             </article>
                           );
                         })}
@@ -1627,8 +2444,15 @@ export function App() {
                     {project.storyboard.length ? (
                       <div className="shots-grid">
                         {project.storyboard.map((shot) => {
-                          const imageAsset = imageMap.get(shot.id);
-                          const videoAsset = videoMap.get(shot.id);
+                          const imageAsset = imageMap.get(shot.id) ?? null;
+                          const videoAsset = videoMap.get(shot.id) ?? null;
+                          const videoVersions = getShotAssetVersions(project, 'videos', shot.id);
+                          const selectedVideoIndex = Math.min(
+                            videoAssetVersionIndices[shot.id] ?? 0,
+                            Math.max(videoVersions.length - 1, 0)
+                          );
+                          const selectedVideo = videoVersions[selectedVideoIndex] ?? null;
+                          const selectedVideoIsCurrent = videoAsset?.relativePath === selectedVideo?.relativePath;
                           const videoPromptValue = videoPromptDrafts[shot.id] ?? shot.videoPrompt;
                           const videoPromptDirty = videoPromptValue.trim() !== shot.videoPrompt.trim();
                           const videoPromptPending = pending === `video-prompt:${shot.id}`;
@@ -1650,6 +2474,9 @@ export function App() {
                             backgroundSoundPromptValue.trim() !== shot.backgroundSoundPrompt.trim() ||
                             speechPromptValue.trim() !== shot.speechPrompt.trim();
                           const audioPromptPending = pending === `audio-prompts:${shot.id}`;
+                          const videoGeneratePending = pending === `video-generate:${shot.id}`;
+                          const videoSelectPending = pending === `video-select:${shot.id}`;
+                          const videoGenerationDirty = videoPromptDirty || technicalPromptDirty || audioPromptDirty;
 
                           return (
                             <article key={shot.id} className="shot-card">
@@ -1855,18 +2682,82 @@ export function App() {
                                 </div>
                                 <div className="asset-box">
                                   <span>视频片段</span>
-                                  {videoAsset ? (
+                                  {selectedVideo ? (
                                     <>
-                                      <video src={assetUrl(videoAsset.relativePath)} controls playsInline />
-                                      <a href={assetUrl(videoAsset.relativePath)} target="_blank" rel="noreferrer">
+                                      <video src={assetUrl(selectedVideo.relativePath)} controls playsInline />
+                                      <a href={assetUrl(selectedVideo.relativePath)} target="_blank" rel="noreferrer">
                                         打开片段
                                       </a>
+                                      {videoVersions.length > 1 ? (
+                                        <div className="inline-actions">
+                                          <button
+                                            className="button ghost mini-button"
+                                            disabled={selectedVideoIndex <= 0}
+                                            onClick={() =>
+                                              setVideoAssetVersionIndices((current) => ({
+                                                ...current,
+                                                [shot.id]: Math.max(0, selectedVideoIndex - 1)
+                                              }))
+                                            }
+                                            type="button"
+                                          >
+                                            较新
+                                          </button>
+                                          <button
+                                            className="button ghost mini-button"
+                                            disabled={selectedVideoIndex >= videoVersions.length - 1}
+                                            onClick={() =>
+                                              setVideoAssetVersionIndices((current) => ({
+                                                ...current,
+                                                [shot.id]: Math.min(videoVersions.length - 1, selectedVideoIndex + 1)
+                                              }))
+                                            }
+                                            type="button"
+                                          >
+                                            较旧
+                                          </button>
+                                          <small className="version-indicator">
+                                            {selectedVideoIndex + 1}/{videoVersions.length} · {formatTime(selectedVideo.createdAt)}
+                                          </small>
+                                        </div>
+                                      ) : null}
+                                      {!selectedVideoIsCurrent ? (
+                                        <button
+                                          className="button ghost mini-button"
+                                          disabled={
+                                            Boolean(project.runState.isRunning) ||
+                                            videoSelectPending ||
+                                            videoGenerationDirty
+                                          }
+                                          onClick={() => void handleSelectShotVideoVersion(shot.id, selectedVideo.relativePath)}
+                                          type="button"
+                                        >
+                                          {videoSelectPending ? '切换中...' : '设为当前版本'}
+                                        </button>
+                                      ) : null}
                                     </>
                                   ) : (
                                     <small>未生成</small>
                                   )}
                                 </div>
                               </div>
+                              <button
+                                className="button secondary"
+                                disabled={
+                                  Boolean(project.runState.isRunning) ||
+                                  videoGeneratePending ||
+                                  videoSelectPending ||
+                                  videoPromptPending ||
+                                  technicalPromptPending ||
+                                  audioPromptPending ||
+                                  videoGenerationDirty ||
+                                  !imageAsset
+                                }
+                                onClick={() => void handleGenerateShotVideo(shot.id)}
+                                type="button"
+                              >
+                                {videoGeneratePending ? '生成中...' : videoAsset ? '重新生成当前镜头' : '生成当前镜头'}
+                              </button>
                             </article>
                           );
                         })}
@@ -1961,23 +2852,33 @@ export function App() {
 
                   {projects.map((item) => {
                     const status = projectCardStatus(item);
+                    const deletePending = pending === `delete-project:${item.id}`;
 
                     return (
-                      <button key={item.id} className="project-card" onClick={() => handleOpenProject(item.id)} type="button">
-                        <div className="project-card-top">
-                          <span className={`pill ${status.badgeTone}`}>{status.badge}</span>
-                          <small>{SCRIPT_MODE_LABELS[item.settings.scriptMode]}</small>
-                        </div>
-                        <div className="project-card-body">
-                          <strong>{item.title}</strong>
-                          <p>{createFormatSummary(item.settings)}</p>
-                        </div>
-                        <div className="project-card-meta">
-                          <span>{status.detail}</span>
-                          <span>{`分镜 ${item.storyboard.length} · 图片 ${item.assets.images.length} · 视频 ${item.assets.videos.length}`}</span>
-                          <small>{`更新于 ${formatTime(item.updatedAt)}`}</small>
-                        </div>
-                      </button>
+                      <div key={item.id} className="project-card-shell">
+                        <button className="project-card" onClick={() => handleOpenProject(item.id)} type="button">
+                          <div className="project-card-top">
+                            <span className={`pill ${status.badgeTone}`}>{status.badge}</span>
+                          </div>
+                          <div className="project-card-body">
+                            <strong>{item.title}</strong>
+                            <p>{createFormatSummary(item.settings)}</p>
+                          </div>
+                          <div className="project-card-meta">
+                            <span>{status.detail}</span>
+                            <span>{`分镜 ${item.storyboard.length} · 图片 ${item.assets.images.length} · 视频 ${item.assets.videos.length}`}</span>
+                            <small>{`更新于 ${formatTime(item.updatedAt)}`}</small>
+                          </div>
+                        </button>
+                        <button
+                          className="button danger mini-button project-card-delete"
+                          disabled={Boolean(item.runState.isRunning) || deletePending}
+                          onClick={() => void handleDeleteProject(item.id, item.title)}
+                          type="button"
+                        >
+                          {deletePending ? '删除中...' : '删除'}
+                        </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -2557,28 +3458,17 @@ export function App() {
                   />
                 </label>
                 <label className="field">
-                  <span>单次生成最长视频秒数</span>
+                  <span>单次生成最长视频秒数（系统设置）</span>
                   <input
                     type="number"
-                    value={draft.settings.maxVideoSegmentDurationSeconds}
-                    onChange={(event) =>
-                      setDraft((current) => {
-                        setDraftDirty(true);
-                        return current
-                          ? {
-                              ...current,
-                              settings: {
-                                ...current.settings,
-                                maxVideoSegmentDurationSeconds:
-                                  Number(event.target.value) || current.settings.maxVideoSegmentDurationSeconds
-                              }
-                            }
-                          : current;
-                      })
-                    }
+                    value={effectiveMaxVideoSegmentDurationSeconds}
+                    disabled
                   />
                 </label>
               </div>
+              <p className="settings-hint">
+                镜头总时长由 LLM 在分镜阶段自行决定。这里显示的是视频工作流“单次调用”的系统上限；当镜头总时长超过该值时，服务端会自动多次生成并拼接成完整镜头。
+              </p>
             </section>
 
             <div className="modal-actions">

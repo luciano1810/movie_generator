@@ -1,7 +1,7 @@
 import path from 'node:path';
 import dotenv from 'dotenv';
 import ffmpegStatic from 'ffmpeg-static';
-import type { AppSettings } from '../shared/types.js';
+import { DEFAULT_SETTINGS, type AppSettings } from '../shared/types.js';
 
 dotenv.config();
 
@@ -29,14 +29,23 @@ export const envAppSettingsDefaults: AppSettings = {
     model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini'
   },
   comfyui: {
-    baseUrl: process.env.COMFYUI_BASE_URL ?? 'http://127.0.0.1:8188',
+    baseUrl: process.env.COMFYUI_BASE_URL ?? 'http://100.100.8.2:8188',
     workflows: {
       character_asset: {
         workflowPath: resolveMaybeRelative(
           process.env.COMFYUI_CHARACTER_ASSET_WORKFLOW ??
             process.env.COMFYUI_CHARACTER_WORKFLOW ??
             process.env.COMFYUI_IMAGE_WORKFLOW,
-          'config/workflows/image-workflow.template.json'
+          'config/workflows/firered-image-edit-1.1_api.template.json'
+        )
+      },
+      storyboard_image: {
+        workflowPath: resolveMaybeRelative(
+          process.env.COMFYUI_STORYBOARD_IMAGE_WORKFLOW ??
+            process.env.COMFYUI_IMAGE_EDIT_WORKFLOW ??
+            process.env.COMFYUI_STORYBOARD_WORKFLOW ??
+            process.env.COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW,
+          'config/workflows/storyboard-image-edit-3ref.template.json'
         )
       },
       text_to_image: {
@@ -59,7 +68,7 @@ export const envAppSettingsDefaults: AppSettings = {
       image_edit: {
         workflowPath: resolveMaybeRelative(
           process.env.COMFYUI_IMAGE_EDIT_WORKFLOW ?? process.env.COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW,
-          'config/workflows/image-workflow.template.json'
+          'config/workflows/firered-image-edit-1.1_api.template.json'
         )
       },
       text_to_video: {
@@ -71,7 +80,7 @@ export const envAppSettingsDefaults: AppSettings = {
       image_to_video: {
         workflowPath: resolveMaybeRelative(
           process.env.COMFYUI_IMAGE_TO_VIDEO_WORKFLOW ?? process.env.COMFYUI_VIDEO_WORKFLOW,
-          'config/workflows/video-workflow.template.json'
+          'config/workflows/ltx_2.3_ti2v_api.template.json'
         )
       },
       tts: {
@@ -81,7 +90,10 @@ export const envAppSettingsDefaults: AppSettings = {
       }
     },
     pollIntervalMs: Number(process.env.COMFYUI_POLL_INTERVAL_MS ?? 3000),
-    timeoutMs: Number(process.env.COMFYUI_TIMEOUT_MS ?? 1_800_000)
+    timeoutMs: Number(process.env.COMFYUI_TIMEOUT_MS ?? 1_800_000),
+    maxVideoSegmentDurationSeconds: Number(
+      process.env.COMFYUI_MAX_VIDEO_SEGMENT_DURATION_SECONDS ?? DEFAULT_SETTINGS.maxVideoSegmentDurationSeconds
+    )
   },
   ffmpeg: {
     binaryPath: process.env.FFMPEG_PATH ?? resolvedFfmpegPath

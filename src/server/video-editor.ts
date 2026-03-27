@@ -34,6 +34,22 @@ async function runFfmpeg(args: string[]): Promise<void> {
   });
 }
 
+async function hasAudioStream(inputPath: string): Promise<boolean> {
+  const settings = getAppSettings();
+
+  if (!settings.ffmpeg.binaryPath) {
+    return false;
+  }
+
+  return await new Promise<boolean>((resolve) => {
+    const child = spawn(settings.ffmpeg.binaryPath, ['-v', 'error', '-i', inputPath, '-map', '0:a:0', '-f', 'null', '-']);
+    child.on('error', () => resolve(false));
+    child.on('close', (code: number | null) => {
+      resolve(code === 0);
+    });
+  });
+}
+
 async function normalizeSegmentsWithAudio(
   videoPaths: string[],
   audioPaths: Array<string | null>,
@@ -48,17 +64,31 @@ async function normalizeSegmentsWithAudio(
   for (let index = 0; index < videoPaths.length; index += 1) {
     const videoPath = videoPaths[index];
     const audioPath = audioPaths[index];
+    const sourceHasAudio = await hasAudioStream(videoPath);
     const segmentPath = path.join(segmentsDir, `segment-${String(index + 1).padStart(3, '0')}.mp4`);
     const args = ['-y', '-i', videoPath];
+    let audioMap = '';
 
     if (audioPath) {
       args.push('-i', audioPath);
-      args.push('-filter_complex', '[1:a]apad[aout]');
+      if (sourceHasAudio) {
+        args.push(
+          '-filter_complex',
+          '[0:a]aresample=48000,apad[va];[1:a]aresample=48000,apad[ea];[va][ea]amix=inputs=2:duration=first:dropout_transition=0[aout]'
+        );
+      } else {
+        args.push('-filter_complex', '[1:a]aresample=48000,apad[aout]');
+      }
+      audioMap = '[aout]';
+    } else if (sourceHasAudio) {
+      args.push('-filter_complex', '[0:a]aresample=48000,apad[aout]');
+      audioMap = '[aout]';
     } else {
       args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');
+      audioMap = '1:a:0';
     }
 
-    args.push('-map', '0:v:0', '-map', audioPath ? '[aout]' : '1:a:0');
+    args.push('-map', '0:v:0', '-map', audioMap);
     args.push(
       '-c:v',
       'libx264',
@@ -115,8 +145,8 @@ export async function stitchVideos(
 
   await mkdir(path.dirname(outputPath), { recursive: true });
 
-  const sourceVideoPaths =
-    audioPaths.length > 0 ? await normalizeSegmentsWithAudio(videoPaths, audioPaths, outputPath, fps) : videoPaths;
+  const normalizedAudioPaths = audioPaths.length ? audioPaths : Array(videoPaths.length).fill(null);
+  const sourceVideoPaths = await normalizeSegmentsWithAudio(videoPaths, normalizedAudioPaths, outputPath, fps);
 
   if (sourceVideoPaths.length === 1) {
     await copyFile(sourceVideoPaths[0], outputPath);
@@ -127,24 +157,6 @@ export async function stitchVideos(
   const concatText = sourceVideoPaths.map((videoPath) => `file '${escapeConcatPath(videoPath)}'`).join('\n');
   await writeFile(listFile, concatText, 'utf8');
 
-  if (audioPaths.length > 0) {
-    await runFfmpeg([
-      '-y',
-      '-f',
-      'concat',
-      '-safe',
-      '0',
-      '-i',
-      listFile,
-      '-c',
-      'copy',
-      '-movflags',
-      '+faststart',
-      outputPath
-    ]);
-    return;
-  }
-
   await runFfmpeg([
     '-y',
     '-f',
@@ -153,13 +165,8 @@ export async function stitchVideos(
     '0',
     '-i',
     listFile,
-    '-an',
-    '-r',
-    String(fps),
-    '-c:v',
-    'libx264',
-    '-pix_fmt',
-    'yuv420p',
+    '-c',
+    'copy',
     '-movflags',
     '+faststart',
     outputPath

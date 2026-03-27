@@ -1,14 +1,18 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import {
   type AppSettings,
   type GeneratedAsset,
   type LogLevel,
   type Project,
+  type ProjectRunState,
   type ReferenceAssetItem,
   type ReferenceAssetKind,
   type RunStage,
   type StageId,
+  createIdleRunState,
   createEmptyReferenceLibrary,
   STAGES,
   STAGE_LABELS
@@ -31,12 +35,15 @@ import {
   type TemplateVariable,
   fetchComfyOutputFile,
   runComfyWorkflow,
+  uploadImageBufferToComfy,
   uploadImageToComfy
 } from './comfyui.js';
 import { extractLastFrame, stitchVideos } from './video-editor.js';
 
 const runningProjects = new Map<string, Promise<void>>();
 const runningReferenceGenerations = new Map<string, Promise<void>>();
+const cachedRunStates = new Map<string, ProjectRunState>();
+const pauseRequestedProjects = new Set<string>();
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm', '.mkv', '.gif']);
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus']);
@@ -46,6 +53,27 @@ interface GenerationReferenceInputs {
   referenceVariables: Record<string, TemplateVariable>;
   referenceCount: number;
   referenceImageCount: number;
+  referenceImages: string[];
+}
+
+const DEFAULT_CHARACTER_POSE_REFERENCE_PATH = path.resolve(
+  process.cwd(),
+  'config/reference-images/character-pose-three-view.png'
+);
+const MAX_STORYBOARD_REFERENCE_IMAGES_PER_RUN = 3;
+const MAX_STORYBOARD_REFERENCE_IMAGES_PER_CHAIN_RUN = 2;
+const LTX_TARGET_LONG_SIDE = 720;
+const LTX_DIMENSION_MULTIPLE = 16;
+
+function buildCharacterAssetWorkflowPrompt(prompt: string, hasReferenceImage: boolean): string {
+  if (hasReferenceImage) {
+    return '根据参考三视图生成提供人物图片的三视图';
+  }
+
+  const trimmedPrompt = prompt.trim();
+  return trimmedPrompt
+    ? `根据参考三视图生成提供人物的三视图，特点为${trimmedPrompt}`
+    : '根据参考三视图生成提供人物的三视图';
 }
 
 function now(): string {
@@ -90,9 +118,44 @@ function appendLog(project: Project, message: string, level: LogLevel = 'info'):
   project.updatedAt = now();
 }
 
+class PipelinePauseError extends Error {
+  constructor(readonly stage: StageId) {
+    super(`PAUSE_REQUESTED:${stage}`);
+    this.name = 'PipelinePauseError';
+  }
+}
+
+function syncProjectRunState(project: Project): void {
+  const cached = cachedRunStates.get(project.id);
+
+  if (cached) {
+    project.runState = { ...cached };
+  }
+}
+
 async function saveProject(project: Project): Promise<void> {
+  syncProjectRunState(project);
   project.updatedAt = now();
   await writeProject(project);
+}
+
+async function persistProjectRunState(projectId: string, runState: ProjectRunState): Promise<void> {
+  const project = await readProject(projectId);
+  const nextRunState = { ...runState };
+  cachedRunStates.set(projectId, nextRunState);
+  project.runState = nextRunState;
+  project.updatedAt = now();
+  await writeProject(project);
+}
+
+function isPauseRequested(projectId: string): boolean {
+  return pauseRequestedProjects.has(projectId);
+}
+
+async function throwIfPauseRequested(projectId: string, stage: StageId): Promise<void> {
+  if (isPauseRequested(projectId)) {
+    throw new PipelinePauseError(stage);
+  }
 }
 
 async function persistReferenceLibrary(project: Project): Promise<void> {
@@ -104,9 +167,169 @@ async function persistReferenceLibrary(project: Project): Promise<void> {
   project.artifacts.referenceLibraryJson = libraryFile.relativePath;
 }
 
+function hasGeneratedMediaOutputs(project: Project): boolean {
+  return Boolean(project.assets.images.length || project.assets.videos.length || project.assets.finalVideo);
+}
+
+async function deleteStoredAsset(asset: GeneratedAsset | null): Promise<void> {
+  if (!asset?.relativePath) {
+    return;
+  }
+
+  try {
+    await rm(fromStorageRelative(asset.relativePath), { force: true });
+  } catch {
+    // Ignore cleanup errors for temporary inputs.
+  }
+}
+
+type ShotAssetStage = 'images' | 'videos';
+
+function getShotAssetHistoryMap(project: Project, stage: ShotAssetStage) {
+  return stage === 'images' ? project.assets.imageHistory : project.assets.videoHistory;
+}
+
+function setShotAssetHistoryMap(
+  project: Project,
+  stage: ShotAssetStage,
+  history: Project['assets']['imageHistory'] | Project['assets']['videoHistory']
+): void {
+  if (stage === 'images') {
+    project.assets.imageHistory = history;
+    return;
+  }
+
+  project.assets.videoHistory = history;
+}
+
+function getShotAssetCollection(project: Project, stage: ShotAssetStage): GeneratedAsset[] {
+  return stage === 'images' ? project.assets.images : project.assets.videos;
+}
+
+function setShotAssetCollection(project: Project, stage: ShotAssetStage, assets: GeneratedAsset[]): void {
+  if (stage === 'images') {
+    project.assets.images = assets;
+    return;
+  }
+
+  project.assets.videos = assets;
+}
+
+function getShotAssetHistory(project: Project, stage: ShotAssetStage, shotId: string): GeneratedAsset[] {
+  return getShotAssetHistoryMap(project, stage)[shotId] ?? [];
+}
+
+function setShotAssetHistory(
+  project: Project,
+  stage: ShotAssetStage,
+  shotId: string,
+  history: GeneratedAsset[]
+): void {
+  const historyMap = {
+    ...getShotAssetHistoryMap(project, stage)
+  };
+
+  if (history.length) {
+    historyMap[shotId] = history;
+  } else {
+    delete historyMap[shotId];
+  }
+
+  setShotAssetHistoryMap(project, stage, historyMap);
+}
+
+function getActiveShotAsset(project: Project, stage: ShotAssetStage, shotId: string): GeneratedAsset | null {
+  return getShotAssetCollection(project, stage).find((asset) => asset.shotId === shotId) ?? null;
+}
+
+function archiveShotAssetVersion(
+  project: Project,
+  stage: ShotAssetStage,
+  shotId: string,
+  asset: GeneratedAsset | null
+): void {
+  if (!asset) {
+    return;
+  }
+
+  const history = getShotAssetHistory(project, stage, shotId);
+  if (history.some((item) => item.relativePath === asset.relativePath)) {
+    return;
+  }
+
+  setShotAssetHistory(project, stage, shotId, [asset, ...history]);
+}
+
+function removeShotAssetVersionFromHistory(
+  project: Project,
+  stage: ShotAssetStage,
+  shotId: string,
+  relativePath: string
+): void {
+  const history = getShotAssetHistory(project, stage, shotId).filter((asset) => asset.relativePath !== relativePath);
+  setShotAssetHistory(project, stage, shotId, history);
+}
+
+function clearActiveShotAsset(
+  project: Project,
+  stage: ShotAssetStage,
+  shotId: string,
+  options: {
+    archive?: boolean;
+  } = {}
+): GeneratedAsset | null {
+  const current = getActiveShotAsset(project, stage, shotId);
+
+  if (!current) {
+    return null;
+  }
+
+  if (options.archive !== false) {
+    archiveShotAssetVersion(project, stage, shotId, current);
+  }
+
+  setShotAssetCollection(
+    project,
+    stage,
+    getShotAssetCollection(project, stage).filter((asset) => asset.shotId !== shotId)
+  );
+
+  return current;
+}
+
+function setActiveShotAsset(project: Project, stage: ShotAssetStage, shotId: string, nextAsset: GeneratedAsset): void {
+  const current = getActiveShotAsset(project, stage, shotId);
+
+  if (current && current.relativePath !== nextAsset.relativePath) {
+    archiveShotAssetVersion(project, stage, shotId, current);
+  }
+
+  removeShotAssetVersionFromHistory(project, stage, shotId, nextAsset.relativePath);
+  setShotAssetCollection(
+    project,
+    stage,
+    [...getShotAssetCollection(project, stage).filter((asset) => asset.shotId !== shotId), nextAsset]
+  );
+}
+
+function archiveAllActiveShotAssets(project: Project, stage: ShotAssetStage): void {
+  for (const asset of getShotAssetCollection(project, stage)) {
+    if (asset.shotId) {
+      archiveShotAssetVersion(project, stage, asset.shotId, asset);
+    }
+  }
+
+  setShotAssetCollection(project, stage, []);
+}
+
+function clearAllShotAssetHistory(project: Project, stage: ShotAssetStage): void {
+  setShotAssetCollection(project, stage, []);
+  setShotAssetHistoryMap(project, stage, {});
+}
+
 function invalidateGeneratedMediaFromReferenceLibrary(project: Project): void {
-  project.assets.images = [];
-  project.assets.videos = [];
+  clearAllShotAssetHistory(project, 'images');
+  clearAllShotAssetHistory(project, 'videos');
   project.assets.finalVideo = null;
   resetStage(project, 'images');
   resetStage(project, 'videos');
@@ -117,8 +340,8 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
   if (stage === 'script') {
     project.script = null;
     project.storyboard = [];
-    project.assets.images = [];
-    project.assets.videos = [];
+    clearAllShotAssetHistory(project, 'images');
+    clearAllShotAssetHistory(project, 'videos');
     project.assets.finalVideo = null;
     project.referenceLibrary = createEmptyReferenceLibrary();
     project.artifacts.scriptMarkdown = null;
@@ -142,8 +365,8 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
 
   if (stage === 'storyboard') {
     project.storyboard = [];
-    project.assets.images = [];
-    project.assets.videos = [];
+    clearAllShotAssetHistory(project, 'images');
+    clearAllShotAssetHistory(project, 'videos');
     project.assets.finalVideo = null;
     project.artifacts.storyboardJson = null;
     resetStage(project, 'images');
@@ -153,8 +376,8 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
   }
 
   if (stage === 'images') {
-    project.assets.images = [];
-    project.assets.videos = [];
+    archiveAllActiveShotAssets(project, 'images');
+    archiveAllActiveShotAssets(project, 'videos');
     project.assets.finalVideo = null;
     resetStage(project, 'videos');
     resetStage(project, 'edit');
@@ -162,7 +385,7 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
   }
 
   if (stage === 'videos') {
-    project.assets.videos = [];
+    archiveAllActiveShotAssets(project, 'videos');
     project.assets.finalVideo = null;
     resetStage(project, 'edit');
     return;
@@ -265,6 +488,37 @@ function buildReferenceContext(project: Project): string {
   return sections.join('\n');
 }
 
+function buildVideoCharacterReferencePrompt(
+  project: Project,
+  shot: Project['storyboard'][number]
+): string {
+  const hasSpeechContent = Boolean(shot.dialogue.trim() || shot.voiceover.trim());
+  const characters = project.referenceLibrary.characters
+    .map((item) => ({
+      name: item.name.trim(),
+      detail: item.generationPrompt.trim() || item.summary.trim()
+    }))
+    .filter((item) => item.name && item.detail);
+
+  if (!characters.length) {
+    return '';
+  }
+
+  const haystack = `${shot.dialogue}\n${shot.voiceover}\n${shot.videoPrompt}\n${shot.speechPrompt}`.toLowerCase();
+  const matchedCharacters = hasSpeechContent
+    ? characters.filter((item) => haystack.includes(item.name.toLowerCase()))
+    : characters;
+  const selectedCharacters = (matchedCharacters.length ? matchedCharacters : characters).slice(0, hasSpeechContent ? 4 : 6);
+
+  return [
+    hasSpeechContent ? '人物特征与说话者识别：' : '人物特征约束：',
+    ...selectedCharacters.map((item) => `- ${item.name}：${item.detail}`),
+    hasSpeechContent
+      ? '镜头内如有对白或旁白，必须根据这些人物外观、身份和气质特征明确当前说话者，并让对应人物的口型、表情、动作与发声主体一致，不要只写角色名。'
+      : '保持人物外观、服装和气质稳定一致。'
+  ].join('\n');
+}
+
 async function uploadImageToComfyCached(localPath: string, cache: Map<string, string>): Promise<string> {
   const cached = cache.get(localPath);
   if (cached) {
@@ -326,12 +580,16 @@ async function buildGenerationReferenceInputs(
   const objectReferenceImages = preparedByKind.object
     .map((item) => (typeof item.input_image === 'string' ? item.input_image : ''))
     .filter(Boolean);
-  const referenceImages = [...characterReferenceImages, ...sceneReferenceImages, ...objectReferenceImages];
+  const referenceImages = [...sceneReferenceImages, ...characterReferenceImages, ...objectReferenceImages];
+  const editImage1 = sceneReferenceImages[0] ?? characterReferenceImages[0] ?? objectReferenceImages[0] ?? '';
+  const editImage2 = characterReferenceImages[0] ?? sceneReferenceImages[0] ?? objectReferenceImages[0] ?? editImage1;
+  const editImage3 = objectReferenceImages[0] ?? characterReferenceImages[0] ?? sceneReferenceImages[0] ?? editImage2;
 
   return {
     referenceContext,
     referenceCount: getAllReferenceItems(project).length,
     referenceImageCount,
+    referenceImages,
     referenceVariables: {
       reference_context: referenceContext,
       reference_count: getAllReferenceItems(project).length,
@@ -340,6 +598,9 @@ async function buildGenerationReferenceInputs(
       reference_assets_json: JSON.stringify(referenceAssets),
       reference_images: referenceImages,
       reference_images_json: JSON.stringify(referenceImages),
+      edit_image_1: editImage1,
+      edit_image_2: editImage2,
+      edit_image_3: editImage3,
       character_reference_assets: preparedByKind.character,
       character_reference_images: characterReferenceImages,
       character_reference_image: characterReferenceImages[0] ?? '',
@@ -361,16 +622,62 @@ function appendReferenceContext(prompt: string, referenceContext: string): strin
   return `${prompt}\n\n参考资产约束：\n${referenceContext}`;
 }
 
-function buildMergedVideoPrompt(shot: Project['storyboard'][number]): string {
+function buildFirstFrameWorkflowPrompt(
+  shot: Project['storyboard'][number],
+  workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video'
+): string {
+  const basePrompt = shot.firstFramePrompt.trim();
+
+  if (workflow !== 'storyboard_image' && workflow !== 'image_edit') {
+    return basePrompt;
+  }
+
+  return [
+    basePrompt,
+    '生成要求：基于参考输入重新生成一张全新的镜头首帧。',
+    '参考输入只用于提取人物身份、造型、服装、场景、物品和整体风格约束，不要把它当作待修补、待微调或待局部重绘的底图。',
+    '最终结果必须是一张新的完整画面，可以重新组织机位、景别、构图、动作、光线和背景，但要保持参考信息中的关键设定一致。'
+  ].join('\n\n');
+}
+
+function buildMergedVideoPrompt(
+  project: Project,
+  shot: Project['storyboard'][number],
+  options: {
+    includeSpeechPrompt: boolean;
+  }
+): string {
+  const hasSpeechContent = Boolean(shot.dialogue.trim() || shot.voiceover.trim());
   const parts = [shot.videoPrompt.trim()];
+  const characterPrompt = buildVideoCharacterReferencePrompt(project, shot);
   const backgroundSoundPrompt = shot.backgroundSoundPrompt.trim();
   const speechPrompt = shot.speechPrompt.trim();
 
-  if (backgroundSoundPrompt) {
-    parts.push(`背景声音要求：${backgroundSoundPrompt}`);
+  if (characterPrompt) {
+    parts.push(characterPrompt);
   }
 
-  if (speechPrompt) {
+  if (hasSpeechContent) {
+    if (backgroundSoundPrompt) {
+      parts.push(
+        options.includeSpeechPrompt
+          ? `背景声音要求：${backgroundSoundPrompt}`
+          : `背景声音要求：${backgroundSoundPrompt}。仅保留自然环境音、动作音和空间氛围声，不要额外生成独立对白人声。`
+      );
+    } else if (!options.includeSpeechPrompt) {
+      parts.push('背景声音要求：保留自然环境音、动作音和空间氛围声，不要额外生成独立对白人声。');
+    }
+
+    parts.push('说话者要求：如镜头中有人说话，必须通过人物外观、身份和气质特征明确发声主体，并让口型、表情、动作与台词或旁白同步。');
+  } else {
+    parts.push(
+      backgroundSoundPrompt
+        ? `声音要求：本镜头没有对白或旁白，不要出现人声或说话声；请生成自然、真实、连贯的背景环境音、动作音和空间氛围声。重点：${backgroundSoundPrompt}`
+        : '声音要求：本镜头没有对白或旁白，不要出现人声或说话声；请生成自然、真实、连贯的背景环境音、动作音和空间氛围声。'
+    );
+  }
+
+  if (options.includeSpeechPrompt && speechPrompt) {
     parts.push(`台词/旁白要求：${speechPrompt}`);
   }
 
@@ -388,11 +695,12 @@ function appendTransitionHint(prompt: string, shot: Project['storyboard'][number
 }
 
 function getVideoWorkflowPrompt(project: Project, shot: Project['storyboard'][number], appSettings: AppSettings): string {
-  if (hasConfiguredTtsWorkflow(appSettings)) {
-    return appendTransitionHint(shot.videoPrompt, shot);
-  }
-
-  return appendTransitionHint(buildMergedVideoPrompt(shot), shot);
+  return appendTransitionHint(
+    buildMergedVideoPrompt(project, shot, {
+      includeSpeechPrompt: !hasConfiguredTtsWorkflow(appSettings)
+    }),
+    shot
+  );
 }
 
 function shouldGenerateTtsForShot(shot: Project['storyboard'][number]): boolean {
@@ -430,11 +738,36 @@ function buildTtsVariables(
   };
 }
 
+function roundDownToMultiple(value: number, multiple: number): number {
+  return Math.max(multiple, Math.floor(value / multiple) * multiple);
+}
+
+function buildVideoWorkflowDerivedVariables(
+  width: number,
+  height: number,
+  durationSeconds: number,
+  fps: number
+): Record<string, TemplateVariable> {
+  const safeWidth = Math.max(1, Math.round(width));
+  const safeHeight = Math.max(1, Math.round(height));
+  const safeFps = Math.max(1, Math.round(fps));
+  const longSide = Math.min(LTX_TARGET_LONG_SIDE, Math.max(safeWidth, safeHeight));
+  const shortSideRaw = (longSide * Math.min(safeWidth, safeHeight)) / Math.max(safeWidth, safeHeight);
+  const shortSide = roundDownToMultiple(shortSideRaw, LTX_DIMENSION_MULTIPLE);
+  const isLandscape = safeWidth >= safeHeight;
+
+  return {
+    frame_count: Math.max(2, Math.round(durationSeconds * safeFps) + 1),
+    latent_video_width: isLandscape ? longSide : shortSide,
+    latent_video_height: isLandscape ? shortSide : longSide
+  };
+}
+
 function buildComfyVariables(
   project: Project,
   shot: Project['storyboard'][number],
   appSettings: AppSettings,
-  workflow: 'reference_image_to_image' | 'image_to_video',
+  workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video',
   options: {
     durationSeconds?: number;
     inputImage?: string;
@@ -447,13 +780,15 @@ function buildComfyVariables(
     seed?: number;
   } = {}
 ) {
+  const durationSeconds = options.durationSeconds ?? shot.durationSeconds;
+
   return {
     prompt:
       appendReferenceContext(
         options.promptOverride ??
-          (workflow === 'reference_image_to_image'
-            ? shot.firstFramePrompt
-            : getVideoWorkflowPrompt(project, shot, appSettings)),
+          (workflow === 'image_to_video'
+            ? getVideoWorkflowPrompt(project, shot, appSettings)
+            : buildFirstFrameWorkflowPrompt(shot, workflow)),
         options.referenceContext ?? ''
       ),
     negative_prompt: project.settings.negativePrompt,
@@ -462,20 +797,151 @@ function buildComfyVariables(
     image_height: project.settings.imageHeight,
     video_width: project.settings.videoWidth,
     video_height: project.settings.videoHeight,
-    duration_seconds: options.durationSeconds ?? shot.durationSeconds,
+    duration_seconds: durationSeconds,
     fps: project.settings.fps,
+    ...buildVideoWorkflowDerivedVariables(
+      project.settings.videoWidth,
+      project.settings.videoHeight,
+      durationSeconds,
+      project.settings.fps
+    ),
     input_image: options.inputImage ?? '',
     last_frame_image: options.lastFrameImage ?? '',
     last_frame_prompt: options.lastFramePrompt ?? shot.lastFramePrompt,
     ...(options.referenceVariables ?? {}),
-    scene_number: shot.sceneNumber,
-    shot_number: shot.shotNumber,
-    seed: options.seed ?? Math.floor(Math.random() * 9_000_000_000)
+      scene_number: shot.sceneNumber,
+      shot_number: shot.shotNumber,
+      seed: options.seed ?? Math.floor(Math.random() * 9_000_000_000)
+  };
+}
+
+function buildStoryboardReferencePasses(referenceImages: string[]): string[][] {
+  if (!referenceImages.length) {
+    return [];
+  }
+
+  if (referenceImages.length <= MAX_STORYBOARD_REFERENCE_IMAGES_PER_RUN) {
+    return [referenceImages];
+  }
+
+  const passes = [referenceImages.slice(0, MAX_STORYBOARD_REFERENCE_IMAGES_PER_RUN)];
+
+  for (
+    let index = MAX_STORYBOARD_REFERENCE_IMAGES_PER_RUN;
+    index < referenceImages.length;
+    index += MAX_STORYBOARD_REFERENCE_IMAGES_PER_CHAIN_RUN
+  ) {
+    passes.push(referenceImages.slice(index, index + MAX_STORYBOARD_REFERENCE_IMAGES_PER_CHAIN_RUN));
+  }
+
+  return passes;
+}
+
+function buildEditImageSlotVariables(referenceImages: string[]): Record<string, TemplateVariable> {
+  const editImage1 = referenceImages[0] ?? '';
+  const editImage2 = referenceImages[1] ?? editImage1;
+  const editImage3 = referenceImages[2] ?? editImage2;
+
+  return {
+    input_image: editImage1,
+    reference_image: editImage1,
+    edit_image_1: editImage1,
+    edit_image_2: editImage2,
+    edit_image_3: editImage3
+  };
+}
+
+function buildStoryboardReferencePassVariables(
+  baseReferenceVariables: Record<string, TemplateVariable>,
+  effectiveInputImages: string[],
+  sourceReferenceImages: string[],
+  passIndex: number,
+  passCount: number,
+  totalReferenceImageCount: number
+): Record<string, TemplateVariable> {
+  return {
+    ...baseReferenceVariables,
+    ...buildEditImageSlotVariables(effectiveInputImages),
+    reference_batch_index: passIndex + 1,
+    reference_batch_total: passCount,
+    reference_batch_size: sourceReferenceImages.length,
+    reference_batch_images: sourceReferenceImages,
+    reference_total_image_count: totalReferenceImageCount
+  };
+}
+
+async function runStoryboardImageWorkflowForShot(
+  project: Project,
+  shot: Project['storyboard'][number],
+  appSettings: AppSettings,
+  workflowPath: string,
+  generationReferenceInputs: GenerationReferenceInputs
+): Promise<{ buffer: Buffer; extension: string; passCount: number }> {
+  const referencePasses = buildStoryboardReferencePasses(generationReferenceInputs.referenceImages);
+
+  if (!referencePasses.length) {
+    throw new Error('首帧生成工作流至少需要一张参考图。');
+  }
+
+  let latestBuffer: Buffer | null = null;
+  let latestExtension = '.png';
+  let previousPassImage = '';
+
+  for (let passIndex = 0; passIndex < referencePasses.length; passIndex += 1) {
+    const sourceReferenceImages = referencePasses[passIndex];
+    const effectiveInputImages =
+      passIndex === 0 ? sourceReferenceImages : [previousPassImage, ...sourceReferenceImages].filter(Boolean);
+
+    appendLog(
+      project,
+      `首帧生成 ${shot.title} 参考图批次 ${passIndex + 1}/${referencePasses.length}：注入 ${sourceReferenceImages.length} 张参考图。`
+    );
+    await saveProject(project);
+
+    const outputFiles = await runComfyWorkflow(
+      workflowPath,
+      buildComfyVariables(project, shot, appSettings, 'storyboard_image', {
+        outputPrefix: `${project.id}_${shot.id}_storyboard_image_pass_${passIndex + 1}`,
+        referenceContext: generationReferenceInputs.referenceContext,
+        referenceVariables: buildStoryboardReferencePassVariables(
+          generationReferenceInputs.referenceVariables,
+          effectiveInputImages,
+          sourceReferenceImages,
+          passIndex,
+          referencePasses.length,
+          generationReferenceInputs.referenceImageCount
+        )
+      })
+    );
+
+    const outputFile = pickOutputFile(outputFiles, 'image');
+    latestBuffer = await fetchComfyOutputFile(outputFile);
+    latestExtension = path.extname(outputFile.filename) || '.png';
+
+    if (passIndex < referencePasses.length - 1) {
+      previousPassImage = await uploadImageBufferToComfy(
+        latestBuffer,
+        `${project.id}_${shot.id}_storyboard_image_pass_${passIndex + 1}${latestExtension}`
+      );
+    }
+  }
+
+  if (!latestBuffer) {
+    throw new Error('首帧生成工作流未返回任何图片输出。');
+  }
+
+  return {
+    buffer: latestBuffer,
+    extension: latestExtension,
+    passCount: referencePasses.length
   };
 }
 
 function getMaxVideoSegmentDurationSeconds(project: Project): number {
-  return Math.max(1, project.settings.maxVideoSegmentDurationSeconds);
+  return Math.max(
+    1,
+    getAppSettings().comfyui.maxVideoSegmentDurationSeconds || project.settings.maxVideoSegmentDurationSeconds
+  );
 }
 
 function splitDurationIntoSegments(totalDurationSeconds: number, maxSegmentDurationSeconds: number): number[] {
@@ -547,6 +1013,25 @@ function buildAsset(
   };
 }
 
+function buildShotAssetOutputPath(
+  stage: ShotAssetStage,
+  shotId: string,
+  extension: string
+): string {
+  const folder = stage === 'images' ? 'images' : 'videos';
+  const normalizedExtension = extension.startsWith('.') ? extension : `.${extension}`;
+  return path.join(folder, shotId, `${Date.now()}-${crypto.randomUUID().slice(0, 8)}${normalizedExtension}`);
+}
+
+function buildReferenceAssetOutputPath(
+  kind: ReferenceAssetKind,
+  itemId: string,
+  extension: string
+): string {
+  const folderName = kind === 'character' ? 'characters' : kind === 'scene' ? 'scenes' : 'objects';
+  return path.join('references', folderName, itemId, `${Date.now()}${extension}`);
+}
+
 function getMissingVideoShotIds(project: Project): string[] {
   return project.storyboard
     .filter((shot) => !project.assets.videos.some((asset) => asset.shotId === shot.id))
@@ -585,8 +1070,12 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
       throw new Error('请先生成分镜，再生成图片。');
     }
 
-    if (!appSettings.comfyui.workflows.reference_image_to_image.workflowPath) {
-      throw new Error('系统设置中未配置 ComfyUI 参考图生图工作流路径。');
+    if (
+      !appSettings.comfyui.workflows.storyboard_image.workflowPath &&
+      !appSettings.comfyui.workflows.image_edit.workflowPath &&
+      !appSettings.comfyui.workflows.text_to_image.workflowPath
+    ) {
+      throw new Error('系统设置中未配置 ComfyUI 首帧生成工作流或文生图工作流路径。');
     }
 
     return;
@@ -674,7 +1163,10 @@ async function generateReferenceAssetForProject(
   project: Project,
   kind: ReferenceAssetKind,
   itemId: string,
-  prompt?: string
+  prompt?: string,
+  options: {
+    useReferenceImage?: boolean;
+  } = {}
 ): Promise<void> {
   const appSettings = getAppSettings();
   const workflowKind = getReferenceWorkflowKind(kind);
@@ -686,10 +1178,14 @@ async function generateReferenceAssetForProject(
 
   let generationPrompt = '';
   let itemName = '';
+  let referenceImageRelativePath = '';
+  let temporaryReferenceImage: GeneratedAsset | null = null;
 
   updateReferenceItem(project, kind, itemId, (item) => {
     generationPrompt = prompt?.trim() || item.generationPrompt;
     itemName = item.name;
+    referenceImageRelativePath = item.referenceImage?.relativePath ?? '';
+    temporaryReferenceImage = item.referenceImage;
 
     return {
       ...item,
@@ -704,8 +1200,27 @@ async function generateReferenceAssetForProject(
   await saveProject(project);
 
   try {
+    const shouldUseReferenceImage =
+      typeof options.useReferenceImage === 'boolean'
+        ? Boolean(options.useReferenceImage && referenceImageRelativePath)
+        : Boolean(referenceImageRelativePath);
+    const uploadedReferenceImage = shouldUseReferenceImage
+      ? await uploadImageToComfy(fromStorageRelative(referenceImageRelativePath))
+      : '';
+    const uploadedCharacterPoseImage =
+      kind === 'character' && existsSync(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
+        ? await uploadImageToComfy(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
+        : '';
+    const editImage1 = uploadedReferenceImage || uploadedCharacterPoseImage;
+    const editImage2 = uploadedCharacterPoseImage;
+    const editImage3 = uploadedCharacterPoseImage;
+    const workflowPrompt =
+      kind === 'character'
+        ? buildCharacterAssetWorkflowPrompt(generationPrompt, shouldUseReferenceImage)
+        : generationPrompt;
+
     const outputFiles = await runComfyWorkflow(workflow.workflowPath, {
-      prompt: generationPrompt,
+      prompt: workflowPrompt,
       negative_prompt: project.settings.negativePrompt,
       output_prefix: `${project.id}_${kind}_${itemId}_reference`,
       image_width: project.settings.imageWidth,
@@ -714,7 +1229,12 @@ async function generateReferenceAssetForProject(
       video_height: project.settings.videoHeight,
       duration_seconds: project.settings.defaultShotDurationSeconds,
       fps: project.settings.fps,
-      input_image: '',
+      input_image: uploadedReferenceImage,
+      reference_image: uploadedReferenceImage,
+      reference_images: [uploadedReferenceImage, uploadedCharacterPoseImage].filter(Boolean),
+      edit_image_1: editImage1,
+      edit_image_2: editImage2,
+      edit_image_3: editImage3,
       scene_number: 0,
       shot_number: 0,
       seed: Math.floor(Math.random() * 9_000_000_000)
@@ -723,9 +1243,8 @@ async function generateReferenceAssetForProject(
     const outputFile = pickOutputFile(outputFiles, 'image');
     const buffer = await fetchComfyOutputFile(outputFile);
     const extension = path.extname(outputFile.filename) || '.png';
-    const folderName = kind === 'character' ? 'characters' : kind === 'scene' ? 'scenes' : 'objects';
-    const saved = await writeProjectFile(project.id, `references/${folderName}/${itemId}${extension}`, buffer);
-    const hadGeneratedMedia = Boolean(project.assets.images.length || project.assets.videos.length || project.assets.finalVideo);
+    const saved = await writeProjectFile(project.id, buildReferenceAssetOutputPath(kind, itemId, extension), buffer);
+    const hadGeneratedMedia = hasGeneratedMediaOutputs(project);
 
     updateReferenceItem(project, kind, itemId, (item) => ({
       ...item,
@@ -733,14 +1252,36 @@ async function generateReferenceAssetForProject(
       status: 'success',
       error: null,
       updatedAt: now(),
-      asset: buildAsset(saved.relativePath, generationPrompt, null, null)
+      referenceImage: shouldUseReferenceImage ? null : item.referenceImage,
+      asset: buildAsset(saved.relativePath, generationPrompt, null, null),
+      assetHistory: item.asset
+        ? [
+            item.asset,
+            ...item.assetHistory.filter((candidate) => candidate.relativePath !== item.asset?.relativePath)
+          ]
+        : item.assetHistory
     }));
+    if (shouldUseReferenceImage) {
+      await deleteStoredAsset(temporaryReferenceImage);
+    }
     invalidateGeneratedMediaFromReferenceLibrary(project);
     appendLog(
       project,
-      hadGeneratedMedia
-        ? `${itemName}${assetKindLabel(kind)}参考图生成完成，图片与视频产物已失效，请重新生成。`
-        : `${itemName}${assetKindLabel(kind)}参考图生成完成。`,
+      kind === 'character'
+        ? shouldUseReferenceImage
+          ? hadGeneratedMedia
+            ? `${itemName}${assetKindLabel(kind)}已按参考图和固定三视图模板生成完成，临时参考图已清除；图片与视频产物已失效，请重新生成。`
+            : `${itemName}${assetKindLabel(kind)}已按参考图和固定三视图模板生成完成，临时参考图已清除。`
+          : hadGeneratedMedia
+            ? `${itemName}${assetKindLabel(kind)}已按默认三视图姿态参考和固定三视图模板生成完成，图片与视频产物已失效，请重新生成。`
+            : `${itemName}${assetKindLabel(kind)}已按默认三视图姿态参考和固定三视图模板生成完成。`
+        : shouldUseReferenceImage
+          ? hadGeneratedMedia
+            ? `${itemName}${assetKindLabel(kind)}已按“参考图 + Prompt”生成并保存到资产库，临时参考图已清除；图片与视频产物已失效，请重新生成。`
+            : `${itemName}${assetKindLabel(kind)}已按“参考图 + Prompt”生成并保存到资产库，临时参考图已清除。`
+          : hadGeneratedMedia
+            ? `${itemName}${assetKindLabel(kind)}参考图生成完成，图片与视频产物已失效，请重新生成。`
+            : `${itemName}${assetKindLabel(kind)}参考图生成完成。`,
       hadGeneratedMedia ? 'warn' : 'info'
     );
   } catch (error) {
@@ -761,6 +1302,190 @@ async function generateReferenceAssetForProject(
 
   await persistReferenceLibrary(project);
   await saveProject(project);
+}
+
+function guessImageExtension(filename: string, mimeType: string): string {
+  const fromName = path.extname(filename).toLowerCase();
+  if (IMAGE_EXTENSIONS.has(fromName)) {
+    return fromName;
+  }
+
+  if (mimeType === 'image/png') {
+    return '.png';
+  }
+
+  if (mimeType === 'image/webp') {
+    return '.webp';
+  }
+
+  if (mimeType === 'image/gif') {
+    return '.gif';
+  }
+
+  if (mimeType === 'image/jpeg' || mimeType === 'image/jpg') {
+    return '.jpg';
+  }
+
+  return '.png';
+}
+
+export async function uploadReferenceImageForAsset(
+  projectId: string,
+  kind: ReferenceAssetKind,
+  itemId: string,
+  input: {
+    filename: string;
+    mimeType: string;
+    buffer: Buffer;
+  }
+): Promise<Project> {
+  const project = await readProject(projectId);
+  const item = getReferenceCollection(project, kind).find((candidate) => candidate.id === itemId);
+
+  if (!item) {
+    throw new Error(`未找到 ${kind} 资产项 ${itemId}`);
+  }
+
+  const extension = guessImageExtension(input.filename, input.mimeType);
+  const saved = await writeProjectFile(
+    project.id,
+    path.join('references', 'uploads', kind, `${itemId}${extension}`),
+    input.buffer
+  );
+  const previousReferenceImage = item.referenceImage;
+
+  updateReferenceItem(project, kind, itemId, (current) => ({
+    ...current,
+    status: current.asset ? 'success' : 'idle',
+    updatedAt: now(),
+    referenceImage: buildAsset(saved.relativePath, '用户上传参考图', null, null),
+    error: null
+  }));
+
+  if (previousReferenceImage && previousReferenceImage.relativePath !== saved.relativePath) {
+    await deleteStoredAsset(previousReferenceImage);
+  }
+
+  appendLog(
+    project,
+    kind === 'character'
+      ? `${item.name}${assetKindLabel(kind)}参考图已上传。下次会按参考图和固定三视图模板生成；生成成功后不会保留这张参考图。`
+      : `${item.name}${assetKindLabel(kind)}参考图已上传。你可以继续只用 Prompt 生成，也可以在下次生成时使用“参考图 + Prompt”；生成成功后不会保留这张参考图。`
+  );
+  await persistReferenceLibrary(project);
+  await saveProject(project);
+  return project;
+}
+
+export async function removeReferenceImageForAsset(
+  projectId: string,
+  kind: ReferenceAssetKind,
+  itemId: string
+): Promise<Project> {
+  const project = await readProject(projectId);
+  const item = getReferenceCollection(project, kind).find((candidate) => candidate.id === itemId);
+
+  if (!item) {
+    throw new Error(`未找到 ${kind} 资产项 ${itemId}`);
+  }
+
+  if (!item.referenceImage) {
+    return project;
+  }
+
+  const previousReferenceImage = item.referenceImage;
+
+  updateReferenceItem(project, kind, itemId, (current) => ({
+    ...current,
+    status: current.asset ? 'success' : 'idle',
+    error: null,
+    updatedAt: now(),
+    referenceImage: null
+  }));
+  await deleteStoredAsset(previousReferenceImage);
+
+  appendLog(
+    project,
+    `${item.name}${assetKindLabel(kind)}上传参考图已移除。`
+  );
+  await persistReferenceLibrary(project);
+  await saveProject(project);
+  return project;
+}
+
+export async function selectLibraryAssetForReferenceItem(
+  projectId: string,
+  kind: ReferenceAssetKind,
+  itemId: string,
+  input: {
+    sourceProjectId: string;
+    sourceItemId: string;
+    sourceKind?: ReferenceAssetKind;
+  }
+): Promise<Project> {
+  const sourceProjectId = input.sourceProjectId.trim();
+  const sourceItemId = input.sourceItemId.trim();
+  const sourceKind = input.sourceKind ?? kind;
+
+  if (!sourceProjectId || !sourceItemId) {
+    throw new Error('素材来源参数不完整。');
+  }
+
+  if (sourceKind !== kind) {
+    throw new Error('只能为当前类别选择同类素材。');
+  }
+
+  const project = await readProject(projectId);
+  const sourceProject = sourceProjectId === projectId ? project : await readProject(sourceProjectId);
+  const sourceItem = getReferenceCollection(sourceProject, sourceKind).find((candidate) => candidate.id === sourceItemId);
+  const currentItem = getReferenceCollection(project, kind).find((candidate) => candidate.id === itemId);
+
+  if (!currentItem) {
+    throw new Error(`未找到 ${kind} 资产项 ${itemId}`);
+  }
+
+  if (!sourceItem?.asset) {
+    throw new Error('指定素材不存在，或该素材尚未生成可用图片。');
+  }
+
+  if (currentItem.asset?.relativePath === sourceItem.asset.relativePath) {
+    return project;
+  }
+
+  const hadGeneratedMedia = hasGeneratedMediaOutputs(project);
+  const selectedAsset = {
+    ...sourceItem.asset
+  };
+
+  updateReferenceItem(project, kind, itemId, (item) => ({
+    ...item,
+    status: 'success',
+    error: null,
+    updatedAt: now(),
+    asset: selectedAsset,
+    assetHistory: item.asset
+      ? [
+          item.asset,
+          ...item.assetHistory.filter(
+            (candidate) =>
+              candidate.relativePath !== item.asset?.relativePath &&
+              candidate.relativePath !== selectedAsset.relativePath
+          )
+        ]
+      : item.assetHistory.filter((candidate) => candidate.relativePath !== selectedAsset.relativePath)
+  }));
+
+  invalidateGeneratedMediaFromReferenceLibrary(project);
+  appendLog(
+    project,
+    hadGeneratedMedia
+      ? `${currentItem.name}${assetKindLabel(kind)}已从资产库选用素材“${sourceItem.name}”，图片与视频产物已失效，请重新生成。`
+      : `${currentItem.name}${assetKindLabel(kind)}已从资产库选用素材“${sourceItem.name}”。`,
+    hadGeneratedMedia ? 'warn' : 'info'
+  );
+  await persistReferenceLibrary(project);
+  await saveProject(project);
+  return project;
 }
 
 async function runAssetStage(project: Project): Promise<void> {
@@ -799,6 +1524,8 @@ async function runAssetStage(project: Project): Promise<void> {
     }
 
     for (const item of items) {
+      await throwIfPauseRequested(project.id, 'assets');
+
       try {
         await generateReferenceAssetForProject(project, kind, item.id);
         generatedCount += 1;
@@ -839,54 +1566,286 @@ async function runStoryboardStage(project: Project): Promise<void> {
   );
 }
 
-async function runImageStage(project: Project): Promise<void> {
-  if (!project.storyboard.length) {
-    throw new Error('请先生成分镜，再生成图片。');
+interface SelectedImageStageWorkflow {
+  type: 'storyboard_image' | 'image_edit' | 'text_to_image';
+  workflowPath: string;
+}
+
+function resolveImageStageWorkflow(
+  appSettings: AppSettings,
+  generationReferenceInputs: GenerationReferenceInputs
+): SelectedImageStageWorkflow {
+  const storyboardImageWorkflow = appSettings.comfyui.workflows.storyboard_image;
+  const imageEditWorkflow = appSettings.comfyui.workflows.image_edit;
+  const textToImageWorkflow = appSettings.comfyui.workflows.text_to_image;
+
+  if (!storyboardImageWorkflow.workflowPath && !imageEditWorkflow.workflowPath && !textToImageWorkflow.workflowPath) {
+    throw new Error('系统设置中未配置 ComfyUI 首帧生成工作流或文生图工作流路径。');
   }
 
-  const appSettings = getAppSettings();
-  const workflow = appSettings.comfyui.workflows.reference_image_to_image;
-  if (!workflow.workflowPath) {
-    throw new Error('系统设置中未配置 ComfyUI 参考图生图工作流路径。');
+  const hasEditInputs = generationReferenceInputs.referenceImages.length > 0;
+  const preferredStoryboardWorkflow = storyboardImageWorkflow.workflowPath
+    ? {
+        type: 'storyboard_image' as const,
+        workflowPath: storyboardImageWorkflow.workflowPath
+      }
+    : imageEditWorkflow.workflowPath
+      ? {
+          type: 'image_edit' as const,
+          workflowPath: imageEditWorkflow.workflowPath
+        }
+      : null;
+  const selectedWorkflow = hasEditInputs && preferredStoryboardWorkflow
+    ? preferredStoryboardWorkflow
+    : {
+        type: 'text_to_image' as const,
+        workflowPath: textToImageWorkflow.workflowPath
+      };
+
+  if (!selectedWorkflow.workflowPath) {
+    throw new Error('首帧生成工作流需要至少一张参考图；当前未找到可注入的参考图，且未配置文生图回退工作流。');
   }
 
-  const referenceUploadCache = new Map<string, string>();
-  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache);
+  return selectedWorkflow;
+}
+
+function appendImageWorkflowLog(
+  project: Project,
+  selectedWorkflow: SelectedImageStageWorkflow,
+  generationReferenceInputs: GenerationReferenceInputs
+): void {
+  const hasEditInputs = generationReferenceInputs.referenceImages.length > 0;
+
   appendLog(
     project,
     generationReferenceInputs.referenceCount
-      ? `图片生成将注入 ${generationReferenceInputs.referenceCount} 个资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
-      : '资产库暂无可用参考项，图片生成将仅使用镜头 Prompt。',
+      ? `首帧生成将注入 ${generationReferenceInputs.referenceCount} 个资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
+      : '资产库暂无可用参考项，首帧生成将仅使用镜头 Prompt。',
     generationReferenceInputs.referenceCount ? 'info' : 'warn'
   );
-  await saveProject(project);
 
-  project.assets.images = [];
-  await saveProject(project);
+  if (selectedWorkflow.type === 'storyboard_image') {
+    appendLog(project, '首帧阶段使用 storyboard_image 首帧生成工作流。');
+  } else if (selectedWorkflow.type === 'image_edit') {
+    appendLog(project, '未单独配置 storyboard_image，首帧阶段回退到 legacy image_edit 工作流。', 'warn');
+  } else if (hasEditInputs) {
+    appendLog(project, '当前没有可用的首帧生成工作流，首帧阶段回退到 text_to_image，仅使用 Prompt 与参考上下文。', 'warn');
+  } else {
+    appendLog(project, '当前没有可注入的参考图，首帧阶段回退到 text_to_image 工作流。', 'warn');
+  }
+}
 
-  for (let index = 0; index < project.storyboard.length; index += 1) {
-    const shot = project.storyboard[index];
-    appendLog(project, `图片生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
-    await saveProject(project);
+async function generateImageAssetForShot(
+  project: Project,
+  shot: Project['storyboard'][number],
+  appSettings: AppSettings,
+  selectedWorkflow: SelectedImageStageWorkflow,
+  generationReferenceInputs: GenerationReferenceInputs
+): Promise<GeneratedAsset> {
+  let buffer: Buffer;
+  let extension: string;
 
+  if (selectedWorkflow.type === 'storyboard_image' || selectedWorkflow.type === 'image_edit') {
+    const result = await runStoryboardImageWorkflowForShot(
+      project,
+      shot,
+      appSettings,
+      selectedWorkflow.workflowPath,
+      generationReferenceInputs
+    );
+    buffer = result.buffer;
+    extension = result.extension;
+
+    if (result.passCount > 1) {
+      appendLog(project, `${shot.title} 已按 ${result.passCount} 轮参考图批次完成首帧生成。`);
+      await saveProject(project);
+    }
+  } else {
     const outputFiles = await runComfyWorkflow(
-      workflow.workflowPath,
-      buildComfyVariables(project, shot, appSettings, 'reference_image_to_image', {
+      selectedWorkflow.workflowPath,
+      buildComfyVariables(project, shot, appSettings, selectedWorkflow.type, {
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables
       })
     );
 
     const outputFile = pickOutputFile(outputFiles, 'image');
-    const buffer = await fetchComfyOutputFile(outputFile);
-    const extension = path.extname(outputFile.filename) || '.png';
-    const saved = await writeProjectFile(project.id, `images/${shot.id}${extension}`, buffer);
+    buffer = await fetchComfyOutputFile(outputFile);
+    extension = path.extname(outputFile.filename) || '.png';
+  }
 
-    project.assets.images.push(buildAsset(saved.relativePath, shot.firstFramePrompt, shot.sceneNumber, shot.id));
+  const saved = await writeProjectFile(project.id, buildShotAssetOutputPath('images', shot.id, extension), buffer);
+  return buildAsset(saved.relativePath, shot.firstFramePrompt, shot.sceneNumber, shot.id);
+}
+
+async function generateVideoAssetForShot(
+  project: Project,
+  shot: Project['storyboard'][number],
+  appSettings: AppSettings,
+  generationReferenceInputs: GenerationReferenceInputs
+): Promise<GeneratedAsset> {
+  const workflowPath = appSettings.comfyui.workflows.image_to_video.workflowPath;
+
+  if (!workflowPath) {
+    throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
+  }
+
+  const imageAsset = getActiveShotAsset(project, 'images', shot.id);
+
+  if (!imageAsset) {
+    throw new Error(`镜头 ${shot.id} 缺少首帧图片，无法生成视频。`);
+  }
+
+  const segmentDurations = getShotVideoSegmentDurations(project, shot);
+  const segmentCount = segmentDurations.length;
+  const shotSeed = Math.floor(Math.random() * 9_000_000_000);
+
+  if (segmentCount > 1) {
+    appendLog(
+      project,
+      `镜头 ${shot.title} 为长镜头，将拆成 ${segmentCount} 段生成（总时长 ${shot.durationSeconds}s，每段最长 ${getMaxVideoSegmentDurationSeconds(project)}s），并使用首尾帧约束收束画面。`
+    );
     await saveProject(project);
   }
 
-  appendLog(project, '全部分镜图片生成完成。');
+  let currentInputImagePath = fromStorageRelative(imageAsset.relativePath);
+  const segmentVideoPaths: string[] = [];
+  let savedVideoRelativePath: string | null = null;
+  let targetLastFrameImagePath = '';
+  let uploadedTargetLastFrameImage = '';
+
+  if (segmentCount > 1) {
+    const lastFrameOutputFiles = await runComfyWorkflow(
+      appSettings.comfyui.workflows.reference_image_to_image.workflowPath,
+      buildComfyVariables(project, shot, appSettings, 'reference_image_to_image', {
+        outputPrefix: `${project.id}_${shot.id}_lastframe`,
+        promptOverride: shot.lastFramePrompt,
+        referenceContext: generationReferenceInputs.referenceContext,
+        referenceVariables: generationReferenceInputs.referenceVariables,
+        seed: shotSeed
+      })
+    );
+    const lastFrameOutputFile = pickOutputFile(lastFrameOutputFiles, 'image');
+    const lastFrameBuffer = await fetchComfyOutputFile(lastFrameOutputFile);
+    const lastFrameExtension = path.extname(lastFrameOutputFile.filename) || '.png';
+    const lastFrameSaved = await writeProjectFile(
+      project.id,
+      path.join('.video-stage', shot.id, 'frames', `target-last${lastFrameExtension}`),
+      lastFrameBuffer
+    );
+    targetLastFrameImagePath = lastFrameSaved.absolutePath;
+
+    appendLog(project, `镜头 ${shot.title} 的尾帧图已生成，长镜头最后一段会向该尾帧收束。`);
+    await saveProject(project);
+  }
+
+  for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
+    await throwIfPauseRequested(project.id, 'videos');
+
+    const segmentDuration = segmentDurations[segmentIndex];
+    const uploadedImage = await uploadImageToComfy(currentInputImagePath);
+    const isFinalSegment = segmentIndex === segmentCount - 1;
+
+    if (isFinalSegment && targetLastFrameImagePath && !uploadedTargetLastFrameImage) {
+      uploadedTargetLastFrameImage = await uploadImageToComfy(targetLastFrameImagePath);
+    }
+
+    const outputFiles = await runComfyWorkflow(
+      workflowPath,
+      buildComfyVariables(project, shot, appSettings, 'image_to_video', {
+        durationSeconds: segmentDuration,
+        inputImage: uploadedImage,
+        lastFrameImage: isFinalSegment ? uploadedTargetLastFrameImage : '',
+        lastFramePrompt: shot.lastFramePrompt,
+        outputPrefix:
+          segmentCount === 1
+            ? `${project.id}_${shot.id}_video`
+            : `${project.id}_${shot.id}_video_seg${String(segmentIndex + 1).padStart(3, '0')}`,
+        promptOverride: buildSegmentVideoPrompt(project, shot, appSettings, segmentIndex, segmentCount),
+        referenceContext: generationReferenceInputs.referenceContext,
+        referenceVariables: generationReferenceInputs.referenceVariables,
+        seed: shotSeed
+      })
+    );
+
+    const outputFile = pickOutputFile(outputFiles, 'video');
+    const buffer = await fetchComfyOutputFile(outputFile);
+    const extension = path.extname(outputFile.filename) || '.mp4';
+
+    if (segmentCount === 1) {
+      const saved = await writeProjectFile(project.id, buildShotAssetOutputPath('videos', shot.id, extension), buffer);
+      savedVideoRelativePath = saved.relativePath;
+      continue;
+    }
+
+    const segmentSaved = await writeProjectFile(
+      project.id,
+      path.join(
+        '.video-stage',
+        shot.id,
+        'segments',
+        `segment-${String(segmentIndex + 1).padStart(3, '0')}${extension}`
+      ),
+      buffer
+    );
+    segmentVideoPaths.push(segmentSaved.absolutePath);
+
+    if (segmentIndex < segmentCount - 1) {
+      const continuationFramePath = resolveProjectPath(
+        project.id,
+        '.video-stage',
+        shot.id,
+        'frames',
+        `segment-${String(segmentIndex + 1).padStart(3, '0')}-last.png`
+      );
+      await extractLastFrame(segmentSaved.absolutePath, continuationFramePath);
+      currentInputImagePath = continuationFramePath;
+
+      appendLog(
+        project,
+        `镜头 ${shot.title} 已完成第 ${segmentIndex + 1}/${segmentCount} 段，下一段将复用上一段尾帧作为首帧。`
+      );
+      await saveProject(project);
+    }
+  }
+
+  if (!savedVideoRelativePath) {
+    const outputRelativePath = buildShotAssetOutputPath('videos', shot.id, '.mp4');
+    const outputPath = resolveProjectPath(project.id, outputRelativePath);
+    appendLog(project, `镜头 ${shot.title} 分段生成完成，开始拼接 ${segmentCount} 段视频。`);
+    await saveProject(project);
+    await stitchVideos(segmentVideoPaths, outputPath, project.settings.fps);
+    savedVideoRelativePath = toStorageRelative(outputPath);
+  }
+
+  return buildAsset(savedVideoRelativePath, getVideoWorkflowPrompt(project, shot, appSettings), shot.sceneNumber, shot.id);
+}
+
+async function runImageStage(project: Project): Promise<void> {
+  if (!project.storyboard.length) {
+    throw new Error('请先生成分镜，再生成图片。');
+  }
+
+  const appSettings = getAppSettings();
+  const referenceUploadCache = new Map<string, string>();
+  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache);
+  const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
+  appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
+  await saveProject(project);
+
+  for (let index = 0; index < project.storyboard.length; index += 1) {
+    await throwIfPauseRequested(project.id, 'images');
+
+    const shot = project.storyboard[index];
+    appendLog(project, `首帧生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
+    await saveProject(project);
+
+    const imageAsset = await generateImageAssetForShot(project, shot, appSettings, selectedWorkflow, generationReferenceInputs);
+    setActiveShotAsset(project, 'images', shot.id, imageAsset);
+    await saveProject(project);
+  }
+
+  appendLog(project, '全部镜头首帧生成完成。');
 }
 
 async function runVideoStage(project: Project): Promise<void> {
@@ -930,140 +1889,15 @@ async function runVideoStage(project: Project): Promise<void> {
   );
   await saveProject(project);
 
-  project.assets.videos = [];
-  await saveProject(project);
-
   for (let index = 0; index < project.storyboard.length; index += 1) {
-    const shot = project.storyboard[index];
-    const imageAsset = project.assets.images.find((asset) => asset.shotId === shot.id);
+    await throwIfPauseRequested(project.id, 'videos');
 
-    if (!imageAsset) {
-      throw new Error(`镜头 ${shot.id} 缺少首帧图片，无法生成视频。`);
-    }
+    const shot = project.storyboard[index];
 
     appendLog(project, `视频生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
     await saveProject(project);
-
-    const segmentDurations = getShotVideoSegmentDurations(project, shot);
-    const segmentCount = segmentDurations.length;
-    const shotSeed = Math.floor(Math.random() * 9_000_000_000);
-
-    if (segmentCount > 1) {
-      appendLog(
-        project,
-        `镜头 ${shot.title} 为长镜头，将拆成 ${segmentCount} 段生成（总时长 ${shot.durationSeconds}s，每段最长 ${getMaxVideoSegmentDurationSeconds(project)}s），并使用首尾帧约束收束画面。`
-      );
-      await saveProject(project);
-    }
-
-    let currentInputImagePath = fromStorageRelative(imageAsset.relativePath);
-    const segmentVideoPaths: string[] = [];
-    let savedVideoRelativePath: string | null = null;
-    let targetLastFrameImagePath = '';
-    let uploadedTargetLastFrameImage = '';
-
-    if (segmentCount > 1) {
-      const lastFrameOutputFiles = await runComfyWorkflow(
-        appSettings.comfyui.workflows.reference_image_to_image.workflowPath,
-        buildComfyVariables(project, shot, appSettings, 'reference_image_to_image', {
-          outputPrefix: `${project.id}_${shot.id}_lastframe`,
-          promptOverride: shot.lastFramePrompt,
-          referenceContext: generationReferenceInputs.referenceContext,
-          referenceVariables: generationReferenceInputs.referenceVariables,
-          seed: shotSeed
-        })
-      );
-      const lastFrameOutputFile = pickOutputFile(lastFrameOutputFiles, 'image');
-      const lastFrameBuffer = await fetchComfyOutputFile(lastFrameOutputFile);
-      const lastFrameExtension = path.extname(lastFrameOutputFile.filename) || '.png';
-      const lastFrameSaved = await writeProjectFile(
-        project.id,
-        path.join('.video-stage', shot.id, 'frames', `target-last${lastFrameExtension}`),
-        lastFrameBuffer
-      );
-      targetLastFrameImagePath = lastFrameSaved.absolutePath;
-
-      appendLog(project, `镜头 ${shot.title} 的尾帧图已生成，长镜头最后一段会向该尾帧收束。`);
-      await saveProject(project);
-    }
-
-    for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
-      const segmentDuration = segmentDurations[segmentIndex];
-      const uploadedImage = await uploadImageToComfy(currentInputImagePath);
-      const isFinalSegment = segmentIndex === segmentCount - 1;
-      if (isFinalSegment && targetLastFrameImagePath && !uploadedTargetLastFrameImage) {
-        uploadedTargetLastFrameImage = await uploadImageToComfy(targetLastFrameImagePath);
-      }
-      const outputFiles = await runComfyWorkflow(
-        workflow.workflowPath,
-        buildComfyVariables(project, shot, appSettings, 'image_to_video', {
-          durationSeconds: segmentDuration,
-          inputImage: uploadedImage,
-          lastFrameImage: isFinalSegment ? uploadedTargetLastFrameImage : '',
-          lastFramePrompt: shot.lastFramePrompt,
-          outputPrefix:
-            segmentCount === 1
-              ? `${project.id}_${shot.id}_video`
-              : `${project.id}_${shot.id}_video_seg${String(segmentIndex + 1).padStart(3, '0')}`,
-          promptOverride: buildSegmentVideoPrompt(project, shot, appSettings, segmentIndex, segmentCount),
-          referenceContext: generationReferenceInputs.referenceContext,
-          referenceVariables: generationReferenceInputs.referenceVariables,
-          seed: shotSeed
-        })
-      );
-
-      const outputFile = pickOutputFile(outputFiles, 'video');
-      const buffer = await fetchComfyOutputFile(outputFile);
-      const extension = path.extname(outputFile.filename) || '.mp4';
-
-      if (segmentCount === 1) {
-        const saved = await writeProjectFile(project.id, `videos/${shot.id}${extension}`, buffer);
-        savedVideoRelativePath = saved.relativePath;
-        continue;
-      }
-
-      const segmentSaved = await writeProjectFile(
-        project.id,
-        path.join(
-          '.video-stage',
-          shot.id,
-          'segments',
-          `segment-${String(segmentIndex + 1).padStart(3, '0')}${extension}`
-        ),
-        buffer
-      );
-      segmentVideoPaths.push(segmentSaved.absolutePath);
-
-      if (segmentIndex < segmentCount - 1) {
-        const continuationFramePath = resolveProjectPath(
-          project.id,
-          '.video-stage',
-          shot.id,
-          'frames',
-          `segment-${String(segmentIndex + 1).padStart(3, '0')}-last.png`
-        );
-        await extractLastFrame(segmentSaved.absolutePath, continuationFramePath);
-        currentInputImagePath = continuationFramePath;
-
-        appendLog(
-          project,
-          `镜头 ${shot.title} 已完成第 ${segmentIndex + 1}/${segmentCount} 段，下一段将复用上一段尾帧作为首帧。`
-        );
-        await saveProject(project);
-      }
-    }
-
-    if (!savedVideoRelativePath) {
-      const outputPath = resolveProjectPath(project.id, 'videos', `${shot.id}.mp4`);
-      appendLog(project, `镜头 ${shot.title} 分段生成完成，开始拼接 ${segmentCount} 段视频。`);
-      await saveProject(project);
-      await stitchVideos(segmentVideoPaths, outputPath, project.settings.fps);
-      savedVideoRelativePath = toStorageRelative(outputPath);
-    }
-
-    project.assets.videos.push(
-      buildAsset(savedVideoRelativePath, getVideoWorkflowPrompt(project, shot, appSettings), shot.sceneNumber, shot.id)
-    );
+    const videoAsset = await generateVideoAssetForShot(project, shot, appSettings, generationReferenceInputs);
+    setActiveShotAsset(project, 'videos', shot.id, videoAsset);
     await saveProject(project);
   }
 
@@ -1101,6 +1935,8 @@ async function runEditStage(project: Project): Promise<void> {
     await saveProject(project);
 
     for (let index = 0; index < project.storyboard.length; index += 1) {
+      await throwIfPauseRequested(project.id, 'edit');
+
       const shot = project.storyboard[index];
 
       if (!shouldGenerateTtsForShot(shot)) {
@@ -1125,6 +1961,8 @@ async function runEditStage(project: Project): Promise<void> {
     appendLog(project, '镜头配音音频生成完成，开始合成成片。');
     await saveProject(project);
   }
+
+  await throwIfPauseRequested(project.id, 'edit');
 
   const outputPath = resolveProjectPath(project.id, 'output', 'final.mp4');
   await stitchVideos(
@@ -1171,6 +2009,13 @@ async function executeStage(projectId: string, stage: StageId): Promise<void> {
     appendLog(project, `${STAGE_LABELS[stage]} 执行成功。`);
     await saveProject(project);
   } catch (error) {
+    if (error instanceof PipelinePauseError) {
+      setStageStatus(project, stage, 'idle');
+      appendLog(project, `${STAGE_LABELS[stage]} 已暂停，等待继续执行。`, 'warn');
+      await saveProject(project);
+      throw error;
+    }
+
     const message = error instanceof Error ? error.message : '未知错误';
     setStageStatus(project, stage, 'error', message);
     appendLog(project, `${STAGE_LABELS[stage]} 执行失败: ${message}`, 'error');
@@ -1183,35 +2028,35 @@ async function executeReferenceGeneration(
   projectId: string,
   kind: ReferenceAssetKind,
   itemId: string,
-  prompt?: string
+  prompt?: string,
+  options: {
+    useReferenceImage?: boolean;
+  } = {}
 ): Promise<void> {
   const project = await readProject(projectId);
-  await generateReferenceAssetForProject(project, kind, itemId, prompt);
+  await generateReferenceAssetForProject(project, kind, itemId, prompt, options);
 }
 
 async function setRunState(projectId: string, requestedStage: RunStage | null, currentStage: StageId | null): Promise<void> {
   const project = await readProject(projectId);
-  project.runState = {
+  await persistProjectRunState(projectId, {
     isRunning: Boolean(requestedStage),
     requestedStage,
     currentStage,
-    startedAt: requestedStage ? project.runState.startedAt ?? now() : null
-  };
-  await saveProject(project);
+    startedAt: requestedStage ? project.runState.startedAt ?? now() : null,
+    pauseRequested: false,
+    isPaused: false
+  });
 }
 
 async function clearRunState(projectId: string): Promise<void> {
-  const project = await readProject(projectId);
-  project.runState = {
-    isRunning: false,
-    requestedStage: null,
-    currentStage: null,
-    startedAt: null
-  };
-  await saveProject(project);
+  pauseRequestedProjects.delete(projectId);
+  await persistProjectRunState(projectId, createIdleRunState());
+  cachedRunStates.delete(projectId);
 }
 
 async function runSingle(projectId: string, stage: StageId): Promise<void> {
+  pauseRequestedProjects.delete(projectId);
   await setRunState(projectId, stage, stage);
   try {
     await executeStage(projectId, stage);
@@ -1220,16 +2065,74 @@ async function runSingle(projectId: string, stage: StageId): Promise<void> {
   }
 }
 
-async function runAll(projectId: string): Promise<void> {
+async function pauseProjectRun(projectId: string, currentStage: StageId): Promise<void> {
+  pauseRequestedProjects.delete(projectId);
+  const project = await readProject(projectId);
+  project.runState = {
+    isRunning: false,
+    requestedStage: 'all',
+    currentStage,
+    startedAt: project.runState.startedAt ?? now(),
+    pauseRequested: false,
+    isPaused: true
+  };
+  cachedRunStates.set(projectId, { ...project.runState });
+  appendLog(project, '全流程已暂停，可稍后继续执行。', 'warn');
+  await saveProject(project);
+}
+
+function getRemainingStages(project: Project): StageId[] {
+  return STAGES.filter((stage) => project.stages[stage].status !== 'success');
+}
+
+async function runStageSequence(projectId: string, stages: StageId[]): Promise<void> {
+  pauseRequestedProjects.delete(projectId);
   await setRunState(projectId, 'all', null);
+
+  let paused = false;
+
   try {
-    for (const stage of STAGES) {
+    for (const stage of stages) {
       await setRunState(projectId, 'all', stage);
-      await executeStage(projectId, stage);
+
+      try {
+        await executeStage(projectId, stage);
+      } catch (error) {
+        if (error instanceof PipelinePauseError) {
+          paused = true;
+          await pauseProjectRun(projectId, stage);
+          return;
+        }
+
+        throw error;
+      }
+
+      if (isPauseRequested(projectId)) {
+        paused = true;
+        await pauseProjectRun(projectId, stage);
+        return;
+      }
     }
   } finally {
-    await clearRunState(projectId);
+    if (!paused) {
+      await clearRunState(projectId);
+    }
   }
+}
+
+async function runAll(projectId: string): Promise<void> {
+  await runStageSequence(projectId, [...STAGES]);
+}
+
+async function resumeAll(projectId: string): Promise<void> {
+  const project = await readProject(projectId);
+  const remainingStages = getRemainingStages(project);
+
+  if (!remainingStages.length) {
+    throw new Error('当前项目没有可继续执行的阶段。');
+  }
+
+  await runStageSequence(projectId, remainingStages);
 }
 
 export function isProjectRunning(projectId: string): boolean {
@@ -1257,17 +2160,98 @@ export async function enqueueProjectRun(projectId: string, stage: RunStage): Pro
   await Promise.resolve();
 }
 
+export async function requestProjectRunPause(projectId: string): Promise<void> {
+  if (!runningProjects.has(projectId)) {
+    throw new Error('当前项目没有正在执行的全流程任务。');
+  }
+
+  const project = await readProject(projectId);
+
+  if (!project.runState.isRunning || project.runState.requestedStage !== 'all') {
+    throw new Error('只有执行全流程时才能暂停。');
+  }
+
+  if (project.runState.pauseRequested) {
+    return;
+  }
+
+  pauseRequestedProjects.add(projectId);
+  project.runState = {
+    ...project.runState,
+    pauseRequested: true,
+    isPaused: false
+  };
+  cachedRunStates.set(projectId, { ...project.runState });
+  appendLog(project, '已请求暂停；系统会在当前阶段安全结束后暂停全流程。', 'warn');
+  await saveProject(project);
+}
+
+export async function resumeProjectRun(projectId: string): Promise<void> {
+  if (runningProjects.has(projectId)) {
+    throw new Error('当前项目已有任务在运行。');
+  }
+
+  const project = await readProject(projectId);
+
+  if (!project.runState.isPaused || project.runState.requestedStage !== 'all') {
+    throw new Error('当前项目没有可继续的全流程任务。');
+  }
+
+  const runner = resumeAll(projectId)
+    .catch((error) => {
+      console.error(`Pipeline resume failed for ${projectId}:`, error);
+    })
+    .finally(() => {
+      runningProjects.delete(projectId);
+    });
+
+  runningProjects.set(projectId, runner);
+  await Promise.resolve();
+}
+
+async function enqueueStageScopedProjectTask(
+  projectId: string,
+  stage: StageId,
+  task: () => Promise<void>,
+  errorLabel: string
+): Promise<void> {
+  if (runningProjects.has(projectId)) {
+    throw new Error('当前项目已有任务在运行。');
+  }
+
+  const runner = (async () => {
+    await setRunState(projectId, stage, stage);
+    try {
+      await task();
+    } finally {
+      await clearRunState(projectId);
+    }
+  })()
+    .catch((error) => {
+      console.error(`${errorLabel} failed for ${projectId}:`, error);
+    })
+    .finally(() => {
+      runningProjects.delete(projectId);
+    });
+
+  runningProjects.set(projectId, runner);
+  await Promise.resolve();
+}
+
 export async function enqueueReferenceGeneration(
   projectId: string,
   kind: ReferenceAssetKind,
   itemId: string,
-  prompt?: string
+  prompt?: string,
+  options: {
+    useReferenceImage?: boolean;
+  } = {}
 ): Promise<void> {
   if (runningReferenceGenerations.has(projectId)) {
     throw new Error('当前项目已有参考资产任务在运行。');
   }
 
-  const runner = executeReferenceGeneration(projectId, kind, itemId, prompt)
+  const runner = executeReferenceGeneration(projectId, kind, itemId, prompt, options)
     .catch((error) => {
       console.error(`Reference asset generation failed for ${projectId}/${kind}/${itemId}:`, error);
     })
@@ -1277,6 +2261,190 @@ export async function enqueueReferenceGeneration(
 
   runningReferenceGenerations.set(projectId, runner);
   await Promise.resolve();
+}
+
+async function executeStoryboardShotImageGeneration(projectId: string, shotId: string): Promise<void> {
+  const project = await readProject(projectId);
+  const shot = project.storyboard.find((item) => item.id === shotId);
+
+  if (!shot) {
+    throw new Error(`未找到镜头 ${shotId}`);
+  }
+
+  if (!project.storyboard.length) {
+    throw new Error('请先生成分镜，再生成图片。');
+  }
+
+  const appSettings = getAppSettings();
+  const referenceUploadCache = new Map<string, string>();
+  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache);
+  const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
+  appendLog(project, `开始为镜头 ${shot.title} 单独执行首帧生成。`);
+  appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
+  await saveProject(project);
+
+  const imageAsset = await generateImageAssetForShot(project, shot, appSettings, selectedWorkflow, generationReferenceInputs);
+  const replacedVideoAsset = clearActiveShotAsset(project, 'videos', shot.id);
+  setActiveShotAsset(project, 'images', shot.id, imageAsset);
+  project.assets.finalVideo = null;
+  resetStage(project, 'videos');
+  resetStage(project, 'edit');
+
+  appendLog(
+    project,
+    replacedVideoAsset
+      ? `镜头 ${shot.title} 的首帧图片已更新，原视频片段已移入历史版本，请重新生成或重新选择视频版本。`
+      : `镜头 ${shot.title} 的首帧图片已更新，历史版本已保留。`
+  );
+  await saveProject(project);
+}
+
+async function executeStoryboardShotVideoGeneration(projectId: string, shotId: string): Promise<void> {
+  const project = await readProject(projectId);
+  const shot = project.storyboard.find((item) => item.id === shotId);
+
+  if (!shot) {
+    throw new Error(`未找到镜头 ${shotId}`);
+  }
+
+  if (!project.storyboard.length) {
+    throw new Error('请先生成分镜，再生成视频片段。');
+  }
+
+  if (!getActiveShotAsset(project, 'images', shot.id)) {
+    throw new Error('请先为当前镜头生成或选择首帧图片，再生成视频片段。');
+  }
+
+  const appSettings = getAppSettings();
+  if (!appSettings.comfyui.workflows.image_to_video.workflowPath) {
+    throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
+  }
+
+  if (getShotVideoSegmentDurations(project, shot).length > 1 && !appSettings.comfyui.workflows.reference_image_to_image.workflowPath) {
+    throw new Error('当前镜头需要长镜头分段生成，但未配置参考图生图工作流，无法生成尾帧图。');
+  }
+
+  if (getShotVideoSegmentDurations(project, shot).length > 1 && !appSettings.ffmpeg.binaryPath) {
+    throw new Error('当前镜头需要长镜头分段生成，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
+  }
+
+  if (!hasConfiguredTtsWorkflow(appSettings)) {
+    appendLog(project, '未配置独立 TTS 工作流，背景声音和台词 Prompt 将合并到视频工作流 Prompt。');
+  }
+
+  const referenceUploadCache = new Map<string, string>();
+  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache);
+  appendLog(project, `开始为镜头 ${shot.title} 单独生成视频片段。`);
+  appendLog(
+    project,
+    generationReferenceInputs.referenceCount
+      ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
+      : '资产库暂无可用参考项，视频生成将仅使用镜头 Prompt 和首尾帧。',
+    generationReferenceInputs.referenceCount ? 'info' : 'warn'
+  );
+  await saveProject(project);
+
+  const videoAsset = await generateVideoAssetForShot(project, shot, appSettings, generationReferenceInputs);
+  setActiveShotAsset(project, 'videos', shot.id, videoAsset);
+  project.assets.finalVideo = null;
+  resetStage(project, 'edit');
+  appendLog(project, `镜头 ${shot.title} 的视频片段已更新，历史版本已保留。`);
+  await saveProject(project);
+}
+
+function findShotAssetVersion(
+  project: Project,
+  stage: ShotAssetStage,
+  shotId: string,
+  relativePath: string
+): GeneratedAsset | null {
+  const active = getActiveShotAsset(project, stage, shotId);
+
+  if (active?.relativePath === relativePath) {
+    return active;
+  }
+
+  return getShotAssetHistory(project, stage, shotId).find((asset) => asset.relativePath === relativePath) ?? null;
+}
+
+async function selectStoryboardShotAssetVersion(
+  projectId: string,
+  stage: ShotAssetStage,
+  shotId: string,
+  relativePath: string
+): Promise<Project> {
+  const project = await readProject(projectId);
+  const shot = project.storyboard.find((item) => item.id === shotId);
+
+  if (!shot) {
+    throw new Error(`未找到镜头 ${shotId}`);
+  }
+
+  const nextAsset = findShotAssetVersion(project, stage, shotId, relativePath.trim());
+
+  if (!nextAsset) {
+    throw new Error('指定版本不存在。');
+  }
+
+  const currentAsset = getActiveShotAsset(project, stage, shotId);
+  if (currentAsset?.relativePath === nextAsset.relativePath) {
+    return project;
+  }
+
+  setActiveShotAsset(project, stage, shotId, nextAsset);
+
+  if (stage === 'images') {
+    clearActiveShotAsset(project, 'videos', shotId);
+    project.assets.finalVideo = null;
+    resetStage(project, 'videos');
+    resetStage(project, 'edit');
+    appendLog(project, `镜头 ${shot.title} 已切换到指定首帧版本；当前视频片段已失效，请重新生成或重新选择视频版本。`);
+  } else {
+    project.assets.finalVideo = null;
+    resetStage(project, 'edit');
+    appendLog(project, `镜头 ${shot.title} 已切换到指定视频版本，请重新执行视频剪辑。`);
+  }
+
+  await saveProject(project);
+  return project;
+}
+
+export async function enqueueStoryboardShotImageGeneration(projectId: string, shotId: string): Promise<void> {
+  await enqueueStageScopedProjectTask(
+    projectId,
+    'images',
+    async () => {
+      await executeStoryboardShotImageGeneration(projectId, shotId);
+    },
+    'Shot image generation'
+  );
+}
+
+export async function enqueueStoryboardShotVideoGeneration(projectId: string, shotId: string): Promise<void> {
+  await enqueueStageScopedProjectTask(
+    projectId,
+    'videos',
+    async () => {
+      await executeStoryboardShotVideoGeneration(projectId, shotId);
+    },
+    'Shot video generation'
+  );
+}
+
+export async function selectStoryboardShotImageVersion(
+  projectId: string,
+  shotId: string,
+  relativePath: string
+): Promise<Project> {
+  return await selectStoryboardShotAssetVersion(projectId, 'images', shotId, relativePath);
+}
+
+export async function selectStoryboardShotVideoVersion(
+  projectId: string,
+  shotId: string,
+  relativePath: string
+): Promise<Project> {
+  return await selectStoryboardShotAssetVersion(projectId, 'videos', shotId, relativePath);
 }
 
 export async function updateStoryboardShotPrompts(
@@ -1394,14 +2562,14 @@ export async function updateStoryboardShotPrompts(
   }
 
   if (shouldInvalidateImageOutputs) {
-    project.assets.images = project.assets.images.filter((asset) => asset.shotId !== shotId);
-    project.assets.videos = project.assets.videos.filter((asset) => asset.shotId !== shotId);
+    clearActiveShotAsset(project, 'images', shotId);
+    clearActiveShotAsset(project, 'videos', shotId);
     project.assets.finalVideo = null;
     resetStage(project, 'images');
     resetStage(project, 'videos');
     resetStage(project, 'edit');
   } else if (shouldInvalidateVideoOutputs) {
-    project.assets.videos = project.assets.videos.filter((asset) => asset.shotId !== shotId);
+    clearActiveShotAsset(project, 'videos', shotId);
     project.assets.finalVideo = null;
     resetStage(project, 'videos');
     resetStage(project, 'edit');

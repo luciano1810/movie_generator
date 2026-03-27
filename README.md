@@ -47,13 +47,14 @@ OPENAI_BASE_URL=https://your-openai-compatible-api/v1
 OPENAI_API_KEY=your_api_key
 OPENAI_MODEL=gpt-4o-mini
 
-COMFYUI_BASE_URL=http://127.0.0.1:8188
-COMFYUI_CHARACTER_ASSET_WORKFLOW=./config/workflows/image-workflow.template.json
+COMFYUI_BASE_URL=http://100.100.8.2:8188
+COMFYUI_CHARACTER_ASSET_WORKFLOW=./config/workflows/firered-image-edit-1.1_api.template.json
+COMFYUI_STORYBOARD_IMAGE_WORKFLOW=./config/workflows/storyboard-image-edit-3ref.template.json
 COMFYUI_TEXT_TO_IMAGE_WORKFLOW=./config/workflows/image-workflow.template.json
 COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW=./config/workflows/image-workflow.template.json
-COMFYUI_IMAGE_EDIT_WORKFLOW=
+COMFYUI_IMAGE_EDIT_WORKFLOW=./config/workflows/firered-image-edit-1.1_api.template.json
 COMFYUI_TEXT_TO_VIDEO_WORKFLOW=
-COMFYUI_IMAGE_TO_VIDEO_WORKFLOW=./config/workflows/video-workflow.template.json
+COMFYUI_IMAGE_TO_VIDEO_WORKFLOW=./config/workflows/ltx_2.3_ti2v_api.template.json
 COMFYUI_TTS_WORKFLOW=
 ```
 
@@ -67,7 +68,7 @@ VITE_API_BASE_URL=http://127.0.0.1:3001
 说明：
 
 - `.env` 现在主要用于首次启动时提供默认值
-- 启动后可以直接在 Web 界面的“系统设置”里修改 LLM API、ComfyUI API、七类 ComfyUI 工作流和 FFmpeg 路径
+- 启动后可以直接在 Web 界面的“系统设置”里修改 LLM API、ComfyUI API、八类 ComfyUI 工作流和 FFmpeg 路径
 - ComfyUI 设置现在只填写工作流 JSON 路径；checkpoint 需要直接固化在你自己的工作流文件里
 - 运行期设置会保存在项目根目录的 `.shortdrama-generator.settings.json`
 
@@ -96,10 +97,10 @@ npm start
 - 生图工作流节点差异相对小，可以提供一个基础模板
 - 生视频工作流差异很大，不同模型和自定义节点的 API JSON 结构差别明显
 - 真实项目里，最稳妥的做法是从你自己的 ComfyUI 里导出 API Workflow JSON，再替换模板
-- 现在支持为人物资产、文生图、参考图生图、图片编辑、文生视频、图生视频、TTS 七类任务分别绑定不同工作流
+- 现在支持为人物资产、分镜图片、文生图、参考图生图、图片编辑、文生视频、图生视频、TTS 八类任务分别绑定不同工作流
 - `COMFYUI_TTS_WORKFLOW` 是可选配置；如果未配置，分镜里的背景声音 prompt 和台词/旁白 prompt 会自动合并到视频工作流的 `{{prompt}}` 输入
 - 如果配置了可用的 `COMFYUI_TTS_WORKFLOW`，项目在“视频剪辑”阶段会先按镜头生成 TTS 配音，再把配音混入各个视频片段并导出最终成片
-- 当前主流程实际会使用到：人物资产、文生图、参考图生图、图生视频、TTS；图片编辑和文生视频工作流会保存在系统设置中，便于后续工作流扩展或手动接入
+- 当前主流程实际会使用到：人物资产、分镜图片、文生图、参考图生图、图生视频、TTS；图片阶段会优先使用 `storyboard_image` 工作流，若未配置则回退到 `image_edit`，缺少参考图时再回退到 `text_to_image`
 
 ### 支持的占位符
 
@@ -114,14 +115,25 @@ npm start
 - `{{video_height}}`
 - `{{fps}}`
 - `{{duration_seconds}}`
+- `{{frame_count}}`
+- `{{latent_video_width}}`
+- `{{latent_video_height}}`
 - `{{input_image}}`
 - `{{last_frame_image}}`
 - `{{last_frame_prompt}}`
 - `{{reference_context}}`
 - `{{reference_count}}`
 - `{{reference_image_count}}`
+- `{{reference_total_image_count}}`
 - `{{reference_images}}`
 - `{{reference_assets}}`
+- `{{edit_image_1}}`
+- `{{edit_image_2}}`
+- `{{edit_image_3}}`
+- `{{reference_batch_index}}`
+- `{{reference_batch_total}}`
+- `{{reference_batch_size}}`
+- `{{reference_batch_images}}`
 - `{{character_reference_image}}`
 - `{{character_reference_images}}`
 - `{{character_reference_assets}}`
@@ -139,14 +151,30 @@ npm start
 
 - `reference_context` 会自动追加到图片/视频 prompt 中
 - `reference_images`、`reference_assets` 以及按类型拆分的 `*_reference_images` / `*_reference_assets` 适合在工作流 JSON 中以“整个字段就是占位符”的方式直接注入数组或对象
+- `edit_image_1` / `edit_image_2` / `edit_image_3` 是给多图图片编辑工作流准备的便捷变量，会优先按场景、角色、物品参考图回填；如果只找到一部分参考图，会自动复用已有输入补齐
+- `reference_batch_*` 是给“单次最多吃 3 张参考图”的分镜图片工作流准备的；当资产库参考图超过 3 张时，服务端会自动分批多轮执行工作流，并把上一轮结果作为下一轮的主输入继续融合
 
 ### 生图模板
 
-`config/workflows/image-workflow.template.json` 提供了一个基础示例，适合常见 `CheckpointLoaderSimple + KSampler + SaveImage` 结构。你需要直接在工作流 JSON 里把 checkpoint 改成自己的模型文件。
+`config/workflows/image-workflow.template.json` 提供了一个基础示例，适合常见 `CheckpointLoaderSimple + KSampler + SaveImage` 结构。当前默认填的是 `z-image-turbo-fp8-aio.safetensors`；如果你的 ComfyUI 环境模型名不同，需要改成实际存在的 checkpoint 文件名。
+
+### 图片编辑模板
+
+`config/workflows/firered-image-edit-1.1_api.template.json` 提供了一个 FireRed 三图输入模板，默认映射 `{{prompt}}`、`{{negative_prompt}}`、`{{output_prefix}}`、`{{seed}}` 和 `{{edit_image_1}}` ~ `{{edit_image_3}}`。
+
+人物资产默认也可以使用这套模板；仓库内置的姿态参考图路径是 `config/reference-images/character-pose-three-view.png`。当角色资产未单独上传参考图时，系统会把这张三视图作为默认姿态输入；如果角色资产上传了参考图并选择“参考图 + Prompt”，该角色参考图会作为主参考输入，三视图仍会继续作为姿态约束。
+
+### 分镜图片模板
+
+`config/workflows/storyboard-image-edit-3ref.template.json` 是基于 FireRed 三图模板复制出的分镜首帧专用版本，默认同样映射 `{{prompt}}`、`{{negative_prompt}}`、`{{output_prefix}}`、`{{seed}}` 和 `{{edit_image_1}}` ~ `{{edit_image_3}}`。
+
+图片阶段会自动把资产库里的场景、角色、物品参考图按优先级注入这三个输入位；如果参考图超过 3 张，后端会自动把参考图拆成多批次运行，并把上一轮生成结果继续作为下一轮 `edit_image_1` 输入。
 
 ### 生视频模板
 
-`config/workflows/video-workflow.template.json` 只是占位示例，你需要替换成你自己的 API Workflow JSON。
+项目默认的图生视频工作流现在是 `config/workflows/ltx_2.3_ti2v_api.template.json`。这份模板已经接好 `{{input_image}}`、`{{prompt}}`、`{{negative_prompt}}`、`{{fps}}`、`{{frame_count}}`、`{{latent_video_width}}`、`{{latent_video_height}}`、`{{output_prefix}}` 和 `{{seed}}`，可以直接作为 LTX 2.3 的默认视频工作流使用。
+
+`config/workflows/video-workflow.template.json` 仍然保留为通用占位示例；如果你以后切换到别的视频模型，可以继续替换成自己的 API Workflow JSON。
 
 建议步骤：
 
@@ -158,6 +186,7 @@ npm start
 如果你需要通过环境变量预填工作流路径，可以分别写入：
 
 - `COMFYUI_CHARACTER_ASSET_WORKFLOW`
+- `COMFYUI_STORYBOARD_IMAGE_WORKFLOW`
 - `COMFYUI_TEXT_TO_IMAGE_WORKFLOW`
 - `COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW`
 - `COMFYUI_IMAGE_EDIT_WORKFLOW`

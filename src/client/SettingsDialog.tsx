@@ -37,6 +37,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
   const workflowStatusMap = {
     character_asset: status?.characterAssetWorkflowExists ?? false,
+    storyboard_image: status?.storyboardImageWorkflowExists ?? false,
     text_to_image: status?.textToImageWorkflowExists ?? false,
     reference_image_to_image: status?.referenceImageToImageWorkflowExists ?? false,
     image_edit: status?.imageEditWorkflowExists ?? false,
@@ -56,6 +57,12 @@ export function SettingsDialog(props: SettingsDialogProps) {
       label: '人物资产',
       description: '用于角色参考图生成',
       workflowPlaceholder: '/absolute/path/to/character-asset-workflow.json'
+    },
+    {
+      key: 'storyboard_image',
+      label: '首帧生成',
+      description: '用于镜头首帧生成；服务端会自动注入最多 3 张参考图，超过 3 张时分批多轮执行',
+      workflowPlaceholder: '/absolute/path/to/storyboard-image-workflow.json'
     },
     {
       key: 'text_to_image',
@@ -274,6 +281,23 @@ export function SettingsDialog(props: SettingsDialogProps) {
                     comfyui: {
                       ...draft.comfyui,
                       timeoutMs: Number(event.target.value) || draft.comfyui.timeoutMs
+                    }
+                  })
+                }
+              />
+            </label>
+            <label className="field">
+              <span>图生视频单次最长秒数</span>
+              <input
+                type="number"
+                value={draft.comfyui.maxVideoSegmentDurationSeconds}
+                onChange={(event) =>
+                  onChange({
+                    ...draft,
+                    comfyui: {
+                      ...draft.comfyui,
+                      maxVideoSegmentDurationSeconds:
+                        Number(event.target.value) || draft.comfyui.maxVideoSegmentDurationSeconds
                     }
                   })
                 }

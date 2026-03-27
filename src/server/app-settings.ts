@@ -94,6 +94,7 @@ export function getRuntimeStatus(settings = getAppSettings()): RuntimeStatus {
     llmConfigured: Boolean(settings.llm.baseUrl && settings.llm.apiKey && settings.llm.model),
     comfyuiConfigured: Boolean(settings.comfyui.baseUrl),
     characterAssetWorkflowExists: workflowExists(settings.comfyui.workflows.character_asset.workflowPath),
+    storyboardImageWorkflowExists: workflowExists(settings.comfyui.workflows.storyboard_image.workflowPath),
     textToImageWorkflowExists: workflowExists(settings.comfyui.workflows.text_to_image.workflowPath),
     referenceImageToImageWorkflowExists: workflowExists(
       settings.comfyui.workflows.reference_image_to_image.workflowPath

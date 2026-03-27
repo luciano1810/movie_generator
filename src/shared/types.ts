@@ -1,6 +1,7 @@
 export const STAGES = ['script', 'assets', 'storyboard', 'images', 'videos', 'edit'] as const;
 export const COMFYUI_WORKFLOW_TYPES = [
   'character_asset',
+  'storyboard_image',
   'text_to_image',
   'reference_image_to_image',
   'image_edit',
@@ -35,6 +36,7 @@ export interface AppSettings {
     workflows: Record<ComfyWorkflowType, ComfyWorkflowSettings>;
     pollIntervalMs: number;
     timeoutMs: number;
+    maxVideoSegmentDurationSeconds: number;
   };
   ffmpeg: {
     binaryPath: string;
@@ -45,6 +47,7 @@ export interface RuntimeStatus {
   llmConfigured: boolean;
   comfyuiConfigured: boolean;
   characterAssetWorkflowExists: boolean;
+  storyboardImageWorkflowExists: boolean;
   textToImageWorkflowExists: boolean;
   referenceImageToImageWorkflowExists: boolean;
   imageEditWorkflowExists: boolean;
@@ -154,6 +157,10 @@ export interface GeneratedAsset {
   createdAt: string;
 }
 
+export interface ShotAssetHistoryMap {
+  [shotId: string]: GeneratedAsset[] | undefined;
+}
+
 export interface ReferenceAssetItem {
   id: string;
   kind: ReferenceAssetKind;
@@ -163,7 +170,9 @@ export interface ReferenceAssetItem {
   status: StageStatus;
   error: string | null;
   updatedAt: string;
+  referenceImage: GeneratedAsset | null;
   asset: GeneratedAsset | null;
+  assetHistory: GeneratedAsset[];
 }
 
 export interface ProjectReferenceLibrary {
@@ -191,6 +200,8 @@ export interface ProjectRunState {
   requestedStage: RunStage | null;
   currentStage: StageId | null;
   startedAt: string | null;
+  pauseRequested: boolean;
+  isPaused: boolean;
 }
 
 export interface Project {
@@ -205,7 +216,9 @@ export interface Project {
   storyboard: StoryboardShot[];
   assets: {
     images: GeneratedAsset[];
+    imageHistory: ShotAssetHistoryMap;
     videos: GeneratedAsset[];
+    videoHistory: ShotAssetHistoryMap;
     finalVideo: GeneratedAsset | null;
   };
   referenceLibrary: ProjectReferenceLibrary;
@@ -225,7 +238,7 @@ export const STAGE_LABELS: Record<StageId, string> = {
   script: '剧本生成',
   assets: '资产生成',
   storyboard: '分镜生成',
-  images: '图片生成',
+  images: '首帧生成',
   videos: '视频生成',
   edit: '视频剪辑'
 };
@@ -261,6 +274,9 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
       character_asset: {
         workflowPath: ''
       },
+      storyboard_image: {
+        workflowPath: ''
+      },
       text_to_image: {
         workflowPath: ''
       },
@@ -281,7 +297,8 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
       }
     },
     pollIntervalMs: 3000,
-    timeoutMs: 1_800_000
+    timeoutMs: 1_800_000,
+    maxVideoSegmentDurationSeconds: DEFAULT_SETTINGS.maxVideoSegmentDurationSeconds
   },
   ffmpeg: {
     binaryPath: ''
@@ -393,6 +410,15 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
           fallback.comfyui.workflows.character_asset,
           pickWorkflowPath(rawWorkflows.character?.workflowPath, legacyCharacterWorkflowPath, legacyImageWorkflowPath)
         ),
+        storyboard_image: normalizeComfyWorkflowSettings(
+          rawWorkflows.storyboard_image,
+          fallback.comfyui.workflows.storyboard_image,
+          pickWorkflowPath(
+            rawWorkflows.storyboard?.workflowPath,
+            rawWorkflows.image_edit?.workflowPath,
+            rawWorkflows.reference_image_to_image?.workflowPath
+          )
+        ),
         text_to_image: normalizeComfyWorkflowSettings(
           rawWorkflows.text_to_image,
           fallback.comfyui.workflows.text_to_image,
@@ -429,7 +455,11 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
         )
       },
       pollIntervalMs: normalizePositiveInteger(rawComfyui.pollIntervalMs, fallback.comfyui.pollIntervalMs),
-      timeoutMs: normalizePositiveInteger(rawComfyui.timeoutMs, fallback.comfyui.timeoutMs)
+      timeoutMs: normalizePositiveInteger(rawComfyui.timeoutMs, fallback.comfyui.timeoutMs),
+      maxVideoSegmentDurationSeconds: normalizePositiveInteger(
+        rawComfyui.maxVideoSegmentDurationSeconds,
+        fallback.comfyui.maxVideoSegmentDurationSeconds
+      )
     },
     ffmpeg: {
       binaryPath: normalizeEditableString(ffmpeg.binaryPath, fallback.ffmpeg.binaryPath)
@@ -482,12 +512,14 @@ export function normalizeStoryboardShot(
     ),
     backgroundSoundPrompt: normalizeString(
       input?.backgroundSoundPrompt,
-      `场景${sceneNumber}镜头${shotNumber}的背景声音设计，突出环境氛围、动作音效和空间层次，不包含人物对白。`
+      dialogue || voiceover
+        ? `场景${sceneNumber}镜头${shotNumber}的背景声音设计，突出环境氛围、动作音效和空间层次，不包含额外人物对白，也不要盖过主要语音内容。`
+        : `场景${sceneNumber}镜头${shotNumber}没有对白和旁白，需要自然、真实、连贯的环境音、动作音和空间氛围声，不要出现人声。`
     ),
     speechPrompt: normalizeString(
       input?.speechPrompt,
       dialogue || voiceover
-        ? `场景${sceneNumber}镜头${shotNumber}的中文台词/旁白配音设计。台词：${dialogue || '无'}；旁白：${voiceover || '无'}。要求情绪准确、节奏自然、贴合人物状态。`
+        ? `场景${sceneNumber}镜头${shotNumber}的中文台词/旁白配音设计。台词：${dialogue || '无'}；旁白：${voiceover || '无'}。要求情绪准确、节奏自然、贴合人物状态，并通过人物身份、年龄感和外观气质明确当前说话者，不要只写角色名。`
         : `场景${sceneNumber}镜头${shotNumber}无台词和旁白，不生成语音内容。`
     )
   };
@@ -546,5 +578,16 @@ export function createEmptyReferenceLibrary(): ProjectReferenceLibrary {
     characters: [],
     scenes: [],
     objects: []
+  };
+}
+
+export function createIdleRunState(): ProjectRunState {
+  return {
+    isRunning: false,
+    requestedStage: null,
+    currentStage: null,
+    startedAt: null,
+    pauseRequested: false,
+    isPaused: false
   };
 }
