@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
   AppMeta,
   AppSettings,
@@ -64,6 +64,13 @@ interface ShotTechnicalDraft {
   firstFramePrompt: string;
   lastFramePrompt: string;
   transitionHint: string;
+}
+
+interface ReferenceLibraryPickerProps {
+  assets: ReferenceLibraryAssetItem[];
+  disabled: boolean;
+  selectedValue: string;
+  onChange: (value: string) => void;
 }
 
 const ASPECT_RATIO_LABELS: Record<ProjectSettings['aspectRatio'], string> = {
@@ -483,6 +490,141 @@ function referenceLibrarySelectionKey(kind: ReferenceAssetKind, itemId: string):
   return `library:${kind}:${itemId}`;
 }
 
+function referenceLibraryAssetValue(asset: Pick<ReferenceLibraryAssetItem, 'projectId' | 'itemId'>): string {
+  return `${asset.projectId}::${asset.itemId}`;
+}
+
+function resolveReferenceLibrarySelection(
+  assets: ReferenceLibraryAssetItem[],
+  preferredValue?: string
+): string {
+  if (!assets.length) {
+    return '';
+  }
+
+  if (preferredValue && assets.some((asset) => referenceLibraryAssetValue(asset) === preferredValue)) {
+    return preferredValue;
+  }
+
+  return referenceLibraryAssetValue(assets[0]);
+}
+
+function ReferenceLibraryPicker({
+  assets,
+  disabled,
+  selectedValue,
+  onChange
+}: ReferenceLibraryPickerProps) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selectedAsset = assets.find((asset) => referenceLibraryAssetValue(asset) === selectedValue) ?? null;
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (rootRef.current?.contains(event.target as Node)) {
+        return;
+      }
+
+      setOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if ((disabled || !assets.length) && open) {
+      setOpen(false);
+    }
+  }, [assets.length, disabled, open]);
+
+  return (
+    <div className="asset-picker" ref={rootRef}>
+      <button
+        className={`asset-picker-trigger ${open ? 'open' : ''}`}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        disabled={disabled || !assets.length}
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        {selectedAsset ? (
+          <>
+            <img
+              className="asset-picker-thumb"
+              src={assetUrl(selectedAsset.relativePath)}
+              alt=""
+              aria-hidden="true"
+            />
+            <span className="asset-picker-copy">
+              <strong>{selectedAsset.name}</strong>
+              <small>{selectedAsset.projectTitle}</small>
+              <span>{formatTime(selectedAsset.createdAt)}</span>
+            </span>
+            <span className="asset-picker-chevron" aria-hidden="true">
+              ▾
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="asset-picker-copy asset-picker-placeholder">
+              <strong>当前资产库没有可直接选用的同类素材</strong>
+            </span>
+            <span className="asset-picker-chevron" aria-hidden="true">
+              ▾
+            </span>
+          </>
+        )}
+      </button>
+
+      {open && assets.length ? (
+        <div className="asset-picker-menu" role="listbox">
+          {assets.map((asset) => {
+            const value = referenceLibraryAssetValue(asset);
+            const isSelected = value === selectedValue;
+
+            return (
+              <button
+                key={value}
+                className={`asset-picker-option ${isSelected ? 'selected' : ''}`}
+                onClick={() => {
+                  onChange(value);
+                  setOpen(false);
+                }}
+                role="option"
+                aria-selected={isSelected}
+                type="button"
+              >
+                <img className="asset-picker-thumb" src={assetUrl(asset.relativePath)} alt="" aria-hidden="true" />
+                <span className="asset-picker-copy">
+                  <strong>{asset.name}</strong>
+                  <small>{asset.projectTitle}</small>
+                  <span>{asset.summary}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function isStageTab(tab: ProjectPanelTab): tab is StageId {
   return STAGES.includes(tab as StageId);
 }
@@ -566,9 +708,13 @@ function projectCardStatus(project: Project): {
       badge: '运行中',
       badgeTone: 'running',
       detail: project.runState.currentStage
-        ? `当前阶段 · ${STAGE_LABELS[project.runState.currentStage]}${project.runState.pauseRequested ? '（暂停中）' : ''}`
-        : project.runState.pauseRequested
-          ? '当前阶段 · 排队中（暂停中）'
+        ? `当前阶段 · ${STAGE_LABELS[project.runState.currentStage]}${
+            project.runState.stopRequested ? '（停止中）' : project.runState.pauseRequested ? '（暂停中）' : ''
+          }`
+        : project.runState.stopRequested
+          ? '当前阶段 · 排队中（停止中）'
+          : project.runState.pauseRequested
+            ? '当前阶段 · 排队中（暂停中）'
           : '当前阶段 · 排队中'
     };
   }
@@ -991,6 +1137,26 @@ export function App() {
     }
   }
 
+  async function handleStopProjectRun() {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending('stop-all');
+      await requestJson<{ ok: true }>(`/api/projects/${selectedId}/stop`, {
+        method: 'POST'
+      });
+      setNotice('已请求停止；系统正在中断当前任务');
+      await loadProject(selectedId, true, true);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '停止任务失败');
+    } finally {
+      setPending('');
+    }
+  }
+
   async function handleResumeProjectRun() {
     if (!selectedId) {
       return;
@@ -1006,6 +1172,26 @@ export function App() {
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '继续全流程失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleContinueProjectRun() {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending('continue-all');
+      await requestJson<{ ok: true }>(`/api/projects/${selectedId}/continue`, {
+        method: 'POST'
+      });
+      setNotice('已提交从当前阶段继续到完成的任务');
+      await loadProject(selectedId, true, true);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '继续执行到完成失败');
     } finally {
       setPending('');
     }
@@ -1595,6 +1781,9 @@ export function App() {
   const readyVideoCount = project?.storyboard.filter((shot) => videoMap.has(shot.id)).length ?? 0;
   const activeStageState = project && isStageTab(projectStageTab) ? project.stages[projectStageTab] : null;
   const activeTabIndex = isStageTab(projectStageTab) ? STAGES.indexOf(projectStageTab) + 1 : STAGES.length + 1;
+  const hasRemainingStages = project ? STAGES.some((stage) => project.stages[stage].status !== 'success') : false;
+  const hasStartedStages = project ? STAGES.some((stage) => project.stages[stage].status !== 'idle') : false;
+  const showContinueToCompletion = Boolean(project && hasRemainingStages && hasStartedStages);
 
   return (
     <div className="shell">
@@ -1690,33 +1879,61 @@ export function App() {
                     >
                       {pending === 'save' ? '保存中...' : '保存项目'}
                     </button>
-                    {project.runState.isRunning && project.runState.requestedStage === 'all' ? (
-                      <button
-                        className="button secondary"
-                        disabled={project.runState.pauseRequested || pending === 'pause-all'}
-                        onClick={() => void handlePauseProjectRun()}
-                        type="button"
-                      >
-                        {project.runState.pauseRequested || pending === 'pause-all' ? '暂停中...' : '暂停'}
-                      </button>
-                    ) : project.runState.isPaused && project.runState.requestedStage === 'all' ? (
-                      <button
-                        className="button primary"
-                        disabled={pending === 'resume-all'}
-                        onClick={() => void handleResumeProjectRun()}
-                        type="button"
-                      >
-                        {pending === 'resume-all' ? '继续中...' : '继续全流程'}
-                      </button>
+                    {project.runState.isRunning ? (
+                      <>
+                        {project.runState.requestedStage === 'all' ? (
+                          <button
+                            className="button secondary"
+                            disabled={
+                              project.runState.pauseRequested || project.runState.stopRequested || pending === 'pause-all'
+                            }
+                            onClick={() => void handlePauseProjectRun()}
+                            type="button"
+                          >
+                            {project.runState.pauseRequested || pending === 'pause-all' ? '暂停中...' : '暂停'}
+                          </button>
+                        ) : null}
+                        <button
+                          className="button danger"
+                          disabled={project.runState.stopRequested || pending === 'stop-all'}
+                          onClick={() => void handleStopProjectRun()}
+                          type="button"
+                        >
+                          {project.runState.stopRequested || pending === 'stop-all' ? '停止中...' : '停止'}
+                        </button>
+                      </>
                     ) : (
-                      <button
-                        className="button primary"
-                        disabled={Boolean(project.runState.isRunning) || pending === 'all'}
-                        onClick={() => void handleRunStage('all')}
-                        type="button"
-                      >
-                        {pending === 'all' ? '提交中...' : '执行全流程'}
-                      </button>
+                      <>
+                        {showContinueToCompletion ? (
+                          <button
+                            className="button primary"
+                            disabled={Boolean(project.runState.isRunning) || pending === 'continue-all'}
+                            onClick={() => void handleContinueProjectRun()}
+                            type="button"
+                          >
+                            {pending === 'continue-all' ? '继续中...' : '继续执行到完成'}
+                          </button>
+                        ) : null}
+                        {!project.runState.isPaused ? (
+                          <button
+                            className={`button ${showContinueToCompletion ? 'secondary' : 'primary'}`}
+                            disabled={Boolean(project.runState.isRunning) || pending === 'all'}
+                            onClick={() => void handleRunStage('all')}
+                            type="button"
+                          >
+                            {pending === 'all' ? '提交中...' : '执行全流程'}
+                          </button>
+                        ) : project.runState.requestedStage === 'all' ? null : (
+                          <button
+                            className="button primary"
+                            disabled={pending === 'resume-all'}
+                            onClick={() => void handleResumeProjectRun()}
+                            type="button"
+                          >
+                            {pending === 'resume-all' ? '继续中...' : '继续全流程'}
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -1741,9 +1958,13 @@ export function App() {
                         <strong>
                           {project.runState.isRunning
                             ? project.runState.currentStage
-                              ? `${STAGE_LABELS[project.runState.currentStage]}${project.runState.pauseRequested ? '（暂停中）' : ''}`
-                              : project.runState.pauseRequested
-                                ? '排队中（暂停中）'
+                              ? `${STAGE_LABELS[project.runState.currentStage]}${
+                                  project.runState.stopRequested ? '（停止中）' : project.runState.pauseRequested ? '（暂停中）' : ''
+                                }`
+                              : project.runState.stopRequested
+                                ? '排队中（停止中）'
+                                : project.runState.pauseRequested
+                                  ? '排队中（暂停中）'
                                 : '排队中'
                             : project.runState.isPaused
                               ? `已暂停 · 下一阶段 ${STAGE_LABELS[nextProjectStage(project)]}`
@@ -1955,13 +2176,13 @@ export function App() {
                                 .filter((asset) => !(asset.projectId === selectedId && asset.itemId === item.id))
                                 .filter((asset) => asset.relativePath !== item.asset?.relativePath);
                               const selectedLibraryValue =
-                                referenceLibrarySelections[librarySelectionKey] ??
-                                (availableLibraryAssets[0]
-                                  ? `${availableLibraryAssets[0].projectId}::${availableLibraryAssets[0].itemId}`
-                                  : '');
+                                resolveReferenceLibrarySelection(
+                                  availableLibraryAssets,
+                                  referenceLibrarySelections[librarySelectionKey]
+                                );
                               const selectedLibraryAsset =
                                 availableLibraryAssets.find(
-                                  (asset) => `${asset.projectId}::${asset.itemId}` === selectedLibraryValue
+                                  (asset) => referenceLibraryAssetValue(asset) === selectedLibraryValue
                                 ) ?? null;
                               const selectLibraryPending = pending === `reference-library:${kind}:${item.id}`;
 
@@ -2014,62 +2235,51 @@ export function App() {
                                         }}
                                       />
                                     </label>
-                                    <label className="field span-2">
+                                    <div className="field span-2">
                                       <span>从资产库直接选用</span>
-                                      <select
+                                      <ReferenceLibraryPicker
+                                        assets={availableLibraryAssets}
                                         disabled={Boolean(project.runState.isRunning) || item.status === 'running' || !availableLibraryAssets.length}
-                                        value={selectedLibraryValue}
-                                        onChange={(event) =>
+                                        selectedValue={selectedLibraryValue}
+                                        onChange={(value) =>
                                           setReferenceLibrarySelections((current) => ({
                                             ...current,
-                                            [librarySelectionKey]: event.target.value
+                                            [librarySelectionKey]: value
                                           }))
                                         }
-                                      >
-                                        {availableLibraryAssets.length ? (
-                                          availableLibraryAssets.map((asset) => (
-                                            <option
-                                              key={`${asset.projectId}:${asset.itemId}`}
-                                              value={`${asset.projectId}::${asset.itemId}`}
-                                            >
-                                              {`${asset.name} · ${asset.projectTitle} · ${formatTime(asset.createdAt)}`}
-                                            </option>
-                                          ))
-                                        ) : (
-                                          <option value="">当前资产库没有可直接选用的同类素材</option>
-                                        )}
-                                      </select>
-                                    </label>
+                                      />
+                                    </div>
                                   </div>
                                   {selectedLibraryAsset ? (
-                                    <div className="reference-preview">
-                                      <img src={assetUrl(selectedLibraryAsset.relativePath)} alt={selectedLibraryAsset.name} />
-                                      <a href={assetUrl(selectedLibraryAsset.relativePath)} target="_blank" rel="noreferrer">
-                                        打开资产库素材
-                                      </a>
+                                    <div className="reference-library-selection">
                                       <small className="version-indicator">
                                         {selectedLibraryAsset.projectTitle} · {selectedLibraryAsset.summary}
                                       </small>
-                                      <button
-                                        className="button ghost mini-button"
-                                        disabled={
-                                          Boolean(project.runState.isRunning) ||
-                                          item.status === 'running' ||
-                                          selectLibraryPending ||
-                                          !selectedLibraryAsset
-                                        }
-                                        onClick={() => {
-                                          const [sourceProjectId, sourceItemId] = selectedLibraryValue.split('::');
-                                          if (!sourceProjectId || !sourceItemId) {
-                                            return;
+                                      <div className="inline-actions">
+                                        <a href={assetUrl(selectedLibraryAsset.relativePath)} target="_blank" rel="noreferrer">
+                                          打开资产库素材
+                                        </a>
+                                        <button
+                                          className="button ghost mini-button"
+                                          disabled={
+                                            Boolean(project.runState.isRunning) ||
+                                            item.status === 'running' ||
+                                            selectLibraryPending ||
+                                            !selectedLibraryAsset
                                           }
+                                          onClick={() => {
+                                            const [sourceProjectId, sourceItemId] = selectedLibraryValue.split('::');
+                                            if (!sourceProjectId || !sourceItemId) {
+                                              return;
+                                            }
 
-                                          void handleSelectLibraryReferenceAsset(kind, item, sourceProjectId, sourceItemId);
-                                        }}
-                                        type="button"
-                                      >
-                                        {selectLibraryPending ? '选用中...' : '选用这份素材'}
-                                      </button>
+                                            void handleSelectLibraryReferenceAsset(kind, item, sourceProjectId, sourceItemId);
+                                          }}
+                                          type="button"
+                                        >
+                                          {selectLibraryPending ? '选用中...' : '选用这份素材'}
+                                        </button>
+                                      </div>
                                     </div>
                                   ) : null}
                                   {item.referenceImage ? (
@@ -3458,6 +3668,27 @@ export function App() {
                   />
                 </label>
                 <label className="field">
+                  <span>目标场次数</span>
+                  <input
+                    type="number"
+                    value={draft.settings.targetSceneCount}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                targetSceneCount: Number(event.target.value) || current.settings.targetSceneCount
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
                   <span>单次生成最长视频秒数（系统设置）</span>
                   <input
                     type="number"
@@ -3467,7 +3698,7 @@ export function App() {
                 </label>
               </div>
               <p className="settings-hint">
-                镜头总时长由 LLM 在分镜阶段自行决定。这里显示的是视频工作流“单次调用”的系统上限；当镜头总时长超过该值时，服务端会自动多次生成并拼接成完整镜头。
+                目标场次数会影响剧本阶段的分场密度。镜头数量和拆镜颗粒度由 LLM 在分镜阶段自行决定。这里显示的是视频工作流“单次调用”的系统上限；当镜头总时长超过该值时，服务端会自动多次生成并拼接成完整镜头。
               </p>
             </section>
 

@@ -98,6 +98,7 @@ function hydrateProjectRunState(runState: ProjectRunState | undefined): ProjectR
     currentStage: runState?.currentStage ?? fallback.currentStage,
     startedAt: runState?.startedAt ?? fallback.startedAt,
     pauseRequested: runState?.pauseRequested ?? fallback.pauseRequested,
+    stopRequested: runState?.stopRequested ?? fallback.stopRequested,
     isPaused: runState?.isPaused ?? fallback.isPaused
   };
 }
@@ -179,6 +180,33 @@ export async function listProjects(): Promise<Project[]> {
   return projects
     .filter((project): project is Project => project !== null)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+export async function clearInterruptedRunStates(): Promise<number> {
+  const projects = await listProjects();
+  let repairedCount = 0;
+
+  for (const project of projects) {
+    if (!project.runState.isRunning) {
+      continue;
+    }
+
+    project.runState = createIdleRunState();
+    project.logs = [
+      ...project.logs,
+      {
+        id: crypto.randomUUID(),
+        level: 'warn' as const,
+        message: '检测到服务重启或任务异常中断，已自动重置运行状态。',
+        createdAt: now()
+      }
+    ].slice(-300);
+    project.updatedAt = now();
+    await writeProject(project);
+    repairedCount += 1;
+  }
+
+  return repairedCount;
 }
 
 export async function createProject(input: {

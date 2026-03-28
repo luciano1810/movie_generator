@@ -44,6 +44,8 @@ const runningProjects = new Map<string, Promise<void>>();
 const runningReferenceGenerations = new Map<string, Promise<void>>();
 const cachedRunStates = new Map<string, ProjectRunState>();
 const pauseRequestedProjects = new Set<string>();
+const stopRequestedProjects = new Set<string>();
+const projectAbortControllers = new Map<string, AbortController>();
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm', '.mkv', '.gif']);
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus']);
@@ -125,6 +127,13 @@ class PipelinePauseError extends Error {
   }
 }
 
+class PipelineStopError extends Error {
+  constructor(readonly stage: StageId) {
+    super(`STOP_REQUESTED:${stage}`);
+    this.name = 'PipelineStopError';
+  }
+}
+
 function syncProjectRunState(project: Project): void {
   const cached = cachedRunStates.get(project.id);
 
@@ -152,7 +161,29 @@ function isPauseRequested(projectId: string): boolean {
   return pauseRequestedProjects.has(projectId);
 }
 
-async function throwIfPauseRequested(projectId: string, stage: StageId): Promise<void> {
+function isStopRequested(projectId: string): boolean {
+  return stopRequestedProjects.has(projectId);
+}
+
+function ensureProjectAbortController(projectId: string): AbortController {
+  const controller = new AbortController();
+  projectAbortControllers.set(projectId, controller);
+  return controller;
+}
+
+function getProjectAbortSignal(projectId: string): AbortSignal | undefined {
+  return projectAbortControllers.get(projectId)?.signal;
+}
+
+function clearProjectAbortController(projectId: string): void {
+  projectAbortControllers.delete(projectId);
+}
+
+async function throwIfRunInterrupted(projectId: string, stage: StageId): Promise<void> {
+  if (isStopRequested(projectId)) {
+    throw new PipelineStopError(stage);
+  }
+
   if (isPauseRequested(projectId)) {
     throw new PipelinePauseError(stage);
   }
@@ -519,13 +550,17 @@ function buildVideoCharacterReferencePrompt(
   ].join('\n');
 }
 
-async function uploadImageToComfyCached(localPath: string, cache: Map<string, string>): Promise<string> {
+async function uploadImageToComfyCached(
+  localPath: string,
+  cache: Map<string, string>,
+  signal?: AbortSignal
+): Promise<string> {
   const cached = cache.get(localPath);
   if (cached) {
     return cached;
   }
 
-  const uploaded = await uploadImageToComfy(localPath);
+  const uploaded = await uploadImageToComfy(localPath, { signal });
   cache.set(localPath, uploaded);
   return uploaded;
 }
@@ -534,6 +569,7 @@ async function buildGenerationReferenceInputs(
   project: Project,
   uploadCache: Map<string, string>
 ): Promise<GenerationReferenceInputs> {
+  const signal = getProjectAbortSignal(project.id);
   const referenceContext = buildReferenceContext(project);
   const collections: Array<[ReferenceAssetKind, ReferenceAssetItem[]]> = [
     ['character', project.referenceLibrary.characters],
@@ -554,7 +590,7 @@ async function buildGenerationReferenceInputs(
 
       if (item.asset?.relativePath) {
         relativePath = item.asset.relativePath;
-        inputImage = await uploadImageToComfyCached(fromStorageRelative(item.asset.relativePath), uploadCache);
+        inputImage = await uploadImageToComfyCached(fromStorageRelative(item.asset.relativePath), uploadCache, signal);
         referenceImageCount += 1;
       }
 
@@ -877,6 +913,7 @@ async function runStoryboardImageWorkflowForShot(
   workflowPath: string,
   generationReferenceInputs: GenerationReferenceInputs
 ): Promise<{ buffer: Buffer; extension: string; passCount: number }> {
+  const signal = getProjectAbortSignal(project.id);
   const referencePasses = buildStoryboardReferencePasses(generationReferenceInputs.referenceImages);
 
   if (!referencePasses.length) {
@@ -911,17 +948,21 @@ async function runStoryboardImageWorkflowForShot(
           referencePasses.length,
           generationReferenceInputs.referenceImageCount
         )
-      })
+      }),
+      {
+        signal
+      }
     );
 
     const outputFile = pickOutputFile(outputFiles, 'image');
-    latestBuffer = await fetchComfyOutputFile(outputFile);
+    latestBuffer = await fetchComfyOutputFile(outputFile, { signal });
     latestExtension = path.extname(outputFile.filename) || '.png';
 
     if (passIndex < referencePasses.length - 1) {
       previousPassImage = await uploadImageBufferToComfy(
         latestBuffer,
-        `${project.id}_${shot.id}_storyboard_image_pass_${passIndex + 1}${latestExtension}`
+        `${project.id}_${shot.id}_storyboard_image_pass_${passIndex + 1}${latestExtension}`,
+        { signal }
       );
     }
   }
@@ -1130,7 +1171,9 @@ async function runScriptStage(project: Project): Promise<void> {
   appendLog(project, '开始调用文本模型生成剧本。');
   await saveProject(project);
 
-  const script = await generateScriptFromText(project.sourceText, project.settings);
+  const script = await generateScriptFromText(project.sourceText, project.settings, {
+    signal: getProjectAbortSignal(project.id)
+  });
   project.script = script;
 
   const markdownFile = await writeProjectFile(project.id, 'script/script.md', script.markdown);
@@ -1150,7 +1193,9 @@ async function extractReferenceLibraryForProject(project: Project): Promise<void
   appendLog(project, '开始提取角色、场景和关键物品候选。');
   await saveProject(project);
 
-  project.referenceLibrary = await extractReferenceLibraryFromScript(project.script, project.settings);
+  project.referenceLibrary = await extractReferenceLibraryFromScript(project.script, project.settings, {
+    signal: getProjectAbortSignal(project.id)
+  });
   await persistReferenceLibrary(project);
 
   appendLog(
@@ -1169,6 +1214,7 @@ async function generateReferenceAssetForProject(
   } = {}
 ): Promise<void> {
   const appSettings = getAppSettings();
+  const signal = getProjectAbortSignal(project.id);
   const workflowKind = getReferenceWorkflowKind(kind);
   const workflow = appSettings.comfyui.workflows[workflowKind];
 
@@ -1205,11 +1251,11 @@ async function generateReferenceAssetForProject(
         ? Boolean(options.useReferenceImage && referenceImageRelativePath)
         : Boolean(referenceImageRelativePath);
     const uploadedReferenceImage = shouldUseReferenceImage
-      ? await uploadImageToComfy(fromStorageRelative(referenceImageRelativePath))
+      ? await uploadImageToComfy(fromStorageRelative(referenceImageRelativePath), { signal })
       : '';
     const uploadedCharacterPoseImage =
       kind === 'character' && existsSync(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
-        ? await uploadImageToComfy(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
+        ? await uploadImageToComfy(DEFAULT_CHARACTER_POSE_REFERENCE_PATH, { signal })
         : '';
     const editImage1 = uploadedReferenceImage || uploadedCharacterPoseImage;
     const editImage2 = uploadedCharacterPoseImage;
@@ -1238,10 +1284,12 @@ async function generateReferenceAssetForProject(
       scene_number: 0,
       shot_number: 0,
       seed: Math.floor(Math.random() * 9_000_000_000)
+    }, {
+      signal
     });
 
     const outputFile = pickOutputFile(outputFiles, 'image');
-    const buffer = await fetchComfyOutputFile(outputFile);
+    const buffer = await fetchComfyOutputFile(outputFile, { signal });
     const extension = path.extname(outputFile.filename) || '.png';
     const saved = await writeProjectFile(project.id, buildReferenceAssetOutputPath(kind, itemId, extension), buffer);
     const hadGeneratedMedia = hasGeneratedMediaOutputs(project);
@@ -1285,6 +1333,19 @@ async function generateReferenceAssetForProject(
       hadGeneratedMedia ? 'warn' : 'info'
     );
   } catch (error) {
+    if (isStopRequested(project.id)) {
+      updateReferenceItem(project, kind, itemId, (item) => ({
+        ...item,
+        generationPrompt,
+        status: item.asset ? 'success' : 'idle',
+        error: null,
+        updatedAt: now()
+      }));
+      await persistReferenceLibrary(project);
+      await saveProject(project);
+      throw error;
+    }
+
     const message = error instanceof Error ? error.message : '未知错误';
 
     updateReferenceItem(project, kind, itemId, (item) => ({
@@ -1524,12 +1585,16 @@ async function runAssetStage(project: Project): Promise<void> {
     }
 
     for (const item of items) {
-      await throwIfPauseRequested(project.id, 'assets');
+      await throwIfRunInterrupted(project.id, 'assets');
 
       try {
         await generateReferenceAssetForProject(project, kind, item.id);
         generatedCount += 1;
-      } catch {
+      } catch (error) {
+        if (isStopRequested(project.id)) {
+          throw error;
+        }
+
         failedCount += 1;
       }
     }
@@ -1550,7 +1615,9 @@ async function runStoryboardStage(project: Project): Promise<void> {
   appendLog(project, '开始根据剧本拆解分镜。');
   await saveProject(project);
 
-  const storyboard = await generateStoryboardFromScript(project.script, project.settings);
+  const storyboard = await generateStoryboardFromScript(project.script, project.settings, {
+    signal: getProjectAbortSignal(project.id)
+  });
   project.storyboard = storyboard;
 
   const jsonFile = await writeProjectFile(
@@ -1642,6 +1709,7 @@ async function generateImageAssetForShot(
   selectedWorkflow: SelectedImageStageWorkflow,
   generationReferenceInputs: GenerationReferenceInputs
 ): Promise<GeneratedAsset> {
+  const signal = getProjectAbortSignal(project.id);
   let buffer: Buffer;
   let extension: string;
 
@@ -1666,11 +1734,14 @@ async function generateImageAssetForShot(
       buildComfyVariables(project, shot, appSettings, selectedWorkflow.type, {
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables
-      })
+      }),
+      {
+        signal
+      }
     );
 
     const outputFile = pickOutputFile(outputFiles, 'image');
-    buffer = await fetchComfyOutputFile(outputFile);
+    buffer = await fetchComfyOutputFile(outputFile, { signal });
     extension = path.extname(outputFile.filename) || '.png';
   }
 
@@ -1684,6 +1755,7 @@ async function generateVideoAssetForShot(
   appSettings: AppSettings,
   generationReferenceInputs: GenerationReferenceInputs
 ): Promise<GeneratedAsset> {
+  const signal = getProjectAbortSignal(project.id);
   const workflowPath = appSettings.comfyui.workflows.image_to_video.workflowPath;
 
   if (!workflowPath) {
@@ -1723,10 +1795,13 @@ async function generateVideoAssetForShot(
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables,
         seed: shotSeed
-      })
+      }),
+      {
+        signal
+      }
     );
     const lastFrameOutputFile = pickOutputFile(lastFrameOutputFiles, 'image');
-    const lastFrameBuffer = await fetchComfyOutputFile(lastFrameOutputFile);
+    const lastFrameBuffer = await fetchComfyOutputFile(lastFrameOutputFile, { signal });
     const lastFrameExtension = path.extname(lastFrameOutputFile.filename) || '.png';
     const lastFrameSaved = await writeProjectFile(
       project.id,
@@ -1740,14 +1815,14 @@ async function generateVideoAssetForShot(
   }
 
   for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
-    await throwIfPauseRequested(project.id, 'videos');
+    await throwIfRunInterrupted(project.id, 'videos');
 
     const segmentDuration = segmentDurations[segmentIndex];
-    const uploadedImage = await uploadImageToComfy(currentInputImagePath);
+    const uploadedImage = await uploadImageToComfy(currentInputImagePath, { signal });
     const isFinalSegment = segmentIndex === segmentCount - 1;
 
     if (isFinalSegment && targetLastFrameImagePath && !uploadedTargetLastFrameImage) {
-      uploadedTargetLastFrameImage = await uploadImageToComfy(targetLastFrameImagePath);
+      uploadedTargetLastFrameImage = await uploadImageToComfy(targetLastFrameImagePath, { signal });
     }
 
     const outputFiles = await runComfyWorkflow(
@@ -1765,11 +1840,14 @@ async function generateVideoAssetForShot(
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables,
         seed: shotSeed
-      })
+      }),
+      {
+        signal
+      }
     );
 
     const outputFile = pickOutputFile(outputFiles, 'video');
-    const buffer = await fetchComfyOutputFile(outputFile);
+    const buffer = await fetchComfyOutputFile(outputFile, { signal });
     const extension = path.extname(outputFile.filename) || '.mp4';
 
     if (segmentCount === 1) {
@@ -1798,7 +1876,7 @@ async function generateVideoAssetForShot(
         'frames',
         `segment-${String(segmentIndex + 1).padStart(3, '0')}-last.png`
       );
-      await extractLastFrame(segmentSaved.absolutePath, continuationFramePath);
+      await extractLastFrame(segmentSaved.absolutePath, continuationFramePath, { signal });
       currentInputImagePath = continuationFramePath;
 
       appendLog(
@@ -1814,7 +1892,7 @@ async function generateVideoAssetForShot(
     const outputPath = resolveProjectPath(project.id, outputRelativePath);
     appendLog(project, `镜头 ${shot.title} 分段生成完成，开始拼接 ${segmentCount} 段视频。`);
     await saveProject(project);
-    await stitchVideos(segmentVideoPaths, outputPath, project.settings.fps);
+    await stitchVideos(segmentVideoPaths, outputPath, project.settings.fps, [], { signal });
     savedVideoRelativePath = toStorageRelative(outputPath);
   }
 
@@ -1834,7 +1912,7 @@ async function runImageStage(project: Project): Promise<void> {
   await saveProject(project);
 
   for (let index = 0; index < project.storyboard.length; index += 1) {
-    await throwIfPauseRequested(project.id, 'images');
+    await throwIfRunInterrupted(project.id, 'images');
 
     const shot = project.storyboard[index];
     appendLog(project, `首帧生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
@@ -1890,7 +1968,7 @@ async function runVideoStage(project: Project): Promise<void> {
   await saveProject(project);
 
   for (let index = 0; index < project.storyboard.length; index += 1) {
-    await throwIfPauseRequested(project.id, 'videos');
+    await throwIfRunInterrupted(project.id, 'videos');
 
     const shot = project.storyboard[index];
 
@@ -1928,6 +2006,7 @@ async function runEditStage(project: Project): Promise<void> {
   await saveProject(project);
 
   const appSettings = getAppSettings();
+  const signal = getProjectAbortSignal(project.id);
   const orderedAudioPaths: Array<string | null> = [];
 
   if (hasConfiguredTtsWorkflow(appSettings)) {
@@ -1935,7 +2014,7 @@ async function runEditStage(project: Project): Promise<void> {
     await saveProject(project);
 
     for (let index = 0; index < project.storyboard.length; index += 1) {
-      await throwIfPauseRequested(project.id, 'edit');
+      await throwIfRunInterrupted(project.id, 'edit');
 
       const shot = project.storyboard[index];
 
@@ -1949,10 +2028,13 @@ async function runEditStage(project: Project): Promise<void> {
 
       const outputFiles = await runComfyWorkflow(
         appSettings.comfyui.workflows.tts.workflowPath,
-        buildTtsVariables(project, shot)
+        buildTtsVariables(project, shot),
+        {
+          signal
+        }
       );
       const outputFile = pickOutputFile(outputFiles, 'audio');
-      const buffer = await fetchComfyOutputFile(outputFile);
+      const buffer = await fetchComfyOutputFile(outputFile, { signal });
       const extension = path.extname(outputFile.filename) || '.wav';
       const saved = await writeProjectFile(project.id, `audio/${shot.id}${extension}`, buffer);
       orderedAudioPaths.push(fromStorageRelative(saved.relativePath));
@@ -1962,14 +2044,17 @@ async function runEditStage(project: Project): Promise<void> {
     await saveProject(project);
   }
 
-  await throwIfPauseRequested(project.id, 'edit');
+  await throwIfRunInterrupted(project.id, 'edit');
 
   const outputPath = resolveProjectPath(project.id, 'output', 'final.mp4');
   await stitchVideos(
     orderedVideoAssets.map((asset) => fromStorageRelative(asset.relativePath)),
     outputPath,
     project.settings.fps,
-    orderedAudioPaths
+    orderedAudioPaths,
+    {
+      signal
+    }
   );
 
   project.assets.finalVideo = buildAsset(
@@ -1991,6 +2076,8 @@ async function executeStage(projectId: string, stage: StageId): Promise<void> {
   await saveProject(project);
 
   try {
+    await throwIfRunInterrupted(projectId, stage);
+
     if (stage === 'script') {
       await runScriptStage(project);
     } else if (stage === 'assets') {
@@ -2009,6 +2096,13 @@ async function executeStage(projectId: string, stage: StageId): Promise<void> {
     appendLog(project, `${STAGE_LABELS[stage]} 执行成功。`);
     await saveProject(project);
   } catch (error) {
+    if (isStopRequested(projectId)) {
+      setStageStatus(project, stage, 'idle');
+      appendLog(project, `${STAGE_LABELS[stage]} 已停止。`, 'warn');
+      await saveProject(project);
+      throw new PipelineStopError(stage);
+    }
+
     if (error instanceof PipelinePauseError) {
       setStageStatus(project, stage, 'idle');
       appendLog(project, `${STAGE_LABELS[stage]} 已暂停，等待继续执行。`, 'warn');
@@ -2045,21 +2139,32 @@ async function setRunState(projectId: string, requestedStage: RunStage | null, c
     currentStage,
     startedAt: requestedStage ? project.runState.startedAt ?? now() : null,
     pauseRequested: false,
+    stopRequested: false,
     isPaused: false
   });
 }
 
 async function clearRunState(projectId: string): Promise<void> {
   pauseRequestedProjects.delete(projectId);
+  stopRequestedProjects.delete(projectId);
+  clearProjectAbortController(projectId);
   await persistProjectRunState(projectId, createIdleRunState());
   cachedRunStates.delete(projectId);
 }
 
 async function runSingle(projectId: string, stage: StageId): Promise<void> {
   pauseRequestedProjects.delete(projectId);
+  stopRequestedProjects.delete(projectId);
+  ensureProjectAbortController(projectId);
   await setRunState(projectId, stage, stage);
   try {
     await executeStage(projectId, stage);
+  } catch (error) {
+    if (error instanceof PipelineStopError) {
+      return;
+    }
+
+    throw error;
   } finally {
     await clearRunState(projectId);
   }
@@ -2074,6 +2179,7 @@ async function pauseProjectRun(projectId: string, currentStage: StageId): Promis
     currentStage,
     startedAt: project.runState.startedAt ?? now(),
     pauseRequested: false,
+    stopRequested: false,
     isPaused: true
   };
   cachedRunStates.set(projectId, { ...project.runState });
@@ -2087,6 +2193,8 @@ function getRemainingStages(project: Project): StageId[] {
 
 async function runStageSequence(projectId: string, stages: StageId[]): Promise<void> {
   pauseRequestedProjects.delete(projectId);
+  stopRequestedProjects.delete(projectId);
+  ensureProjectAbortController(projectId);
   await setRunState(projectId, 'all', null);
 
   let paused = false;
@@ -2104,7 +2212,15 @@ async function runStageSequence(projectId: string, stages: StageId[]): Promise<v
           return;
         }
 
+        if (error instanceof PipelineStopError) {
+          return;
+        }
+
         throw error;
+      }
+
+      if (isStopRequested(projectId)) {
+        return;
       }
 
       if (isPauseRequested(projectId)) {
@@ -2179,10 +2295,35 @@ export async function requestProjectRunPause(projectId: string): Promise<void> {
   project.runState = {
     ...project.runState,
     pauseRequested: true,
+    stopRequested: false,
     isPaused: false
   };
   cachedRunStates.set(projectId, { ...project.runState });
   appendLog(project, '已请求暂停；系统会在当前阶段安全结束后暂停全流程。', 'warn');
+  await saveProject(project);
+}
+
+export async function requestProjectRunStop(projectId: string): Promise<void> {
+  if (!runningProjects.has(projectId)) {
+    throw new Error('当前项目没有正在执行的任务。');
+  }
+
+  const project = await readProject(projectId);
+
+  if (project.runState.stopRequested) {
+    return;
+  }
+
+  stopRequestedProjects.add(projectId);
+  projectAbortControllers.get(projectId)?.abort();
+  project.runState = {
+    ...project.runState,
+    pauseRequested: false,
+    stopRequested: true,
+    isPaused: false
+  };
+  cachedRunStates.set(projectId, { ...project.runState });
+  appendLog(project, '已请求停止；系统正在中断当前任务。', 'warn');
   await saveProject(project);
 }
 
@@ -2200,6 +2341,30 @@ export async function resumeProjectRun(projectId: string): Promise<void> {
   const runner = resumeAll(projectId)
     .catch((error) => {
       console.error(`Pipeline resume failed for ${projectId}:`, error);
+    })
+    .finally(() => {
+      runningProjects.delete(projectId);
+    });
+
+  runningProjects.set(projectId, runner);
+  await Promise.resolve();
+}
+
+export async function continueProjectRun(projectId: string): Promise<void> {
+  if (runningProjects.has(projectId)) {
+    throw new Error('当前项目已有任务在运行。');
+  }
+
+  const project = await readProject(projectId);
+  const remainingStages = getRemainingStages(project);
+
+  if (!remainingStages.length) {
+    throw new Error('当前项目已全部完成，无需继续执行。');
+  }
+
+  const runner = runStageSequence(projectId, remainingStages)
+    .catch((error) => {
+      console.error(`Pipeline continuation failed for ${projectId}:`, error);
     })
     .finally(() => {
       runningProjects.delete(projectId);

@@ -17,8 +17,17 @@ import {
 import { appConfig } from './config.js';
 import { getAppSettings, getRuntimeStatus, initializeAppSettings, updateAppSettings } from './app-settings.js';
 import { discoverAvailableModels } from './openai-client.js';
-import { ensureStorage, createProject, deleteProject, listProjects, readProject, updateProject } from './storage.js';
 import {
+  ensureStorage,
+  clearInterruptedRunStates,
+  createProject,
+  deleteProject,
+  listProjects,
+  readProject,
+  updateProject
+} from './storage.js';
+import {
+  continueProjectRun,
   enqueueProjectRun,
   enqueueReferenceGeneration,
   enqueueStoryboardShotImageGeneration,
@@ -27,6 +36,7 @@ import {
   isReferenceGenerationRunning,
   removeReferenceImageForAsset,
   requestProjectRunPause,
+  requestProjectRunStop,
   resumeProjectRun,
   selectLibraryAssetForReferenceItem,
   selectStoryboardShotImageVersion,
@@ -110,6 +120,11 @@ function parseImageUploadPayload(body: unknown): {
 async function main(): Promise<void> {
   await ensureStorage();
   await initializeAppSettings();
+  const repairedRunStates = await clearInterruptedRunStates();
+
+  if (repairedRunStates > 0) {
+    console.warn(`Recovered ${repairedRunStates} interrupted project run state(s).`);
+  }
 
   const app = express();
   app.use(
@@ -293,6 +308,27 @@ async function main(): Promise<void> {
     }
   });
 
+  app.post('/api/projects/:id/stop', async (request, response, next) => {
+    try {
+      try {
+        await readProject(request.params.id);
+      } catch {
+        response.status(404).json({ message: '项目不存在。' });
+        return;
+      }
+
+      if (!isProjectRunning(request.params.id)) {
+        response.status(409).json({ message: '该项目当前没有正在执行的任务。' });
+        return;
+      }
+
+      await requestProjectRunStop(request.params.id);
+      response.status(202).json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post('/api/projects/:id/resume', async (request, response, next) => {
     try {
       try {
@@ -303,6 +339,32 @@ async function main(): Promise<void> {
       }
 
       await resumeProjectRun(request.params.id);
+      response.status(202).json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/projects/:id/continue', async (request, response, next) => {
+    try {
+      try {
+        await readProject(request.params.id);
+      } catch {
+        response.status(404).json({ message: '项目不存在。' });
+        return;
+      }
+
+      if (isProjectRunning(request.params.id)) {
+        response.status(409).json({ message: '该项目已有任务在运行。' });
+        return;
+      }
+
+      if (isReferenceGenerationRunning(request.params.id)) {
+        response.status(409).json({ message: '该项目有参考资产正在生成，请稍后再试。' });
+        return;
+      }
+
+      await continueProjectRun(request.params.id);
       response.status(202).json({ ok: true });
     } catch (error) {
       next(error);

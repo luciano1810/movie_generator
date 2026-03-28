@@ -201,6 +201,7 @@ export interface ProjectRunState {
   currentStage: StageId | null;
   startedAt: string | null;
   pauseRequested: boolean;
+  stopRequested: boolean;
   isPaused: boolean;
 }
 
@@ -588,6 +589,7 @@ export function createIdleRunState(): ProjectRunState {
     currentStage: null,
     startedAt: null,
     pauseRequested: false,
+    stopRequested: false,
     isPaused: false
   };
 }
