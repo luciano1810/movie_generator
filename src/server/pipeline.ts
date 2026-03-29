@@ -15,6 +15,7 @@ import {
   createIdleRunState,
   createEmptyReferenceLibrary,
   filterReferenceLibraryForShot,
+  getDefaultShotDurationSeconds,
   getGenerationReferenceLibraryForShot,
   normalizeStoryboardShots,
   STAGES,
@@ -705,6 +706,10 @@ function hasConfiguredTtsWorkflow(appSettings: AppSettings): boolean {
   return getRuntimeStatus(appSettings).ttsWorkflowExists;
 }
 
+function shouldUseTtsWorkflow(project: Project, appSettings: AppSettings): boolean {
+  return project.settings.useTtsWorkflow && hasConfiguredTtsWorkflow(appSettings);
+}
+
 function getAllReferenceItems(referenceLibrary: Project['referenceLibrary']): ReferenceAssetItem[] {
   return [
     ...referenceLibrary.characters,
@@ -1036,7 +1041,7 @@ function getVideoWorkflowPrompt(
   return sanitizeVideoPromptText(
     appendTransitionHint(
       buildMergedVideoPrompt(project, shot, {
-        includeSpeechPrompt: !hasConfiguredTtsWorkflow(appSettings),
+        includeSpeechPrompt: !shouldUseTtsWorkflow(project, appSettings),
         durationSeconds: options.durationSeconds
       }),
       shot
@@ -1340,7 +1345,7 @@ async function ensureShotTtsAudio(
 ): Promise<PreparedShotTtsAudio> {
   const ttsPlan = buildTtsPlan(project, shot);
 
-  if (!hasConfiguredTtsWorkflow(appSettings) || !ttsPlan.segments.length) {
+  if (!shouldUseTtsWorkflow(project, appSettings) || !ttsPlan.segments.length) {
     return {
       asset: null,
       absolutePath: null,
@@ -1763,6 +1768,7 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
   }
 
   const appSettings = getAppSettings();
+  const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
 
   if (stage === 'images') {
     if (!project.storyboard.length) {
@@ -1794,14 +1800,14 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
     }
 
     if (
-      !hasConfiguredTtsWorkflow(appSettings) &&
+      !useTtsWorkflow &&
       project.storyboard.some((shot) => getShotVideoSegmentDurations(project, shot).length > 1) &&
       !appSettings.comfyui.workflows.reference_image_to_image.workflowPath
     ) {
       throw new Error('存在长镜头分段生成需求，但未配置参考图生图工作流，无法生成尾帧图。');
     }
 
-    if (!hasConfiguredTtsWorkflow(appSettings) && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
+    if (!useTtsWorkflow && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
       throw new Error('存在长镜头分段生成需求，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
     }
 
@@ -1936,7 +1942,7 @@ async function generateReferenceAssetForProject(
       image_height: project.settings.imageHeight,
       video_width: project.settings.videoWidth,
       video_height: project.settings.videoHeight,
-      duration_seconds: project.settings.defaultShotDurationSeconds,
+      duration_seconds: getDefaultShotDurationSeconds(project.settings),
       fps: project.settings.fps,
       input_image: uploadedReferenceImage,
       reference_image: uploadedReferenceImage,
@@ -2807,24 +2813,27 @@ async function runVideoStage(project: Project): Promise<void> {
   }
 
   const appSettings = getAppSettings();
+  const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
   const workflow = appSettings.comfyui.workflows.image_to_video;
   if (!workflow.workflowPath) {
     throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
   }
 
-  if (!hasConfiguredTtsWorkflow(appSettings)) {
+  if (!project.settings.useTtsWorkflow) {
+    appendLog(project, '当前项目已关闭 TTS；台词/旁白将并入视频工作流 Prompt，视频直接生成包含台词的片段。');
+  } else if (!hasConfiguredTtsWorkflow(appSettings)) {
     appendLog(project, '未配置独立 TTS 工作流，背景声音和台词 Prompt 将合并到视频工作流 Prompt。');
   }
 
   if (
-    !hasConfiguredTtsWorkflow(appSettings) &&
+    !useTtsWorkflow &&
     project.storyboard.some((shot) => getShotVideoSegmentDurations(project, shot).length > 1) &&
     !appSettings.comfyui.workflows.reference_image_to_image.workflowPath
   ) {
     throw new Error('存在长镜头分段生成需求，但未配置参考图生图工作流，无法生成尾帧图。');
   }
 
-  if (!hasConfiguredTtsWorkflow(appSettings) && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
+  if (!useTtsWorkflow && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
     throw new Error('存在长镜头分段生成需求，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
   }
 
@@ -2884,11 +2893,12 @@ async function runEditStage(project: Project): Promise<void> {
   await saveProject(project);
 
   const appSettings = getAppSettings();
+  const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
   const signal = getProjectAbortSignal(project.id);
   const orderedAudioPaths: Array<string | null> = [];
   const ttsReferenceAudioUploadCache = new Map<string, string>();
 
-  if (hasConfiguredTtsWorkflow(appSettings)) {
+  if (useTtsWorkflow) {
     appendLog(project, '已配置 TTS 工作流，开始为镜头准备配音音频。');
     await saveProject(project);
 
@@ -2939,6 +2949,9 @@ async function runEditStage(project: Project): Promise<void> {
     }
 
     appendLog(project, '镜头配音音频已准备完成，开始合成成片。');
+    await saveProject(project);
+  } else if (!project.settings.useTtsWorkflow) {
+    appendLog(project, '当前项目已关闭 TTS，最终成片将直接使用视频片段自身的声音轨。');
     await saveProject(project);
   }
 
@@ -3381,23 +3394,26 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
   }
 
   const appSettings = getAppSettings();
+  const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
   if (!appSettings.comfyui.workflows.image_to_video.workflowPath) {
     throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
   }
 
   if (
-    !hasConfiguredTtsWorkflow(appSettings) &&
+    !useTtsWorkflow &&
     getShotVideoSegmentDurations(project, shot).length > 1 &&
     !appSettings.comfyui.workflows.reference_image_to_image.workflowPath
   ) {
     throw new Error('当前镜头需要长镜头分段生成，但未配置参考图生图工作流，无法生成尾帧图。');
   }
 
-  if (!hasConfiguredTtsWorkflow(appSettings) && getShotVideoSegmentDurations(project, shot).length > 1 && !appSettings.ffmpeg.binaryPath) {
+  if (!useTtsWorkflow && getShotVideoSegmentDurations(project, shot).length > 1 && !appSettings.ffmpeg.binaryPath) {
     throw new Error('当前镜头需要长镜头分段生成，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
   }
 
-  if (!hasConfiguredTtsWorkflow(appSettings)) {
+  if (!project.settings.useTtsWorkflow) {
+    appendLog(project, '当前项目已关闭 TTS；台词/旁白将并入视频工作流 Prompt，视频直接生成包含台词的片段。');
+  } else if (!hasConfiguredTtsWorkflow(appSettings)) {
     appendLog(project, '未配置独立 TTS 工作流，背景声音和台词 Prompt 将合并到视频工作流 Prompt。');
   }
 
@@ -3629,7 +3645,7 @@ export async function updateStoryboardShotPrompts(
 ): Promise<Project> {
   const project = await readProject(projectId);
   const shot = project.storyboard.find((item) => item.id === shotId);
-  const ttsConfigured = hasConfiguredTtsWorkflow(getAppSettings());
+  const ttsConfigured = shouldUseTtsWorkflow(project, getAppSettings());
 
   if (!shot) {
     throw new Error(`未找到镜头 ${shotId}`);

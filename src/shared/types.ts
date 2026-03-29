@@ -11,11 +11,13 @@ export const COMFYUI_WORKFLOW_TYPES = [
 ] as const;
 export const ASPECT_RATIOS = ['21:9', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4', '9:16'] as const;
 export const SCRIPT_MODES = ['generate', 'optimize'] as const;
+export const STORY_LENGTHS = ['short', 'medium', 'long'] as const;
 
 export type StageId = (typeof STAGES)[number];
 export type ComfyWorkflowType = (typeof COMFYUI_WORKFLOW_TYPES)[number];
 export type AspectRatio = (typeof ASPECT_RATIOS)[number];
 export type ScriptMode = (typeof SCRIPT_MODES)[number];
+export type StoryLength = (typeof STORY_LENGTHS)[number];
 export type RunStage = StageId | 'all';
 export type StageStatus = 'idle' | 'running' | 'success' | 'error';
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -75,6 +77,7 @@ export interface StageState {
 
 export interface ProjectSettings {
   scriptMode: ScriptMode;
+  storyLength: StoryLength;
   language: string;
   tone: string;
   audience: string;
@@ -86,10 +89,9 @@ export interface ProjectSettings {
   videoWidth: number;
   videoHeight: number;
   fps: number;
-  defaultShotDurationSeconds: number;
   maxVideoSegmentDurationSeconds: number;
-  targetSceneCount: number;
   maxShotsPerScene: number;
+  useTtsWorkflow: boolean;
 }
 
 export interface ScriptCharacter {
@@ -416,8 +418,58 @@ export const STAGE_LABELS: Record<StageId, string> = {
   edit: '视频剪辑'
 };
 
+export const STORY_LENGTH_LABELS: Record<StoryLength, string> = {
+  short: '短篇',
+  medium: '中篇',
+  long: '长篇'
+};
+
+const STORY_LENGTH_REFERENCE = {
+  short: {
+    defaultShotDurationSeconds: 4,
+    defaultSceneDurationSeconds: 8,
+    storyboardSplitReferenceSeconds: 6,
+    preferredLongShotDurationSeconds: 5
+  },
+  medium: {
+    defaultShotDurationSeconds: 5,
+    defaultSceneDurationSeconds: 10,
+    storyboardSplitReferenceSeconds: 8,
+    preferredLongShotDurationSeconds: 6
+  },
+  long: {
+    defaultShotDurationSeconds: 6,
+    defaultSceneDurationSeconds: 12,
+    storyboardSplitReferenceSeconds: 10,
+    preferredLongShotDurationSeconds: 7
+  }
+} satisfies Record<
+  StoryLength,
+  {
+    defaultShotDurationSeconds: number;
+    defaultSceneDurationSeconds: number;
+    storyboardSplitReferenceSeconds: number;
+    preferredLongShotDurationSeconds: number;
+  }
+>;
+
+function resolveStoryLength(value: Pick<ProjectSettings, 'storyLength'> | StoryLength): StoryLength {
+  return typeof value === 'string' ? value : value.storyLength;
+}
+
+export function getStoryLengthReference(
+  value: Pick<ProjectSettings, 'storyLength'> | StoryLength
+): (typeof STORY_LENGTH_REFERENCE)[StoryLength] {
+  return STORY_LENGTH_REFERENCE[resolveStoryLength(value)];
+}
+
+export function getDefaultShotDurationSeconds(value: Pick<ProjectSettings, 'storyLength'> | StoryLength): number {
+  return getStoryLengthReference(value).defaultShotDurationSeconds;
+}
+
 export const DEFAULT_SETTINGS: ProjectSettings = {
   scriptMode: 'generate',
+  storyLength: 'medium',
   language: 'zh-CN',
   tone: '高情绪、高反转、强钩子',
   audience: '短剧平台用户',
@@ -429,10 +481,9 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   videoWidth: 720,
   videoHeight: 1280,
   fps: 24,
-  defaultShotDurationSeconds: 4,
   maxVideoSegmentDurationSeconds: 4,
-  targetSceneCount: 6,
-  maxShotsPerScene: 3
+  maxShotsPerScene: 3,
+  useTtsWorkflow: true
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -491,6 +542,54 @@ function normalizeEditableString(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value.trim() : fallback;
 }
 
+function normalizeBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function parseStoryLength(value: unknown): StoryLength | null {
+  return STORY_LENGTHS.includes(value as StoryLength) ? (value as StoryLength) : null;
+}
+
+function inferStoryLength(
+  input: Partial<ProjectSettings> & {
+    defaultShotDurationSeconds?: unknown;
+    targetSceneCount?: unknown;
+  }
+): StoryLength {
+  const explicit = parseStoryLength(input.storyLength);
+  if (explicit) {
+    return explicit;
+  }
+
+  const legacyTargetSceneCount = Number(input.targetSceneCount);
+  if (Number.isFinite(legacyTargetSceneCount) && legacyTargetSceneCount > 0) {
+    if (legacyTargetSceneCount >= 8) {
+      return 'long';
+    }
+
+    if (legacyTargetSceneCount >= 6) {
+      return 'medium';
+    }
+
+    return 'short';
+  }
+
+  const legacyShotDurationSeconds = Number(input.defaultShotDurationSeconds);
+  if (Number.isFinite(legacyShotDurationSeconds) && legacyShotDurationSeconds > 0) {
+    if (legacyShotDurationSeconds >= 6) {
+      return 'long';
+    }
+
+    if (legacyShotDurationSeconds >= 4) {
+      return 'medium';
+    }
+
+    return 'short';
+  }
+
+  return DEFAULT_SETTINGS.storyLength;
+}
+
 function normalizeComfyWorkflowSettings(
   input: unknown,
   fallback: ComfyWorkflowSettings,
@@ -504,15 +603,21 @@ function normalizeComfyWorkflowSettings(
 }
 
 export function normalizeSettings(input?: Partial<ProjectSettings>): ProjectSettings {
+  const legacyInput = (input ?? {}) as Partial<ProjectSettings> & {
+    defaultShotDurationSeconds?: unknown;
+    targetSceneCount?: unknown;
+  };
   const merged = {
     ...DEFAULT_SETTINGS,
-    ...(input ?? {})
+    ...legacyInput
   };
+  const storyLength = inferStoryLength(legacyInput);
 
   return {
     scriptMode: SCRIPT_MODES.includes(merged.scriptMode as ScriptMode)
       ? (merged.scriptMode as ScriptMode)
       : DEFAULT_SETTINGS.scriptMode,
+    storyLength,
     language: normalizeString(merged.language, DEFAULT_SETTINGS.language),
     tone: normalizeString(merged.tone, DEFAULT_SETTINGS.tone),
     audience: normalizeString(merged.audience, DEFAULT_SETTINGS.audience),
@@ -526,16 +631,12 @@ export function normalizeSettings(input?: Partial<ProjectSettings>): ProjectSett
     videoWidth: normalizePositiveInteger(merged.videoWidth, DEFAULT_SETTINGS.videoWidth),
     videoHeight: normalizePositiveInteger(merged.videoHeight, DEFAULT_SETTINGS.videoHeight),
     fps: normalizePositiveInteger(merged.fps, DEFAULT_SETTINGS.fps),
-    defaultShotDurationSeconds: normalizePositiveInteger(
-      merged.defaultShotDurationSeconds,
-      DEFAULT_SETTINGS.defaultShotDurationSeconds
-    ),
     maxVideoSegmentDurationSeconds: normalizePositiveInteger(
       merged.maxVideoSegmentDurationSeconds,
-      normalizePositiveInteger(merged.defaultShotDurationSeconds, DEFAULT_SETTINGS.defaultShotDurationSeconds)
+      getDefaultShotDurationSeconds(storyLength)
     ),
-    targetSceneCount: normalizePositiveInteger(merged.targetSceneCount, DEFAULT_SETTINGS.targetSceneCount),
-    maxShotsPerScene: normalizePositiveInteger(merged.maxShotsPerScene, DEFAULT_SETTINGS.maxShotsPerScene)
+    maxShotsPerScene: normalizePositiveInteger(merged.maxShotsPerScene, DEFAULT_SETTINGS.maxShotsPerScene),
+    useTtsWorkflow: normalizeBoolean(merged.useTtsWorkflow, DEFAULT_SETTINGS.useTtsWorkflow)
   };
 }
 
@@ -661,7 +762,7 @@ export function normalizeStoryboardShot(
     shotNumber,
     title: normalizeString(input?.title, `场景${sceneNumber}镜头${shotNumber}`),
     purpose: normalizeString(input?.purpose, '推进剧情'),
-    durationSeconds: normalizePositiveInteger(input?.durationSeconds, settings.defaultShotDurationSeconds),
+    durationSeconds: normalizePositiveInteger(input?.durationSeconds, getDefaultShotDurationSeconds(settings)),
     startTimeSeconds: 0,
     endTimeSeconds: 0,
     startTimecode: '00:00',

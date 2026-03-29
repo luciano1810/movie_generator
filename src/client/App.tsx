@@ -17,6 +17,8 @@ import {
   DEFAULT_SETTINGS,
   getGenerationReferenceLibraryForShot,
   SCRIPT_MODES,
+  STORY_LENGTH_LABELS,
+  STORY_LENGTHS,
   STAGES,
   STAGE_LABELS
 } from '../shared/types';
@@ -413,12 +415,14 @@ function buildCreateProjectSettings(
   defaults: ProjectSettings,
   aspectRatio: ProjectSettings['aspectRatio'],
   scriptMode: ScriptMode,
+  storyLength: ProjectSettings['storyLength'],
   resolutionPreset: ResolutionPresetId
 ): Partial<ProjectSettings> {
   return applyResolutionPreset(
     {
       ...defaults,
       scriptMode,
+      storyLength,
       aspectRatio
     },
     resolutionPreset
@@ -900,6 +904,9 @@ export function App() {
   const [createTitle, setCreateTitle] = useState('');
   const [createSource, setCreateSource] = useState('');
   const [createScriptMode, setCreateScriptMode] = useState<ScriptMode>(DEFAULT_SETTINGS.scriptMode);
+  const [createStoryLength, setCreateStoryLength] = useState<ProjectSettings['storyLength']>(
+    DEFAULT_SETTINGS.storyLength
+  );
   const [createAspectRatio, setCreateAspectRatio] = useState<ProjectSettings['aspectRatio']>(
     DEFAULT_SETTINGS.aspectRatio
   );
@@ -1175,6 +1182,7 @@ export function App() {
       meta?.defaults ?? DEFAULT_SETTINGS,
       createAspectRatio,
       createScriptMode,
+      createStoryLength,
       createResolutionPreset
     );
 
@@ -1191,6 +1199,7 @@ export function App() {
 
       setCreateTitle('');
       setCreateSource('');
+      setCreateStoryLength(DEFAULT_SETTINGS.storyLength);
       setCreateProjectOpen(false);
       setNotice('项目已创建');
       await loadProjects(created.id);
@@ -2028,6 +2037,7 @@ export function App() {
     meta?.defaults ?? DEFAULT_SETTINGS,
     createAspectRatio,
     createScriptMode,
+    createStoryLength,
     createResolutionPreset
   );
   const libraryAssets = buildLibraryAssets(projects);
@@ -2074,6 +2084,14 @@ export function App() {
       ].filter(Boolean).length
     : 0;
   const ttsWorkflowReady = meta?.envStatus.ttsWorkflowExists ?? false;
+  const projectTtsEnabled =
+    draft?.settings.useTtsWorkflow ?? project?.settings.useTtsWorkflow ?? DEFAULT_SETTINGS.useTtsWorkflow;
+  const ttsWorkflowStatusLabel = !projectTtsEnabled
+    ? '项目已关闭，台词并入视频'
+    : ttsWorkflowReady
+      ? '已就绪'
+      : '未配置，回退到视频 Prompt';
+  const ttsWorkflowConfigLabel = !projectTtsEnabled ? '项目已关闭' : ttsWorkflowReady ? '已配置' : '未配置';
   const draftResolutionPreset = draft ? inferResolutionPreset(draft.settings) : 'custom';
   const draftSourceLabel = draft ? (draft.settings.scriptMode === 'generate' ? '剧情输入' : '待优化文本') : '项目输入';
   const draftFormatSummary = draft ? createFormatSummary(draft.settings) : '未设置画幅';
@@ -3218,7 +3236,7 @@ export function App() {
                       </div>
                       <div className="status-item">
                         <span>TTS 工作流</span>
-                        <strong>{ttsWorkflowReady ? '已就绪' : '未配置，回退到视频 Prompt'}</strong>
+                        <strong>{ttsWorkflowStatusLabel}</strong>
                       </div>
                       <div className="status-item">
                         <span>当前运行</span>
@@ -3337,8 +3355,8 @@ export function App() {
                           <strong>{draftFormatSummary}</strong>
                         </div>
                         <div className="status-item">
-                          <span>默认镜头时长</span>
-                          <strong>{draft.settings.defaultShotDurationSeconds}s</strong>
+                          <span>项目篇幅</span>
+                          <strong>{STORY_LENGTH_LABELS[draft.settings.storyLength]}</strong>
                         </div>
                         <div className="status-item">
                           <span>单次视频上限（系统）</span>
@@ -3696,7 +3714,7 @@ export function App() {
                       </div>
                       <div className="status-item">
                         <span>TTS 工作流</span>
-                        <strong>{ttsWorkflowReady ? '已配置' : '未配置'}</strong>
+                        <strong>{ttsWorkflowConfigLabel}</strong>
                       </div>
                       <div className="status-item">
                         <span>导出状态</span>
@@ -4148,6 +4166,32 @@ export function App() {
                     }
                   />
                 </label>
+                <label className="field">
+                  <span>项目篇幅</span>
+                  <select
+                    value={draft.settings.storyLength}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                storyLength: event.target.value as ProjectSettings['storyLength']
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  >
+                    {STORY_LENGTHS.map((storyLength) => (
+                      <option key={storyLength} value={storyLength}>
+                        {STORY_LENGTH_LABELS[storyLength]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label className="field span-2">
                   <span>视觉风格</span>
                   <textarea
@@ -4360,48 +4404,31 @@ export function App() {
                     }
                   />
                 </label>
-                <label className="field">
-                  <span>默认镜头秒数</span>
-                  <input
-                    type="number"
-                    value={draft.settings.defaultShotDurationSeconds}
-                    onChange={(event) =>
-                      setDraft((current) => {
-                        setDraftDirty(true);
-                        return current
-                          ? {
-                              ...current,
-                              settings: {
-                                ...current.settings,
-                                defaultShotDurationSeconds:
-                                  Number(event.target.value) || current.settings.defaultShotDurationSeconds
+                <label className="field span-2">
+                  <span>TTS 工作流</span>
+                  <div className="inline-check">
+                    <input
+                      checked={draft.settings.useTtsWorkflow}
+                      onChange={(event) =>
+                        setDraft((current) => {
+                          setDraftDirty(true);
+                          return current
+                            ? {
+                                ...current,
+                                settings: {
+                                  ...current.settings,
+                                  useTtsWorkflow: event.target.checked
+                                }
                               }
-                            }
-                          : current;
-                      })
-                    }
-                  />
-                </label>
-                <label className="field">
-                  <span>目标场次数</span>
-                  <input
-                    type="number"
-                    value={draft.settings.targetSceneCount}
-                    onChange={(event) =>
-                      setDraft((current) => {
-                        setDraftDirty(true);
-                        return current
-                          ? {
-                              ...current,
-                              settings: {
-                                ...current.settings,
-                                targetSceneCount: Number(event.target.value) || current.settings.targetSceneCount
-                              }
-                            }
-                          : current;
-                      })
-                    }
-                  />
+                            : current;
+                        })
+                      }
+                      type="checkbox"
+                    />
+                    <span>
+                      启用独立 TTS 工作流。关闭后，台词会直接输入到视频工作流；开启后，视频工作流只负责背景音/动作音，台词由 TTS 单独生成。
+                    </span>
+                  </div>
                 </label>
                 <label className="field">
                   <span>单次生成最长视频秒数（系统设置）</span>
@@ -4413,7 +4440,10 @@ export function App() {
                 </label>
               </div>
               <p className="settings-hint">
-                目标场次数会影响剧本阶段的分场密度。镜头数量和拆镜颗粒度由 LLM 在分镜阶段自行决定。这里显示的是视频工作流“单次调用”的系统上限；当镜头总时长超过该值时，服务端会自动多次生成并拼接成完整镜头。
+                项目篇幅用于表达整体体量偏好。剧本阶段不会再按固定场次数限制 LLM 展开剧情；镜头数量和拆镜颗粒度也仍由 LLM 在分镜阶段自行决定。这里显示的是视频工作流“单次调用”的系统上限；当镜头总时长超过该值时，服务端会自动多次生成并拼接成完整镜头。
+              </p>
+              <p className="settings-hint">
+                当前项目的 TTS 状态：{ttsWorkflowStatusLabel}。
               </p>
             </section>
 
@@ -4505,6 +4535,19 @@ export function App() {
                     {ASPECT_RATIOS.map((aspectRatio) => (
                       <option key={aspectRatio} value={aspectRatio}>
                         {ASPECT_RATIO_LABELS[aspectRatio]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>项目篇幅</span>
+                  <select
+                    value={createStoryLength}
+                    onChange={(event) => setCreateStoryLength(event.target.value as ProjectSettings['storyLength'])}
+                  >
+                    {STORY_LENGTHS.map((storyLength) => (
+                      <option key={storyLength} value={storyLength}>
+                        {STORY_LENGTH_LABELS[storyLength]}
                       </option>
                     ))}
                   </select>

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { writeFile, copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { getAppSettings } from './app-settings.js';
 
@@ -9,10 +9,6 @@ interface FfmpegRunOptions {
 
 const DURATION_REGEX = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/;
 const AUDIO_SYNC_TOLERANCE_SECONDS = 0.05;
-
-function escapeConcatPath(filePath: string): string {
-  return filePath.replace(/'/g, `'\\''`);
-}
 
 function parseDurationMatch(stderr: string): number | null {
   const matched = stderr.match(DURATION_REGEX);
@@ -359,22 +355,37 @@ export async function stitchVideos(
     return;
   }
 
-  const listFile = path.join(path.dirname(outputPath), 'concat.txt');
-  const concatText = sourceVideoPaths.map((videoPath) => `file '${escapeConcatPath(videoPath)}'`).join('\n');
-  await writeFile(listFile, concatText, 'utf8');
+  const args = ['-y'];
 
-  await runFfmpeg([
-    '-y',
-    '-f',
-    'concat',
-    '-safe',
-    '0',
-    '-i',
-    listFile,
-    '-c',
-    'copy',
+  for (const videoPath of sourceVideoPaths) {
+    args.push('-i', videoPath);
+  }
+
+  const concatInputs = sourceVideoPaths.map((_, index) => `[${index}:v:0][${index}:a:0]`).join('');
+
+  args.push(
+    '-filter_complex',
+    `${concatInputs}concat=n=${sourceVideoPaths.length}:v=1:a=1[vout][aout]`,
+    '-map',
+    '[vout]',
+    '-map',
+    '[aout]',
+    '-c:v',
+    'libx264',
+    '-pix_fmt',
+    'yuv420p',
+    '-r',
+    String(fps),
+    '-c:a',
+    'aac',
+    '-ar',
+    '48000',
+    '-ac',
+    '2',
     '-movflags',
     '+faststart',
     outputPath
-  ], options);
+  );
+
+  await runFfmpeg(args, options);
 }

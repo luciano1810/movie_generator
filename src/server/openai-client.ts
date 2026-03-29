@@ -10,7 +10,7 @@ import type {
   ScriptPackage,
   ScriptScene
 } from '../shared/types.js';
-import { normalizeStoryboardShots } from '../shared/types.js';
+import { STORY_LENGTH_LABELS, getStoryLengthReference, normalizeStoryboardShots } from '../shared/types.js';
 import { getAppSettings } from './app-settings.js';
 
 type ChatCompletionMessageParam = {
@@ -708,11 +708,11 @@ ${scenes}
 }
 
 function defaultSceneDurationExample(settings: ProjectSettings): number {
-  return Math.max(8, settings.defaultShotDurationSeconds * 2);
+  return getStoryLengthReference(settings).defaultSceneDurationSeconds;
 }
 
 function getStoryboardShotSplitReferenceSeconds(settings: ProjectSettings): number {
-  return Math.max(6, settings.defaultShotDurationSeconds * 2);
+  return getStoryLengthReference(settings).storyboardSplitReferenceSeconds;
 }
 
 function getMinimumShotsForScene(scene: ScriptScene, settings: ProjectSettings): number {
@@ -729,7 +729,7 @@ function getRecommendedMinimumStoryboardShotCount(script: ScriptPackage, setting
 }
 
 function getPreferredLongShotDurationSeconds(settings: ProjectSettings): number {
-  return Math.max(settings.defaultShotDurationSeconds + 1, 5);
+  return getStoryLengthReference(settings).preferredLongShotDurationSeconds;
 }
 
 function buildStoryboardReferenceSelectionId(kind: ReferenceAssetKind, itemId: string): string {
@@ -1046,6 +1046,7 @@ function buildStoryboardConversationPrelude(
   const splitReferenceSeconds = getStoryboardShotSplitReferenceSeconds(settings);
   const recommendedMinimumShotCount = getRecommendedMinimumStoryboardShotCount(script, settings);
   const preferredLongShotDurationSeconds = getPreferredLongShotDurationSeconds(settings);
+  const defaultShotDurationSeconds = getStoryLengthReference(settings).defaultShotDurationSeconds;
   const sceneRules = script.scenes
     .map(
       (scene) =>
@@ -1073,7 +1074,7 @@ function buildStoryboardConversationPrelude(
 7. 分场最低镜头数要求如下：
 ${sceneRules}
 8. ${splitReferenceSeconds} 秒左右只是判断是否该继续拆镜的参考尺度，不是硬性时长限制；包含对话来回、动作升级、信息反转、人物进出场的场景要继续拆开，不要把多个戏剧节拍塞进一个镜头；但同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切
-9. durationSeconds 由你根据剧情节奏、动作复杂度、表演长度自行决定；${settings.defaultShotDurationSeconds} 秒只是常规参考，不是硬限制。整体上要偏向更完整、更耐看的镜头时长：能用 ${preferredLongShotDurationSeconds} 到 8 秒完整呈现的动作、表演、停顿、走位或对话，不要轻易压缩成很短的镜头
+9. durationSeconds 由你根据剧情节奏、动作复杂度、表演长度自行决定；${defaultShotDurationSeconds} 秒只是常规参考，不是硬限制。整体上要偏向更完整、更耐看的镜头时长：能用 ${preferredLongShotDurationSeconds} 到 8 秒完整呈现的动作、表演、停顿、走位或对话，不要轻易压缩成很短的镜头
 10. 当前视频工作流的单次生成上限是 ${maxVideoSegmentDurationSeconds} 秒；这是单次调用上限，不是镜头总时长上限。你必须先按叙事需要决定每个镜头的完整总时长；如果镜头总时长超过这个上限，系统会自动拆段生成并拼接，所以你仍然要输出完整的镜头总时长，并且必须把 lastFramePrompt 写清楚，确保镜头结尾状态明确
 11. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
 12. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的首帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间
@@ -1148,6 +1149,7 @@ function buildStoryboardSceneTurnPrompt(
   const splitReferenceSeconds = getStoryboardShotSplitReferenceSeconds(settings);
   const minimumShots = getMinimumShotsForScene(scene, settings);
   const preferredLongShotDurationSeconds = getPreferredLongShotDurationSeconds(settings);
+  const defaultShotDurationSeconds = getStoryLengthReference(settings).defaultShotDurationSeconds;
   const retryNotice = retryFeedback
     ? `\n上一次结果不合格，必须修正以下问题：\n${retryFeedback}\n本次输出必须一次性给出修正后的完整分镜 JSON。\n`
     : '';
@@ -1168,7 +1170,7 @@ ${continuityNotice}
 5. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写“无语音内容”
 6. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
 7. ${splitReferenceSeconds} 秒左右只是判断是否该继续拆镜的参考尺度，不是硬性时长限制；包含对话来回、动作升级、信息反转、人物进出场的场景要继续拆开，不要把多个戏剧节拍塞进一个镜头；但同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切
-8. durationSeconds 由你根据剧情节奏、动作复杂度、表演长度自行决定；${settings.defaultShotDurationSeconds} 秒只是常规参考，不是硬限制。整体上要偏向更完整、更耐看的镜头时长：能用 ${preferredLongShotDurationSeconds} 到 8 秒完整呈现的动作、表演、停顿、走位或对话，不要轻易压缩成很短的镜头
+8. durationSeconds 由你根据剧情节奏、动作复杂度、表演长度自行决定；${defaultShotDurationSeconds} 秒只是常规参考，不是硬限制。整体上要偏向更完整、更耐看的镜头时长：能用 ${preferredLongShotDurationSeconds} 到 8 秒完整呈现的动作、表演、停顿、走位或对话，不要轻易压缩成很短的镜头
 9. 当前视频工作流的单次生成上限是 ${maxVideoSegmentDurationSeconds} 秒；这是单次调用上限，不是镜头总时长上限。你必须先按叙事需要决定每个镜头的完整总时长；如果镜头总时长超过这个上限，系统会自动拆段生成并拼接，所以你仍然要输出完整的镜头总时长，并且必须把 lastFramePrompt 写清楚，确保镜头结尾状态明确
 10. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
 11. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的首帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间
@@ -1186,7 +1188,7 @@ ${continuityNotice}
       "shotNumber": 1,
       "title": "镜头标题",
       "purpose": "镜头作用",
-      "durationSeconds": ${settings.defaultShotDurationSeconds},
+      "durationSeconds": ${defaultShotDurationSeconds},
       "dialogue": "本镜头核心台词，没有可留空",
       "voiceover": "本镜头画外音，没有可留空",
       "camera": "镜头语言",
@@ -1349,12 +1351,12 @@ function buildScriptOutputSchema(settings: ProjectSettings): string {
 }
 
 function buildScriptPromptContext(settings: ProjectSettings): string {
-  return `创作约束：
+  return `创作参考：
 1. 目标受众：${settings.audience}
 2. 语气风格：${settings.tone}
 3. 视觉调性：${settings.visualStyle}
 4. 输出语言：${settings.language}
-5. 目标场次数参考 ${settings.targetSceneCount} 场，可根据故事复杂度和节奏在上下 1 场内浮动，不要机械凑数，但也不要明显偏离
+5. 项目篇幅偏好：${STORY_LENGTH_LABELS[settings.storyLength]}。这只是整体体量与节奏参考，不限制剧情展开、场景数量、反转层级或人物发展；你必须按素材自然组织故事，不要为了迎合设置而硬性压缩或拉长剧情
 6. 每场应具备明确冲突、推进、情绪变化和可分镜化动作
 7. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定
 8. 人物外观和身份要稳定，便于后续持续生成画面
@@ -1387,7 +1389,7 @@ ${sharedContext}
 6. 画外音只在必要时使用，避免重复解释画面已经表达的信息
 7. 如果原文结构混乱，可以重组场次顺序，但不要丢失关键剧情信息
 8. 如果原文缺少必要细节，可以补足角色动机、场景信息和情绪推进，使其成为完整可拍的短剧
-9. 场景数量以 ${settings.targetSceneCount} 场左右为目标，可根据素材复杂度上下浮动 1 场
+9. 场景数量和剧情展开层次由你根据原文素材自然决定，不要为了迎合任何预设篇幅去机械增删场次
 10. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
@@ -1417,7 +1419,7 @@ ${sharedContext}
 5. 角色数量控制在必要范围内，每个核心角色都要有鲜明身份、稳定外观和清晰动机
 6. 场景信息要具体到地点、时间和动作状态，方便后续直接拆分镜
 7. 对白要短、准、狠，符合短剧节奏，尽量避免大段说明性台词
-8. 场景数量以 ${settings.targetSceneCount} 场左右为目标，可根据故事长度、节奏和转折密度上下浮动 1 场
+8. 场景数量和剧情展开层次由你根据输入素材自然决定，不要为了迎合任何预设篇幅去机械增删场次
 9. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 

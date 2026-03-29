@@ -265,6 +265,7 @@ export async function updateProject(
   }
 ): Promise<Project> {
   const project = await readProject(projectId);
+  const previousUseTtsWorkflow = project.settings.useTtsWorkflow;
   project.title = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : project.title;
   project.sourceText =
     typeof input.sourceText === 'string' ? input.sourceText : project.sourceText;
@@ -272,6 +273,18 @@ export async function updateProject(
     ...project.settings,
     ...(input.settings ?? {})
   });
+
+  if (project.settings.useTtsWorkflow !== previousUseTtsWorkflow) {
+    const idleStages = createStageStateMap();
+    project.assets.audios = [];
+    project.assets.audioHistory = {};
+    project.assets.videos = [];
+    project.assets.videoHistory = {};
+    project.assets.finalVideo = null;
+    project.stages.videos = idleStages.videos;
+    project.stages.edit = idleStages.edit;
+  }
+
   project.updatedAt = now();
   await writeProject(project);
   return project;
