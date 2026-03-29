@@ -15,6 +15,7 @@ import {
   createIdleRunState,
   createEmptyReferenceLibrary,
   filterReferenceLibraryForShot,
+  getGenerationReferenceLibraryForShot,
   normalizeStoryboardShots,
   STAGES,
   STAGE_LABELS
@@ -41,7 +42,7 @@ import {
   uploadImageBufferToComfy,
   uploadImageToComfy
 } from './comfyui.js';
-import { extractLastFrame, getMediaDurationSeconds, stitchVideos } from './video-editor.js';
+import { extractLastFrame, getMediaDurationSeconds, stitchAudios, stitchVideos } from './video-editor.js';
 
 const runningProjects = new Map<string, Promise<void>>();
 const runningReferenceGenerations = new Map<string, Promise<void>>();
@@ -62,11 +63,17 @@ interface GenerationReferenceInputs {
 }
 
 interface TtsPlan {
-  dialogueScript: string;
+  segments: TtsSegmentPlan[];
   plainText: string;
-  narratorRoleName: string;
-  speaker1RoleName: string;
-  speaker2RoleName: string;
+}
+
+interface TtsSegmentPlan {
+  speakerKey: string;
+  text: string;
+  prompt: string;
+  referenceAudioAbsolutePath: string | null;
+  outputKey: string;
+  defaultSpeaker: string;
 }
 
 interface TtsReferenceAudioPlan {
@@ -74,6 +81,14 @@ interface TtsReferenceAudioPlan {
   narratorReferenceAudio: string;
   speaker1ReferenceAudio: string;
   speaker2ReferenceAudio: string;
+}
+
+interface PreparedShotTtsAudio {
+  asset: GeneratedAsset | null;
+  absolutePath: string | null;
+  durationSeconds: number | null;
+  useReferenceAudio: boolean;
+  reusedExisting: boolean;
 }
 
 const DEFAULT_CHARACTER_POSE_REFERENCE_PATH = path.resolve(
@@ -92,6 +107,33 @@ const MAX_STORYBOARD_REFERENCE_IMAGES_PER_RUN = 3;
 const MAX_STORYBOARD_REFERENCE_IMAGES_PER_CHAIN_RUN = 2;
 const LTX_TARGET_LONG_SIDE = 720;
 const LTX_DIMENSION_MULTIPLE = 16;
+const AUDIO_DRIVEN_VIDEO_PADDING_SECONDS = 0.25;
+const NO_REFERENCE_TTS_VOICE_PRESETS = [
+  {
+    id: 'clear_young',
+    instruction: '音色清亮干净，偏年轻，吐字利落，情绪反应灵敏。'
+  },
+  {
+    id: 'steady_low',
+    instruction: '音色偏低沉，气息稳定，节奏从容，整体更稳重。'
+  },
+  {
+    id: 'soft_warm',
+    instruction: '音色柔和温润，语气细腻，尾音自然收住，不过分用力。'
+  },
+  {
+    id: 'cool_crisp',
+    instruction: '音色冷静清脆，表达克制，停连分明，整体偏利落。'
+  },
+  {
+    id: 'bright_lively',
+    instruction: '音色明亮活泼，节奏稍快但清晰，带一点轻快感。'
+  },
+  {
+    id: 'mature_textured',
+    instruction: '音色更成熟，带轻微颗粒感，表达沉着，不要油腻夸张。'
+  }
+] as const;
 
 function buildCharacterReferenceDetail(
   item: Pick<ReferenceAssetItem, 'generationPrompt' | 'summary' | 'ethnicityHint'>
@@ -277,19 +319,32 @@ async function deleteStoredAsset(asset: GeneratedAsset | null): Promise<void> {
   }
 }
 
-type ShotAssetStage = 'images' | 'videos';
+type ShotAssetStage = 'images' | 'audios' | 'videos';
 
 function getShotAssetHistoryMap(project: Project, stage: ShotAssetStage) {
-  return stage === 'images' ? project.assets.imageHistory : project.assets.videoHistory;
+  if (stage === 'images') {
+    return project.assets.imageHistory;
+  }
+
+  if (stage === 'audios') {
+    return project.assets.audioHistory;
+  }
+
+  return project.assets.videoHistory;
 }
 
 function setShotAssetHistoryMap(
   project: Project,
   stage: ShotAssetStage,
-  history: Project['assets']['imageHistory'] | Project['assets']['videoHistory']
+  history: Project['assets']['imageHistory'] | Project['assets']['audioHistory'] | Project['assets']['videoHistory']
 ): void {
   if (stage === 'images') {
     project.assets.imageHistory = history;
+    return;
+  }
+
+  if (stage === 'audios') {
+    project.assets.audioHistory = history;
     return;
   }
 
@@ -297,12 +352,25 @@ function setShotAssetHistoryMap(
 }
 
 function getShotAssetCollection(project: Project, stage: ShotAssetStage): GeneratedAsset[] {
-  return stage === 'images' ? project.assets.images : project.assets.videos;
+  if (stage === 'images') {
+    return project.assets.images;
+  }
+
+  if (stage === 'audios') {
+    return project.assets.audios;
+  }
+
+  return project.assets.videos;
 }
 
 function setShotAssetCollection(project: Project, stage: ShotAssetStage, assets: GeneratedAsset[]): void {
   if (stage === 'images') {
     project.assets.images = assets;
+    return;
+  }
+
+  if (stage === 'audios') {
+    project.assets.audios = assets;
     return;
   }
 
@@ -423,6 +491,7 @@ function clearAllShotAssetHistory(project: Project, stage: ShotAssetStage): void
 
 function invalidateGeneratedMediaFromReferenceLibrary(project: Project): void {
   clearAllShotAssetHistory(project, 'images');
+  clearAllShotAssetHistory(project, 'audios');
   clearAllShotAssetHistory(project, 'videos');
   project.assets.finalVideo = null;
   resetStage(project, 'images');
@@ -435,6 +504,7 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
     project.script = null;
     project.storyboard = [];
     clearAllShotAssetHistory(project, 'images');
+    clearAllShotAssetHistory(project, 'audios');
     clearAllShotAssetHistory(project, 'videos');
     project.assets.finalVideo = null;
     project.referenceLibrary = createEmptyReferenceLibrary();
@@ -460,6 +530,7 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
   if (stage === 'storyboard') {
     project.storyboard = [];
     clearAllShotAssetHistory(project, 'images');
+    clearAllShotAssetHistory(project, 'audios');
     clearAllShotAssetHistory(project, 'videos');
     project.assets.finalVideo = null;
     project.artifacts.storyboardJson = null;
@@ -516,6 +587,90 @@ function setReferenceCollection(
   }
 
   project.referenceLibrary.objects = items;
+}
+
+function buildShotReferenceSelectionId(kind: ReferenceAssetKind, itemId: string): string {
+  return `${kind}:${itemId}`;
+}
+
+function getStoryboardShot(project: Project, shotId: string): Project['storyboard'][number] {
+  const shot = project.storyboard.find((item) => item.id === shotId);
+
+  if (!shot) {
+    throw new Error(`未找到镜头 ${shotId}`);
+  }
+
+  return shot;
+}
+
+function getGenerationReferenceSelectionIds(
+  project: Project,
+  shot: Project['storyboard'][number]
+): Set<string> {
+  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const selectionIds = [
+    ...referenceLibrary.characters.map((item) => buildShotReferenceSelectionId('character', item.id)),
+    ...referenceLibrary.scenes.map((item) => buildShotReferenceSelectionId('scene', item.id)),
+    ...referenceLibrary.objects.map((item) => buildShotReferenceSelectionId('object', item.id))
+  ];
+
+  return new Set(selectionIds);
+}
+
+function setShotReferenceSelections(
+  shot: Project['storyboard'][number],
+  nextSelections: {
+    manualReferenceAssetIds?: string[];
+    excludedReferenceAssetIds?: string[];
+  }
+): void {
+  if (nextSelections.manualReferenceAssetIds) {
+    shot.manualReferenceAssetIds = [...new Set(nextSelections.manualReferenceAssetIds)];
+  }
+
+  if (nextSelections.excludedReferenceAssetIds) {
+    shot.excludedReferenceAssetIds = [...new Set(nextSelections.excludedReferenceAssetIds)];
+  }
+}
+
+function invalidateGeneratedMediaFromStoryboardShotReferenceChange(
+  project: Project,
+  shotId: string
+): {
+  hadImageOutput: boolean;
+  hadVideoOutput: boolean;
+  hadFinalVideo: boolean;
+} {
+  const hadImageOutput = Boolean(getActiveShotAsset(project, 'images', shotId));
+  const hadVideoOutput = Boolean(getActiveShotAsset(project, 'videos', shotId));
+  const hadFinalVideo = Boolean(project.assets.finalVideo);
+
+  clearActiveShotAsset(project, 'images', shotId);
+  clearActiveShotAsset(project, 'videos', shotId);
+  project.assets.finalVideo = null;
+  resetStage(project, 'images');
+  resetStage(project, 'videos');
+  resetStage(project, 'edit');
+
+  return {
+    hadImageOutput,
+    hadVideoOutput,
+    hadFinalVideo
+  };
+}
+
+function areReferenceSelectionSetsEqual(left: Set<string>, right: Set<string>): boolean {
+  if (left.size !== right.size) {
+    return false;
+  }
+
+  for (const value of left) {
+    if (!right.has(value)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function updateReferenceItem(
@@ -590,7 +745,7 @@ function buildVideoCharacterReferencePrompt(
   shot: Project['storyboard'][number]
 ): string {
   const hasSpeechContent = Boolean(shot.dialogue.trim() || shot.voiceover.trim());
-  const referenceLibrary = filterReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
   const characters = referenceLibrary.characters
     .map((item) => ({
       name: item.name.trim(),
@@ -627,6 +782,13 @@ function sanitizeVideoPromptText(text: string): string {
 }
 
 function buildVideoShotDirectivePrompt(shot: Project['storyboard'][number]): string {
+  return buildVideoShotDirectivePromptWithDuration(shot, shot.durationSeconds);
+}
+
+function buildVideoShotDirectivePromptWithDuration(
+  shot: Project['storyboard'][number],
+  durationSeconds: number
+): string {
   const camera = sanitizeVideoPromptText(shot.camera);
   const composition = sanitizeVideoPromptText(shot.composition);
 
@@ -634,7 +796,7 @@ function buildVideoShotDirectivePrompt(shot: Project['storyboard'][number]): str
     '镜头要求：',
     camera ? `- 景别与运镜：${camera}` : '',
     composition ? `- 构图与主体：${composition}` : '',
-    `- 时长节奏：按 ${shot.durationSeconds} 秒镜头完整展开动作与表演，保留起势、过程、停顿和收势，不要在前半段过快完成全部信息，也不要突然硬切、突然停住或仓促收尾。`
+    `- 时长节奏：按 ${durationSeconds} 秒镜头完整展开动作与表演，保留起势、过程、停顿和收势，不要在前半段过快完成全部信息，也不要突然硬切、突然停住或仓促收尾。`
   ]
     .filter(Boolean)
     .join('\n');
@@ -670,7 +832,7 @@ async function buildGenerationReferenceInputs(
 ): Promise<GenerationReferenceInputs> {
   const signal = getProjectAbortSignal(project.id);
   const referenceLibrary = shot
-    ? filterReferenceLibraryForShot(project.referenceLibrary, shot, project.script)
+    ? getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script)
     : project.referenceLibrary;
   const referenceContext = buildReferenceContext(referenceLibrary);
   const collections: Array<[ReferenceAssetKind, ReferenceAssetItem[]]> = [
@@ -808,6 +970,7 @@ function buildMergedVideoPrompt(
   shot: Project['storyboard'][number],
   options: {
     includeSpeechPrompt: boolean;
+    durationSeconds?: number;
   }
 ): string {
   const hasSpeechContent = Boolean(shot.dialogue.trim() || shot.voiceover.trim());
@@ -815,7 +978,11 @@ function buildMergedVideoPrompt(
   const characterPrompt = buildVideoCharacterReferencePrompt(project, shot);
   const backgroundSoundPrompt = sanitizeVideoPromptText(shot.backgroundSoundPrompt);
   const speechPrompt = sanitizeVideoPromptText(shot.speechPrompt);
-  const parts = [buildVideoShotDirectivePrompt(shot), videoPrompt, buildVideoContinuityPrompt()];
+  const parts = [
+    buildVideoShotDirectivePromptWithDuration(shot, options.durationSeconds ?? shot.durationSeconds),
+    videoPrompt,
+    buildVideoContinuityPrompt()
+  ];
 
   if (characterPrompt) {
     parts.push(characterPrompt);
@@ -858,11 +1025,19 @@ function appendTransitionHint(prompt: string, shot: Project['storyboard'][number
   return `${prompt}\n\n镜头衔接要求：${transitionHint}。优先通过动作延续、视线延续、空间方向延续或情绪延续自然进入下一镜，避免突兀跳切。`;
 }
 
-function getVideoWorkflowPrompt(project: Project, shot: Project['storyboard'][number], appSettings: AppSettings): string {
+function getVideoWorkflowPrompt(
+  project: Project,
+  shot: Project['storyboard'][number],
+  appSettings: AppSettings,
+  options: {
+    durationSeconds?: number;
+  } = {}
+): string {
   return sanitizeVideoPromptText(
     appendTransitionHint(
       buildMergedVideoPrompt(project, shot, {
-        includeSpeechPrompt: !hasConfiguredTtsWorkflow(appSettings)
+        includeSpeechPrompt: !hasConfiguredTtsWorkflow(appSettings),
+        durationSeconds: options.durationSeconds
       }),
       shot
     )
@@ -877,6 +1052,13 @@ function normalizeTtsSpeechText(value: string): string {
   return value
     .replace(/\s+/g, ' ')
     .replace(/^[“"'`]+|[”"'`]+$/g, '')
+    .trim();
+}
+
+function sanitizeTtsInstructionText(value: string): string {
+  return value
+    .replace(/\s+/g, ' ')
+    .replace(/[“”"'`]/g, '')
     .trim();
 }
 
@@ -914,77 +1096,105 @@ function extractDialogueSegments(
     .filter((segment) => Boolean(segment.text));
 }
 
-function buildTtsPlan(shot: Project['storyboard'][number]): TtsPlan {
-  if (isSpeechPromptDisabled(shot.speechPrompt)) {
-    return {
-      dialogueScript: '',
-      plainText: '',
-      narratorRoleName: '旁白',
-      speaker1RoleName: '角色1',
-      speaker2RoleName: '角色2'
-    };
+function hashSpeakerKey(value: string): number {
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
   }
 
-  const dialogueLines: string[] = [];
-  const plainTextLines: string[] = [];
-  const speakerMap = new Map<string, { label: '角色1' | '角色2'; displayName: string }>();
-  const dialogueSegments = extractDialogueSegments(shot.dialogue.trim());
+  return hash >>> 0;
+}
 
-  if (shot.voiceover.trim()) {
-    const voiceover = normalizeTtsSpeechText(shot.voiceover);
-    if (voiceover) {
-      dialogueLines.push(`旁白: ${voiceover}`);
-      plainTextLines.push(voiceover);
-    }
+function findReferenceCharacterForDialogueSegment(
+  characters: ReferenceAssetItem[],
+  speaker: string | null
+): ReferenceAssetItem | null {
+  if (speaker) {
+    return characters.find((item) => matchesReferenceName(item.name, speaker)) ?? null;
   }
 
-  for (const segment of dialogueSegments) {
-    let role = '角色1';
-    let displayName = '角色1';
+  return characters.length === 1 ? characters[0] ?? null : null;
+}
 
-    if (segment.speaker) {
-      const existingRole = speakerMap.get(segment.speaker);
-      if (existingRole) {
-        role = existingRole.label;
-        displayName = existingRole.displayName;
-      } else {
-        role = speakerMap.size === 0 ? '角色1' : '角色2';
-        displayName = segment.speaker;
-        speakerMap.set(segment.speaker, {
-          label: role as '角色1' | '角色2',
-          displayName
-        });
-      }
-    } else if (speakerMap.size > 1) {
-      role = '角色2';
-      displayName = [...speakerMap.values()].find((item) => item.label === '角色2')?.displayName ?? '角色2';
-    } else if (speakerMap.size === 1) {
-      role = '角色1';
-      displayName = [...speakerMap.values()][0]?.displayName ?? '角色1';
-    }
-
-    dialogueLines.push(`${role}: ${segment.text}`);
-    plainTextLines.push(segment.text);
+function buildTtsSpeakerKey(
+  speaker: string | null,
+  referenceCharacter: ReferenceAssetItem | null
+): string {
+  if (referenceCharacter) {
+    return `character:${referenceCharacter.id}`;
   }
 
-  if (!dialogueLines.length && !plainTextLines.length) {
-    return {
-      dialogueScript: '',
-      plainText: '',
-      narratorRoleName: '旁白',
-      speaker1RoleName: '角色1',
-      speaker2RoleName: '角色2'
-    };
+  if (speaker) {
+    const normalizedSpeaker = normalizeReferenceSearchText(speaker);
+    return normalizedSpeaker ? `speaker:${normalizedSpeaker}` : `speaker:${speaker.trim()}`;
   }
 
-  const speakerAssignments = [...speakerMap.values()];
+  return 'speaker:anonymous';
+}
+
+function buildNoReferenceTtsPrompt(
+  speakerKey: string,
+  referenceCharacter: ReferenceAssetItem | null
+): { prompt: string; defaultSpeaker: string } {
+  const preset = NO_REFERENCE_TTS_VOICE_PRESETS[hashSpeakerKey(speakerKey) % NO_REFERENCE_TTS_VOICE_PRESETS.length];
+  const characterHint = referenceCharacter
+    ? sanitizeTtsInstructionText(
+        buildCharacterReferenceDetail(referenceCharacter).split(referenceCharacter.name.trim()).join('该角色')
+      )
+    : '';
 
   return {
-    dialogueScript: dialogueLines.join('\n'),
-    plainText: plainTextLines.join('\n'),
-    narratorRoleName: '旁白',
-    speaker1RoleName: speakerAssignments.find((item) => item.label === '角色1')?.displayName ?? '角色1',
-    speaker2RoleName: speakerAssignments.find((item) => item.label === '角色2')?.displayName ?? '角色2'
+    prompt: [
+      '只朗读输入文本中的中文对白，不要添加说话人名称、角色标签、括号说明、动作描述、旁白或额外补充。',
+      '情绪、停连和轻重音贴合当前这句对白，但整体保持自然口语，不要做成夸张播音腔。',
+      `音色设定：${preset.instruction}`,
+      characterHint ? `人物气质参考：${characterHint}。` : ''
+    ]
+      .filter(Boolean)
+      .join(' '),
+    defaultSpeaker: preset.id
+  };
+}
+
+function buildTtsPlan(project: Project, shot: Project['storyboard'][number]): TtsPlan {
+  if (isSpeechPromptDisabled(shot.speechPrompt)) {
+    return {
+      segments: [],
+      plainText: ''
+    };
+  }
+
+  const dialogueSegments = extractDialogueSegments(shot.dialogue.trim());
+  if (!dialogueSegments.length) {
+    return {
+      segments: [],
+      plainText: ''
+    };
+  }
+
+  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const segments = dialogueSegments.map((segment, index) => {
+    const referenceCharacter = findReferenceCharacterForDialogueSegment(referenceLibrary.characters, segment.speaker);
+    const speakerKey = buildTtsSpeakerKey(segment.speaker, referenceCharacter);
+    const noReferencePrompt = buildNoReferenceTtsPrompt(speakerKey, referenceCharacter);
+
+    return {
+      speakerKey,
+      text: segment.text,
+      prompt: noReferencePrompt.prompt,
+      referenceAudioAbsolutePath: referenceCharacter?.referenceAudio?.relativePath
+        ? fromStorageRelative(referenceCharacter.referenceAudio.relativePath)
+        : null,
+      outputKey: `seg${String(index + 1).padStart(3, '0')}`,
+      defaultSpeaker: noReferencePrompt.defaultSpeaker
+    };
+  });
+
+  return {
+    segments,
+    plainText: segments.map((segment) => segment.text).join('\n')
   };
 }
 
@@ -1006,22 +1216,6 @@ function matchesReferenceName(haystack: string, needle: string): boolean {
   return normalizedHaystack.includes(normalizedNeedle) || normalizedNeedle.includes(normalizedHaystack);
 }
 
-function getShotMatchedCharacterReferenceAudios(
-  project: Project,
-  shot: Project['storyboard'][number]
-): ReferenceAssetItem[] {
-  const referenceLibrary = filterReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
-  const charactersWithAudio = referenceLibrary.characters.filter((item) => item.referenceAudio?.relativePath);
-
-  if (!charactersWithAudio.length) {
-    return [];
-  }
-
-  const haystack = `${shot.dialogue}\n${shot.voiceover}\n${shot.speechPrompt}\n${shot.videoPrompt}`;
-  const matchedCharacters = charactersWithAudio.filter((item) => matchesReferenceName(haystack, item.name));
-  return (matchedCharacters.length ? matchedCharacters : charactersWithAudio).slice(0, 2);
-}
-
 async function uploadAudioToComfyCached(
   localPath: string,
   cache: Map<string, string>,
@@ -1038,13 +1232,11 @@ async function uploadAudioToComfyCached(
 }
 
 async function buildTtsReferenceAudioPlan(
-  project: Project,
-  shot: Project['storyboard'][number],
-  uploadCache: Map<string, string>
+  segment: TtsSegmentPlan,
+  uploadCache: Map<string, string>,
+  signal?: AbortSignal
 ): Promise<TtsReferenceAudioPlan> {
-  const matchedItems = getShotMatchedCharacterReferenceAudios(project, shot);
-
-  if (!matchedItems.length) {
+  if (!segment.referenceAudioAbsolutePath) {
     return {
       useReferenceAudio: false,
       narratorReferenceAudio: '',
@@ -1053,17 +1245,13 @@ async function buildTtsReferenceAudioPlan(
     };
   }
 
-  const signal = getProjectAbortSignal(project.id);
-  const uploadedAudios = await Promise.all(
-    matchedItems.map((item) => uploadAudioToComfyCached(fromStorageRelative(item.referenceAudio!.relativePath), uploadCache, signal))
-  );
-  const primaryAudio = uploadedAudios[0];
+  const uploadedAudio = await uploadAudioToComfyCached(segment.referenceAudioAbsolutePath, uploadCache, signal);
 
   return {
     useReferenceAudio: true,
-    narratorReferenceAudio: primaryAudio,
-    speaker1ReferenceAudio: primaryAudio,
-    speaker2ReferenceAudio: uploadedAudios[1] ?? primaryAudio
+    narratorReferenceAudio: uploadedAudio,
+    speaker1ReferenceAudio: uploadedAudio,
+    speaker2ReferenceAudio: uploadedAudio
   };
 }
 
@@ -1083,27 +1271,27 @@ function resolveTtsWorkflowPath(appSettings: AppSettings, useReferenceAudio: boo
 function buildTtsVariables(
   project: Project,
   shot: Project['storyboard'][number],
-  ttsPlan: TtsPlan,
+  segment: TtsSegmentPlan,
   referenceAudioPlan: TtsReferenceAudioPlan
 ) {
-  const ttsScript = ttsPlan.dialogueScript;
+  const ttsScript = `说话人: ${segment.text}`;
 
   return {
-    prompt: shot.speechPrompt,
-    speech_prompt: shot.speechPrompt,
-    dialogue: shot.dialogue,
-    voiceover: shot.voiceover,
+    prompt: segment.prompt,
+    speech_prompt: segment.prompt,
+    dialogue: segment.text,
+    voiceover: '',
     tts_script: ttsScript,
-    tts_plain_text: ttsPlan.plainText,
-    tts_role_1_name: ttsPlan.narratorRoleName,
-    tts_role_2_name: ttsPlan.speaker1RoleName,
-    tts_role_3_name: ttsPlan.speaker2RoleName,
+    tts_plain_text: segment.text,
+    tts_role_1_name: '说话人',
+    tts_role_2_name: '备用说话人一',
+    tts_role_3_name: '备用说话人二',
     narrator_reference_audio: referenceAudioPlan.narratorReferenceAudio,
     speaker_1_reference_audio: referenceAudioPlan.speaker1ReferenceAudio,
     speaker_2_reference_audio: referenceAudioPlan.speaker2ReferenceAudio,
-    tts_default_speaker: 'Vivian',
+    tts_default_speaker: segment.defaultSpeaker,
     negative_prompt: project.settings.negativePrompt,
-    output_prefix: `${project.id}_${shot.id}_tts`,
+    output_prefix: `${project.id}_${shot.id}_${segment.outputKey}_tts`,
     image_width: project.settings.imageWidth,
     image_height: project.settings.imageHeight,
     video_width: project.settings.videoWidth,
@@ -1113,7 +1301,125 @@ function buildTtsVariables(
     input_image: '',
     scene_number: shot.sceneNumber,
     shot_number: shot.shotNumber,
-    seed: Math.floor(Math.random() * 9_000_000_000)
+    seed: hashSpeakerKey(`${project.id}:${segment.speakerKey}`) % 9_000_000_000
+  };
+}
+
+async function getTtsAudioDurationSeconds(
+  absolutePath: string,
+  appSettings: AppSettings,
+  signal?: AbortSignal
+): Promise<number | null> {
+  if (!appSettings.ffmpeg.binaryPath) {
+    return null;
+  }
+
+  return await getMediaDurationSeconds(absolutePath, { signal });
+}
+
+function getAudioDrivenVideoDurationSeconds(
+  shot: Project['storyboard'][number],
+  audioDurationSeconds: number | null
+): number {
+  if (!Number.isFinite(audioDurationSeconds) || !audioDurationSeconds || audioDurationSeconds <= 0) {
+    return shot.durationSeconds;
+  }
+
+  const minimumAudioCoveredDuration = Math.ceil(audioDurationSeconds + AUDIO_DRIVEN_VIDEO_PADDING_SECONDS);
+  return Math.max(1, shot.durationSeconds, minimumAudioCoveredDuration);
+}
+
+async function ensureShotTtsAudio(
+  project: Project,
+  shot: Project['storyboard'][number],
+  appSettings: AppSettings,
+  uploadCache: Map<string, string>,
+  options: {
+    reuseExisting?: boolean;
+  } = {}
+): Promise<PreparedShotTtsAudio> {
+  const ttsPlan = buildTtsPlan(project, shot);
+
+  if (!hasConfiguredTtsWorkflow(appSettings) || !ttsPlan.segments.length) {
+    return {
+      asset: null,
+      absolutePath: null,
+      durationSeconds: null,
+      useReferenceAudio: false,
+      reusedExisting: false
+    };
+  }
+
+  const signal = getProjectAbortSignal(project.id);
+  const useReferenceAudio = ttsPlan.segments.some((segment) => Boolean(segment.referenceAudioAbsolutePath));
+  const existingAsset = options.reuseExisting === false ? null : getActiveShotAsset(project, 'audios', shot.id);
+
+  if (existingAsset?.relativePath) {
+    const absolutePath = fromStorageRelative(existingAsset.relativePath);
+
+    if (existsSync(absolutePath)) {
+      return {
+        asset: existingAsset,
+        absolutePath,
+        durationSeconds: await getTtsAudioDurationSeconds(absolutePath, appSettings, signal),
+        useReferenceAudio,
+        reusedExisting: true
+      };
+    }
+
+    clearActiveShotAsset(project, 'audios', shot.id, { archive: false });
+  }
+
+  const segmentAudioOutputs: Array<{ absolutePath: string; relativePath: string }> = [];
+
+  for (const segment of ttsPlan.segments) {
+    const referenceAudioPlan = await buildTtsReferenceAudioPlan(segment, uploadCache, signal);
+    const ttsWorkflowPath = resolveTtsWorkflowPath(appSettings, referenceAudioPlan.useReferenceAudio);
+    const outputFiles = await runComfyWorkflow(
+      ttsWorkflowPath,
+      buildTtsVariables(project, shot, segment, referenceAudioPlan),
+      {
+        signal
+      }
+    );
+    const outputFile = pickOutputFile(outputFiles, 'audio');
+    const buffer = await fetchComfyOutputFile(outputFile, { signal });
+    const extension = path.extname(outputFile.filename) || '.wav';
+    const savedSegment = await writeProjectFile(
+      project.id,
+      path.join('audio', shot.id, 'segments', `${segment.outputKey}${extension}`),
+      buffer
+    );
+    segmentAudioOutputs.push(savedSegment);
+  }
+
+  let finalAudioAbsolutePath = segmentAudioOutputs[0]!.absolutePath;
+  let finalAudioRelativePath = segmentAudioOutputs[0]!.relativePath;
+
+  if (segmentAudioOutputs.length > 1) {
+    const mergedAudioRelativePath = buildShotAssetOutputPath('audios', shot.id, '.wav');
+    const mergedAudioAbsolutePath = resolveProjectPath(project.id, mergedAudioRelativePath);
+
+    await stitchAudios(
+      segmentAudioOutputs.map((item) => item.absolutePath),
+      mergedAudioAbsolutePath,
+      { signal }
+    );
+
+    finalAudioAbsolutePath = mergedAudioAbsolutePath;
+    finalAudioRelativePath = toStorageRelative(mergedAudioAbsolutePath);
+  }
+
+  const asset = buildAsset(finalAudioRelativePath, ttsPlan.plainText, shot.sceneNumber, shot.id);
+
+  setActiveShotAsset(project, 'audios', shot.id, asset);
+
+  return {
+    asset,
+    absolutePath: finalAudioAbsolutePath,
+    durationSeconds: await getTtsAudioDurationSeconds(finalAudioAbsolutePath, appSettings, signal),
+    useReferenceAudio,
+    reusedExisting: false
   };
 }
 
@@ -1166,7 +1472,9 @@ function buildComfyVariables(
       appendReferenceContext(
         options.promptOverride ??
           (workflow === 'image_to_video'
-            ? getVideoWorkflowPrompt(project, shot, appSettings)
+            ? getVideoWorkflowPrompt(project, shot, appSettings, {
+                durationSeconds
+              })
             : buildFirstFrameWorkflowPrompt(shot, workflow)),
         options.referenceContext ?? ''
       ),
@@ -1328,6 +1636,10 @@ function getMaxVideoSegmentDurationSeconds(project: Project): number {
   );
 }
 
+function getVideoSegmentDurations(project: Project, durationSeconds: number): number[] {
+  return splitDurationIntoSegments(durationSeconds, getMaxVideoSegmentDurationSeconds(project));
+}
+
 function splitDurationIntoSegments(totalDurationSeconds: number, maxSegmentDurationSeconds: number): number[] {
   if (totalDurationSeconds <= maxSegmentDurationSeconds) {
     return [totalDurationSeconds];
@@ -1341,7 +1653,7 @@ function splitDurationIntoSegments(totalDurationSeconds: number, maxSegmentDurat
 }
 
 function getShotVideoSegmentDurations(project: Project, shot: Project['storyboard'][number]): number[] {
-  return splitDurationIntoSegments(shot.durationSeconds, getMaxVideoSegmentDurationSeconds(project));
+  return getVideoSegmentDurations(project, shot.durationSeconds);
 }
 
 function requiresVideoStageFfmpeg(project: Project): boolean {
@@ -1353,9 +1665,12 @@ function buildSegmentVideoPrompt(
   shot: Project['storyboard'][number],
   appSettings: AppSettings,
   segmentIndex: number,
-  segmentCount: number
+  segmentCount: number,
+  totalDurationSeconds: number
 ): string {
-  const basePrompt = getVideoWorkflowPrompt(project, shot, appSettings);
+  const basePrompt = getVideoWorkflowPrompt(project, shot, appSettings, {
+    durationSeconds: totalDurationSeconds
+  });
 
   if (segmentCount <= 1) {
     return basePrompt;
@@ -1402,7 +1717,7 @@ function buildShotAssetOutputPath(
   shotId: string,
   extension: string
 ): string {
-  const folder = stage === 'images' ? 'images' : 'videos';
+  const folder = stage === 'images' ? 'images' : stage === 'audios' ? 'audio' : 'videos';
   const normalizedExtension = extension.startsWith('.') ? extension : `.${extension}`;
   return path.join(folder, shotId, `${Date.now()}-${crypto.randomUUID().slice(0, 8)}${normalizedExtension}`);
 }
@@ -1479,13 +1794,14 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
     }
 
     if (
+      !hasConfiguredTtsWorkflow(appSettings) &&
       project.storyboard.some((shot) => getShotVideoSegmentDurations(project, shot).length > 1) &&
       !appSettings.comfyui.workflows.reference_image_to_image.workflowPath
     ) {
       throw new Error('存在长镜头分段生成需求，但未配置参考图生图工作流，无法生成尾帧图。');
     }
 
-    if (requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
+    if (!hasConfiguredTtsWorkflow(appSettings) && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
       throw new Error('存在长镜头分段生成需求，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
     }
 
@@ -1773,11 +2089,21 @@ function guessAudioExtension(filename: string, mimeType: string): string {
   return '.wav';
 }
 
-function invalidateEditOutputFromReferenceAudio(project: Project): boolean {
+function invalidateAudioDrivenOutputsFromReferenceAudio(project: Project): {
+  hadVideoOutputs: boolean;
+  hadFinalVideo: boolean;
+} {
+  const hadVideoOutputs = Boolean(project.assets.videos.length);
   const hadFinalVideo = Boolean(project.assets.finalVideo);
+  clearAllShotAssetHistory(project, 'audios');
+  archiveAllActiveShotAssets(project, 'videos');
   project.assets.finalVideo = null;
+  resetStage(project, 'videos');
   resetStage(project, 'edit');
-  return hadFinalVideo;
+  return {
+    hadVideoOutputs,
+    hadFinalVideo
+  };
 }
 
 export async function uploadReferenceImageForAsset(
@@ -1892,7 +2218,7 @@ export async function uploadReferenceAudioForAsset(
     input.buffer
   );
   const previousReferenceAudio = item.referenceAudio;
-  const hadFinalVideo = invalidateEditOutputFromReferenceAudio(project);
+  const invalidation = invalidateAudioDrivenOutputsFromReferenceAudio(project);
 
   updateReferenceItem(project, kind, itemId, (current) => ({
     ...current,
@@ -1908,10 +2234,10 @@ export async function uploadReferenceAudioForAsset(
 
   appendLog(
     project,
-    hadFinalVideo
-      ? `${item.name}${assetKindLabel(kind)}参考音频已上传；后续剪辑会优先使用角色参考音频进行配音，原成片已失效，请重新执行视频剪辑。`
-      : `${item.name}${assetKindLabel(kind)}参考音频已上传；后续剪辑会优先使用角色参考音频进行配音。`,
-    hadFinalVideo ? 'warn' : 'info'
+    invalidation.hadVideoOutputs || invalidation.hadFinalVideo
+      ? `${item.name}${assetKindLabel(kind)}参考音频已上传；后续会先按角色参考音频生成配音，再据此匹配视频时长。原视频片段与成片已失效，请重新生成视频并重新剪辑。`
+      : `${item.name}${assetKindLabel(kind)}参考音频已上传；后续会先按角色参考音频生成配音，再据此匹配视频时长。`,
+    invalidation.hadVideoOutputs || invalidation.hadFinalVideo ? 'warn' : 'info'
   );
   await persistReferenceLibrary(project);
   await saveProject(project);
@@ -1939,7 +2265,7 @@ export async function removeReferenceAudioForAsset(
   }
 
   const previousReferenceAudio = item.referenceAudio;
-  const hadFinalVideo = invalidateEditOutputFromReferenceAudio(project);
+  const invalidation = invalidateAudioDrivenOutputsFromReferenceAudio(project);
 
   updateReferenceItem(project, kind, itemId, (current) => ({
     ...current,
@@ -1952,10 +2278,10 @@ export async function removeReferenceAudioForAsset(
 
   appendLog(
     project,
-    hadFinalVideo
-      ? `${item.name}${assetKindLabel(kind)}上传参考音频已移除；后续剪辑会回退到无参考音频版 TTS，原成片已失效，请重新执行视频剪辑。`
-      : `${item.name}${assetKindLabel(kind)}上传参考音频已移除；后续剪辑会回退到无参考音频版 TTS。`,
-    hadFinalVideo ? 'warn' : 'info'
+    invalidation.hadVideoOutputs || invalidation.hadFinalVideo
+      ? `${item.name}${assetKindLabel(kind)}上传参考音频已移除；后续会回退到无参考音频版 TTS，并按不短于配音的新镜头时长重新生成视频。原视频片段与成片已失效，请重新生成视频并重新剪辑。`
+      : `${item.name}${assetKindLabel(kind)}上传参考音频已移除；后续会回退到无参考音频版 TTS，并按不短于配音的新镜头时长重新生成视频。`,
+    invalidation.hadVideoOutputs || invalidation.hadFinalVideo ? 'warn' : 'info'
   );
   await persistReferenceLibrary(project);
   await saveProject(project);
@@ -2107,6 +2433,7 @@ async function runStoryboardStage(project: Project): Promise<void> {
 
   const storyboard = await generateStoryboardFromScript(project.script, project.settings, {
     signal: getProjectAbortSignal(project.id),
+    referenceLibrary: project.referenceLibrary,
     onSceneStart: async ({ scene, completedScenes, totalScenes }) => {
       await throwIfRunInterrupted(project.id, 'storyboard');
       appendLog(project, `分镜生成 ${completedScenes + 1}/${totalScenes}: 场景 ${scene.sceneNumber}`);
@@ -2254,7 +2581,8 @@ async function generateVideoAssetForShot(
   project: Project,
   shot: Project['storyboard'][number],
   appSettings: AppSettings,
-  generationReferenceInputs: GenerationReferenceInputs
+  generationReferenceInputs: GenerationReferenceInputs,
+  ttsUploadCache: Map<string, string>
 ): Promise<GeneratedAsset> {
   const signal = getProjectAbortSignal(project.id);
   const workflowPath = appSettings.comfyui.workflows.image_to_video.workflowPath;
@@ -2269,14 +2597,43 @@ async function generateVideoAssetForShot(
     throw new Error(`镜头 ${shot.id} 缺少首帧图片，无法生成视频。`);
   }
 
-  const segmentDurations = getShotVideoSegmentDurations(project, shot);
+  const preparedTtsAudio = await ensureShotTtsAudio(project, shot, appSettings, ttsUploadCache);
+  const effectiveDurationSeconds = getAudioDrivenVideoDurationSeconds(shot, preparedTtsAudio.durationSeconds);
+  const segmentDurations = getVideoSegmentDurations(project, effectiveDurationSeconds);
   const segmentCount = segmentDurations.length;
   const shotSeed = Math.floor(Math.random() * 9_000_000_000);
+
+  if (segmentCount > 1 && !appSettings.comfyui.workflows.reference_image_to_image.workflowPath) {
+    throw new Error('当前镜头按“原镜头时长与语音时长中的较大值”计算后需要长镜头分段生成，但未配置参考图生图工作流，无法生成尾帧图。');
+  }
+
+  if (segmentCount > 1 && !appSettings.ffmpeg.binaryPath) {
+    throw new Error('当前镜头按“原镜头时长与语音时长中的较大值”计算后需要长镜头分段生成，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
+  }
+
+  if (preparedTtsAudio.asset) {
+    const ttsModeLabel = preparedTtsAudio.useReferenceAudio ? '角色参考音频' : '无参考音频默认音色';
+    const ttsSourceLabel = preparedTtsAudio.reusedExisting ? '复用已生成配音' : '先生成配音';
+
+    if (preparedTtsAudio.durationSeconds !== null) {
+      appendLog(
+        project,
+        `镜头 ${shot.title} 已${ttsSourceLabel}（${ttsModeLabel}），语音时长约 ${preparedTtsAudio.durationSeconds.toFixed(2)} 秒；本次视频将按原分镜时长与语音时长中的较大值生成，当前为 ${effectiveDurationSeconds} 秒。`
+      );
+    } else {
+      appendLog(
+        project,
+        `镜头 ${shot.title} 已${ttsSourceLabel}（${ttsModeLabel}），但当前无法读取语音时长；本次视频先沿用分镜设定的 ${shot.durationSeconds} 秒。`,
+        'warn'
+      );
+    }
+    await saveProject(project);
+  }
 
   if (segmentCount > 1) {
     appendLog(
       project,
-      `镜头 ${shot.title} 为长镜头，将拆成 ${segmentCount} 段生成（总时长 ${shot.durationSeconds}s，每段最长 ${getMaxVideoSegmentDurationSeconds(project)}s），并使用首尾帧约束收束画面。`
+      `镜头 ${shot.title} 为长镜头，将拆成 ${segmentCount} 段生成（总时长 ${effectiveDurationSeconds}s，每段最长 ${getMaxVideoSegmentDurationSeconds(project)}s），并使用首尾帧约束收束画面。`
     );
     await saveProject(project);
   }
@@ -2337,7 +2694,14 @@ async function generateVideoAssetForShot(
           segmentCount === 1
             ? `${project.id}_${shot.id}_video`
             : `${project.id}_${shot.id}_video_seg${String(segmentIndex + 1).padStart(3, '0')}`,
-        promptOverride: buildSegmentVideoPrompt(project, shot, appSettings, segmentIndex, segmentCount),
+        promptOverride: buildSegmentVideoPrompt(
+          project,
+          shot,
+          appSettings,
+          segmentIndex,
+          segmentCount,
+          effectiveDurationSeconds
+        ),
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables,
         seed: shotSeed
@@ -2397,7 +2761,14 @@ async function generateVideoAssetForShot(
     savedVideoRelativePath = toStorageRelative(outputPath);
   }
 
-  return buildAsset(savedVideoRelativePath, getVideoWorkflowPrompt(project, shot, appSettings), shot.sceneNumber, shot.id);
+  return buildAsset(
+    savedVideoRelativePath,
+    getVideoWorkflowPrompt(project, shot, appSettings, {
+      durationSeconds: effectiveDurationSeconds
+    }),
+    shot.sceneNumber,
+    shot.id
+  );
 }
 
 async function runImageStage(project: Project): Promise<void> {
@@ -2446,17 +2817,19 @@ async function runVideoStage(project: Project): Promise<void> {
   }
 
   if (
+    !hasConfiguredTtsWorkflow(appSettings) &&
     project.storyboard.some((shot) => getShotVideoSegmentDurations(project, shot).length > 1) &&
     !appSettings.comfyui.workflows.reference_image_to_image.workflowPath
   ) {
     throw new Error('存在长镜头分段生成需求，但未配置参考图生图工作流，无法生成尾帧图。');
   }
 
-  if (requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
+  if (!hasConfiguredTtsWorkflow(appSettings) && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
     throw new Error('存在长镜头分段生成需求，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
   }
 
   const referenceUploadCache = new Map<string, string>();
+  const ttsReferenceAudioUploadCache = new Map<string, string>();
 
   for (let index = 0; index < project.storyboard.length; index += 1) {
     await throwIfRunInterrupted(project.id, 'videos');
@@ -2473,7 +2846,13 @@ async function runVideoStage(project: Project): Promise<void> {
       generationReferenceInputs.referenceCount ? 'info' : 'warn'
     );
     await saveProject(project);
-    const videoAsset = await generateVideoAssetForShot(project, shot, appSettings, generationReferenceInputs);
+    const videoAsset = await generateVideoAssetForShot(
+      project,
+      shot,
+      appSettings,
+      generationReferenceInputs,
+      ttsReferenceAudioUploadCache
+    );
     setActiveShotAsset(project, 'videos', shot.id, videoAsset);
     await saveProject(project);
   }
@@ -2510,46 +2889,34 @@ async function runEditStage(project: Project): Promise<void> {
   const ttsReferenceAudioUploadCache = new Map<string, string>();
 
   if (hasConfiguredTtsWorkflow(appSettings)) {
-    appendLog(project, '已配置 TTS 工作流，开始为镜头生成配音音频。');
+    appendLog(project, '已配置 TTS 工作流，开始为镜头准备配音音频。');
     await saveProject(project);
 
     for (let index = 0; index < project.storyboard.length; index += 1) {
       await throwIfRunInterrupted(project.id, 'edit');
 
       const shot = project.storyboard[index];
-      const ttsPlan = buildTtsPlan(shot);
+      const preparedTtsAudio = await ensureShotTtsAudio(project, shot, appSettings, ttsReferenceAudioUploadCache);
 
-      if (!ttsPlan.plainText) {
+      if (!preparedTtsAudio.asset || !preparedTtsAudio.absolutePath) {
         orderedAudioPaths.push(null);
         continue;
       }
 
-      const referenceAudioPlan = await buildTtsReferenceAudioPlan(project, shot, ttsReferenceAudioUploadCache);
-      const ttsWorkflowPath = resolveTtsWorkflowPath(appSettings, referenceAudioPlan.useReferenceAudio);
-
       appendLog(
         project,
-        `TTS 配音 ${index + 1}/${project.storyboard.length}: ${shot.title}（${referenceAudioPlan.useReferenceAudio ? '角色参考音频' : '无参考音频默认音色'}）`
+        `TTS 配音 ${index + 1}/${project.storyboard.length}: ${shot.title}（${
+          preparedTtsAudio.reusedExisting ? '复用预生成配音' : '本阶段补生成配音'
+        }，${preparedTtsAudio.useReferenceAudio ? '角色参考音频' : '无参考音频默认音色'}）`
       );
       await saveProject(project);
-
-      const outputFiles = await runComfyWorkflow(
-        ttsWorkflowPath,
-        buildTtsVariables(project, shot, ttsPlan, referenceAudioPlan),
-        {
-          signal
-        }
-      );
-      const outputFile = pickOutputFile(outputFiles, 'audio');
-      const buffer = await fetchComfyOutputFile(outputFile, { signal });
-      const extension = path.extname(outputFile.filename) || '.wav';
-      const saved = await writeProjectFile(project.id, `audio/${shot.id}${extension}`, buffer);
-      const audioPath = fromStorageRelative(saved.relativePath);
-      orderedAudioPaths.push(audioPath);
+      orderedAudioPaths.push(preparedTtsAudio.absolutePath);
 
       try {
+        const resolvedAudioDurationSeconds =
+          preparedTtsAudio.durationSeconds ?? (await getMediaDurationSeconds(preparedTtsAudio.absolutePath, { signal }));
         const [audioDurationSeconds, videoDurationSeconds] = await Promise.all([
-          getMediaDurationSeconds(audioPath, { signal }),
+          Promise.resolve(resolvedAudioDurationSeconds),
           getMediaDurationSeconds(fromStorageRelative(orderedVideoAssets[index].relativePath), { signal })
         ]);
         const durationDelta = audioDurationSeconds - videoDurationSeconds;
@@ -2571,7 +2938,7 @@ async function runEditStage(project: Project): Promise<void> {
       }
     }
 
-    appendLog(project, '镜头配音音频生成完成，开始合成成片。');
+    appendLog(project, '镜头配音音频已准备完成，开始合成成片。');
     await saveProject(project);
   }
 
@@ -3018,11 +3385,15 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
     throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
   }
 
-  if (getShotVideoSegmentDurations(project, shot).length > 1 && !appSettings.comfyui.workflows.reference_image_to_image.workflowPath) {
+  if (
+    !hasConfiguredTtsWorkflow(appSettings) &&
+    getShotVideoSegmentDurations(project, shot).length > 1 &&
+    !appSettings.comfyui.workflows.reference_image_to_image.workflowPath
+  ) {
     throw new Error('当前镜头需要长镜头分段生成，但未配置参考图生图工作流，无法生成尾帧图。');
   }
 
-  if (getShotVideoSegmentDurations(project, shot).length > 1 && !appSettings.ffmpeg.binaryPath) {
+  if (!hasConfiguredTtsWorkflow(appSettings) && getShotVideoSegmentDurations(project, shot).length > 1 && !appSettings.ffmpeg.binaryPath) {
     throw new Error('当前镜头需要长镜头分段生成，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
   }
 
@@ -3031,6 +3402,7 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
   }
 
   const referenceUploadCache = new Map<string, string>();
+  const ttsReferenceAudioUploadCache = new Map<string, string>();
   const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
   appendLog(project, `开始为镜头 ${shot.title} 单独生成视频片段。`);
   appendLog(
@@ -3042,7 +3414,13 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
   );
   await saveProject(project);
 
-  const videoAsset = await generateVideoAssetForShot(project, shot, appSettings, generationReferenceInputs);
+  const videoAsset = await generateVideoAssetForShot(
+    project,
+    shot,
+    appSettings,
+    generationReferenceInputs,
+    ttsReferenceAudioUploadCache
+  );
   setActiveShotAsset(project, 'videos', shot.id, videoAsset);
   project.assets.finalVideo = null;
   resetStage(project, 'edit');
@@ -3145,6 +3523,97 @@ export async function selectStoryboardShotVideoVersion(
   return await selectStoryboardShotAssetVersion(projectId, 'videos', shotId, relativePath);
 }
 
+export async function addReferenceAssetToStoryboardShot(
+  projectId: string,
+  shotId: string,
+  kind: ReferenceAssetKind,
+  itemId: string
+): Promise<Project> {
+  const project = await readProject(projectId);
+  const shot = getStoryboardShot(project, shotId);
+  const item = getReferenceCollection(project, kind).find((candidate) => candidate.id === itemId);
+
+  if (!item) {
+    throw new Error(`未找到 ${kind} 资产项 ${itemId}`);
+  }
+
+  if (!item.asset) {
+    throw new Error('该参考资产尚未生成可用参考图，暂时不能加入镜头参考图列表。');
+  }
+
+  const selectionId = buildShotReferenceSelectionId(kind, itemId);
+  const beforeSelections = getGenerationReferenceSelectionIds(project, shot);
+  setShotReferenceSelections(shot, {
+    manualReferenceAssetIds: [...shot.manualReferenceAssetIds, selectionId],
+    excludedReferenceAssetIds: shot.excludedReferenceAssetIds.filter((value) => value !== selectionId)
+  });
+  const afterSelections = getGenerationReferenceSelectionIds(project, shot);
+
+  if (areReferenceSelectionSetsEqual(beforeSelections, afterSelections)) {
+    return project;
+  }
+
+  const invalidation = invalidateGeneratedMediaFromStoryboardShotReferenceChange(project, shotId);
+  appendLog(
+    project,
+    invalidation.hadImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
+      ? `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；相关首帧图片、视频片段和最终成片已失效，请重新生成。`
+      : `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；后续首帧与视频生成会注入这张参考图。`,
+    invalidation.hadImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo ? 'warn' : 'info'
+  );
+  await persistStoryboard(project);
+  await saveProject(project);
+  return project;
+}
+
+export async function removeReferenceAssetFromStoryboardShot(
+  projectId: string,
+  shotId: string,
+  kind: ReferenceAssetKind,
+  itemId: string
+): Promise<Project> {
+  const project = await readProject(projectId);
+  const shot = getStoryboardShot(project, shotId);
+  const item = getReferenceCollection(project, kind).find((candidate) => candidate.id === itemId);
+
+  if (!item) {
+    throw new Error(`未找到 ${kind} 资产项 ${itemId}`);
+  }
+
+  const selectionId = buildShotReferenceSelectionId(kind, itemId);
+  const beforeSelections = getGenerationReferenceSelectionIds(project, shot);
+  const autoMatchedLibrary = filterReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const explicitlySelected = shot.referenceAssetIds.includes(selectionId);
+  const autoMatched =
+    explicitlySelected ||
+    (kind === 'character' ? autoMatchedLibrary.characters : kind === 'scene' ? autoMatchedLibrary.scenes : autoMatchedLibrary.objects)
+      .some((candidate) => candidate.id === itemId);
+
+  setShotReferenceSelections(shot, {
+    manualReferenceAssetIds: shot.manualReferenceAssetIds.filter((value) => value !== selectionId),
+    excludedReferenceAssetIds: autoMatched
+      ? [...shot.excludedReferenceAssetIds, selectionId]
+      : shot.excludedReferenceAssetIds.filter((value) => value !== selectionId)
+  });
+  const afterSelections = getGenerationReferenceSelectionIds(project, shot);
+
+  if (areReferenceSelectionSetsEqual(beforeSelections, afterSelections)) {
+    return project;
+  }
+
+  const invalidation = invalidateGeneratedMediaFromStoryboardShotReferenceChange(project, shotId);
+  appendLog(
+    project,
+    invalidation.hadImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
+      ? `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”；相关首帧图片、视频片段和最终成片已失效，请重新生成。`
+      : `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”。`,
+    invalidation.hadImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo ? 'warn' : 'info'
+  );
+  await persistStoryboard(project);
+  await saveProject(project);
+  return project;
+}
+
 export async function updateStoryboardShotPrompts(
   projectId: string,
   shotId: string,
@@ -3168,6 +3637,7 @@ export async function updateStoryboardShotPrompts(
 
   const changes: string[] = [];
   let shouldInvalidateImageOutputs = false;
+  let shouldInvalidateAudioOutputs = false;
   let shouldInvalidateVideoOutputs = false;
   let shouldInvalidateEditOutput = false;
   let shouldRecalculateStoryboardTimeline = false;
@@ -3250,9 +3720,7 @@ export async function updateStoryboardShotPrompts(
     if (shot.backgroundSoundPrompt !== nextPrompt) {
       shot.backgroundSoundPrompt = nextPrompt;
       changes.push('背景声音 Prompt');
-      if (!ttsConfigured) {
-        shouldInvalidateVideoOutputs = true;
-      }
+      shouldInvalidateVideoOutputs = true;
     }
   }
 
@@ -3266,7 +3734,8 @@ export async function updateStoryboardShotPrompts(
       shot.speechPrompt = nextPrompt;
       changes.push('台词/旁白 Prompt');
       if (ttsConfigured) {
-        shouldInvalidateEditOutput = true;
+        shouldInvalidateAudioOutputs = true;
+        shouldInvalidateVideoOutputs = true;
       } else {
         shouldInvalidateVideoOutputs = true;
       }
@@ -3283,15 +3752,28 @@ export async function updateStoryboardShotPrompts(
 
   if (shouldInvalidateImageOutputs) {
     clearActiveShotAsset(project, 'images', shotId);
+    if (shouldInvalidateAudioOutputs) {
+      clearActiveShotAsset(project, 'audios', shotId, { archive: false });
+      setShotAssetHistory(project, 'audios', shotId, []);
+    }
     clearActiveShotAsset(project, 'videos', shotId);
     project.assets.finalVideo = null;
     resetStage(project, 'images');
     resetStage(project, 'videos');
     resetStage(project, 'edit');
   } else if (shouldInvalidateVideoOutputs) {
+    if (shouldInvalidateAudioOutputs) {
+      clearActiveShotAsset(project, 'audios', shotId, { archive: false });
+      setShotAssetHistory(project, 'audios', shotId, []);
+    }
     clearActiveShotAsset(project, 'videos', shotId);
     project.assets.finalVideo = null;
     resetStage(project, 'videos');
+    resetStage(project, 'edit');
+  } else if (shouldInvalidateAudioOutputs) {
+    clearActiveShotAsset(project, 'audios', shotId, { archive: false });
+    setShotAssetHistory(project, 'audios', shotId, []);
+    project.assets.finalVideo = null;
     resetStage(project, 'edit');
   } else if (shouldInvalidateEditOutput) {
     project.assets.finalVideo = null;

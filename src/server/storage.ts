@@ -133,6 +133,8 @@ function hydrateProject(project: Project): Project {
     assets: {
       images: hydrateGeneratedAssetList(project.assets?.images),
       imageHistory: hydrateShotAssetHistoryMap(project.assets?.imageHistory),
+      audios: hydrateGeneratedAssetList(project.assets?.audios),
+      audioHistory: hydrateShotAssetHistoryMap(project.assets?.audioHistory),
       videos: hydrateGeneratedAssetList(project.assets?.videos),
       videoHistory: hydrateShotAssetHistoryMap(project.assets?.videoHistory),
       finalVideo: hydrateGeneratedAsset(project.assets?.finalVideo) ?? null
@@ -233,6 +235,8 @@ export async function createProject(input: {
     assets: {
       images: [],
       imageHistory: {},
+      audios: [],
+      audioHistory: {},
       videos: [],
       videoHistory: {},
       finalVideo: null

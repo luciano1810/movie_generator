@@ -27,6 +27,7 @@ import {
   updateProject
 } from './storage.js';
 import {
+  addReferenceAssetToStoryboardShot,
   continueProjectRun,
   enqueueProjectRun,
   enqueueReferenceGeneration,
@@ -35,6 +36,7 @@ import {
   isProjectRunning,
   isReferenceGenerationRunning,
   removeReferenceAudioForAsset,
+  removeReferenceAssetFromStoryboardShot,
   removeReferenceImageForAsset,
   requestProjectRunPause,
   requestProjectRunStop,
@@ -747,6 +749,92 @@ async function main(): Promise<void> {
             typeof request.body?.speechPrompt === 'string' ? String(request.body.speechPrompt) : undefined
         })
       );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put('/api/projects/:id/storyboard/:shotId/reference-items/:kind/:itemId', async (request, response, next) => {
+    try {
+      const { id, shotId, kind, itemId } = request.params;
+
+      if (!isReferenceAssetKind(kind)) {
+        response.status(400).json({ message: '无效的参考资产类型。' });
+        return;
+      }
+
+      let project: Project;
+      try {
+        project = await readProject(id);
+      } catch {
+        response.status(404).json({ message: '项目不存在。' });
+        return;
+      }
+
+      if (!project.storyboard.some((shot) => shot.id === shotId)) {
+        response.status(404).json({ message: '镜头不存在。' });
+        return;
+      }
+
+      if (!getReferenceCollection(project, kind).some((item) => item.id === itemId)) {
+        response.status(404).json({ message: '参考资产不存在。' });
+        return;
+      }
+
+      if (isProjectRunning(id)) {
+        response.status(409).json({ message: '该项目已有阶段任务在运行。' });
+        return;
+      }
+
+      if (isReferenceGenerationRunning(id)) {
+        response.status(409).json({ message: '该项目有参考资产正在生成，请稍后再试。' });
+        return;
+      }
+
+      response.json(await addReferenceAssetToStoryboardShot(id, shotId, kind, itemId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/projects/:id/storyboard/:shotId/reference-items/:kind/:itemId', async (request, response, next) => {
+    try {
+      const { id, shotId, kind, itemId } = request.params;
+
+      if (!isReferenceAssetKind(kind)) {
+        response.status(400).json({ message: '无效的参考资产类型。' });
+        return;
+      }
+
+      let project: Project;
+      try {
+        project = await readProject(id);
+      } catch {
+        response.status(404).json({ message: '项目不存在。' });
+        return;
+      }
+
+      if (!project.storyboard.some((shot) => shot.id === shotId)) {
+        response.status(404).json({ message: '镜头不存在。' });
+        return;
+      }
+
+      if (!getReferenceCollection(project, kind).some((item) => item.id === itemId)) {
+        response.status(404).json({ message: '参考资产不存在。' });
+        return;
+      }
+
+      if (isProjectRunning(id)) {
+        response.status(409).json({ message: '该项目已有阶段任务在运行。' });
+        return;
+      }
+
+      if (isReferenceGenerationRunning(id)) {
+        response.status(409).json({ message: '该项目有参考资产正在生成，请稍后再试。' });
+        return;
+      }
+
+      response.json(await removeReferenceAssetFromStoryboardShot(id, shotId, kind, itemId));
     } catch (error) {
       next(error);
     }

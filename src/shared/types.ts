@@ -147,6 +147,9 @@ export interface StoryboardShot {
   videoPrompt: string;
   backgroundSoundPrompt: string;
   speechPrompt: string;
+  referenceAssetIds: string[];
+  manualReferenceAssetIds: string[];
+  excludedReferenceAssetIds: string[];
 }
 
 export interface GeneratedAsset {
@@ -220,6 +223,8 @@ export interface Project {
   assets: {
     images: GeneratedAsset[];
     imageHistory: ShotAssetHistoryMap;
+    audios: GeneratedAsset[];
+    audioHistory: ShotAssetHistoryMap;
     videos: GeneratedAsset[];
     videoHistory: ShotAssetHistoryMap;
     finalVideo: GeneratedAsset | null;
@@ -291,6 +296,18 @@ function matchesAnySearchText(searchTexts: string[], candidate: string): boolean
   return searchTexts.some((text) => normalizedTextMatches(text, candidate));
 }
 
+function buildReferenceSelectionId(kind: ReferenceAssetKind, itemId: string): string {
+  return `${kind}:${itemId}`;
+}
+
+function normalizeReferenceSelectionIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean))];
+}
+
 export function filterReferenceLibraryForShot(
   referenceLibrary: ProjectReferenceLibrary,
   shot: StoryboardShot,
@@ -333,6 +350,60 @@ export function filterReferenceLibraryForShot(
       characters.length || referenceLibrary.characters.length !== 1 ? characters : referenceLibrary.characters.slice(0, 1),
     scenes: scenes.length || referenceLibrary.scenes.length !== 1 ? scenes : referenceLibrary.scenes.slice(0, 1),
     objects
+  };
+}
+
+export function getGenerationReferenceLibraryForShot(
+  referenceLibrary: ProjectReferenceLibrary,
+  shot: StoryboardShot,
+  script: ScriptPackage | null
+): ProjectReferenceLibrary {
+  const explicitReferenceIds = new Set(shot.referenceAssetIds);
+  const autoMatched = filterReferenceLibraryForShot(referenceLibrary, shot, script);
+  const manualReferenceIds = new Set(shot.manualReferenceAssetIds);
+  const excludedReferenceIds = new Set(shot.excludedReferenceAssetIds);
+
+  const explicitSelectionLibrary =
+    explicitReferenceIds.size > 0
+      ? {
+          characters: referenceLibrary.characters.filter((item) =>
+            explicitReferenceIds.has(buildReferenceSelectionId('character', item.id))
+          ),
+          scenes: referenceLibrary.scenes.filter((item) =>
+            explicitReferenceIds.has(buildReferenceSelectionId('scene', item.id))
+          ),
+          objects: referenceLibrary.objects.filter((item) =>
+            explicitReferenceIds.has(buildReferenceSelectionId('object', item.id))
+          )
+        }
+      : autoMatched;
+
+  const mergeCollection = (
+    kind: ReferenceAssetKind,
+    matchedItems: ReferenceAssetItem[],
+    allItems: ReferenceAssetItem[]
+  ): ReferenceAssetItem[] => {
+    const nextItems = matchedItems.filter((item) => !excludedReferenceIds.has(buildReferenceSelectionId(kind, item.id)));
+    const seen = new Set(nextItems.map((item) => buildReferenceSelectionId(kind, item.id)));
+
+    for (const item of allItems) {
+      const selectionId = buildReferenceSelectionId(kind, item.id);
+
+      if (!manualReferenceIds.has(selectionId) || seen.has(selectionId)) {
+        continue;
+      }
+
+      nextItems.push(item);
+      seen.add(selectionId);
+    }
+
+    return nextItems;
+  };
+
+  return {
+    characters: mergeCollection('character', explicitSelectionLibrary.characters, referenceLibrary.characters),
+    scenes: mergeCollection('scene', explicitSelectionLibrary.scenes, referenceLibrary.scenes),
+    objects: mergeCollection('object', explicitSelectionLibrary.objects, referenceLibrary.objects)
   };
 }
 
@@ -623,7 +694,10 @@ export function normalizeStoryboardShot(
       dialogue || voiceover
         ? `场景${sceneNumber}镜头${shotNumber}的中文台词/旁白配音设计。台词：${dialogue || '无'}；旁白：${voiceover || '无'}。要求情绪准确、节奏自然、贴合人物状态，并通过人物身份、年龄感和外观气质明确当前说话者，不要只写角色名。`
         : `场景${sceneNumber}镜头${shotNumber}无台词和旁白，不生成语音内容。`
-    )
+    ),
+    referenceAssetIds: normalizeReferenceSelectionIds(input?.referenceAssetIds),
+    manualReferenceAssetIds: normalizeReferenceSelectionIds(input?.manualReferenceAssetIds),
+    excludedReferenceAssetIds: normalizeReferenceSelectionIds(input?.excludedReferenceAssetIds)
   };
 }
 

@@ -276,6 +276,64 @@ export async function extractLastFrame(
   ], options);
 }
 
+export async function stitchAudios(
+  audioPaths: string[],
+  outputPath: string,
+  options: FfmpegRunOptions = {}
+): Promise<void> {
+  if (!audioPaths.length) {
+    throw new Error('没有可用于拼接的音频片段。');
+  }
+
+  await mkdir(path.dirname(outputPath), { recursive: true });
+
+  const args = ['-y'];
+
+  for (const audioPath of audioPaths) {
+    args.push('-i', audioPath);
+  }
+
+  if (audioPaths.length === 1) {
+    args.push(
+      '-map',
+      '0:a:0',
+      '-c:a',
+      'pcm_s16le',
+      '-ar',
+      '48000',
+      '-ac',
+      '2',
+      outputPath
+    );
+    await runFfmpeg(args, options);
+    return;
+  }
+
+  const normalizedInputs = audioPaths
+    .map(
+      (_, index) =>
+        `[${index}:a]aresample=48000,aformat=sample_fmts=s16:channel_layouts=stereo[a${index}]`
+    )
+    .join(';');
+  const concatInputs = audioPaths.map((_, index) => `[a${index}]`).join('');
+
+  args.push(
+    '-filter_complex',
+    `${normalizedInputs};${concatInputs}concat=n=${audioPaths.length}:v=0:a=1[aout]`,
+    '-map',
+    '[aout]',
+    '-c:a',
+    'pcm_s16le',
+    '-ar',
+    '48000',
+    '-ac',
+    '2',
+    outputPath
+  );
+
+  await runFfmpeg(args, options);
+}
+
 export async function stitchVideos(
   videoPaths: string[],
   outputPath: string,

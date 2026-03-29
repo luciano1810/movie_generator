@@ -732,6 +732,104 @@ function getPreferredLongShotDurationSeconds(settings: ProjectSettings): number 
   return Math.max(settings.defaultShotDurationSeconds + 1, 5);
 }
 
+function buildStoryboardReferenceSelectionId(kind: ReferenceAssetKind, itemId: string): string {
+  return `${kind}:${itemId}`;
+}
+
+function buildStoryboardReferenceItemDetail(
+  item: Pick<ReferenceAssetItem, 'summary' | 'generationPrompt' | 'ethnicityHint'>,
+  kind: ReferenceAssetKind
+): string {
+  if (kind === 'character') {
+    return [item.ethnicityHint.trim() ? `人种/族裔提示：${item.ethnicityHint.trim()}` : '', item.generationPrompt.trim() || item.summary.trim()]
+      .filter(Boolean)
+      .join('；');
+  }
+
+  return item.summary.trim() || item.generationPrompt.trim();
+}
+
+function buildAvailableStoryboardReferenceAssets(referenceLibrary: ProjectReferenceLibrary): Array<{
+  id: string;
+  kind: ReferenceAssetKind;
+  name: string;
+  summary: string;
+  detail: string;
+}> {
+  return ([
+    ['character', referenceLibrary.characters],
+    ['scene', referenceLibrary.scenes],
+    ['object', referenceLibrary.objects]
+  ] as Array<[ReferenceAssetKind, ReferenceAssetItem[]]>).flatMap(([kind, items]) =>
+    items
+      .filter((item) => item.asset)
+      .map((item) => ({
+        id: buildStoryboardReferenceSelectionId(kind, item.id),
+        kind,
+        name: item.name.trim(),
+        summary: item.summary.trim(),
+        detail: buildStoryboardReferenceItemDetail(item, kind)
+      }))
+  );
+}
+
+function getStoryboardAvailableReferenceAssetIdSet(referenceLibrary?: ProjectReferenceLibrary): Set<string> {
+  if (!referenceLibrary) {
+    return new Set();
+  }
+
+  return new Set(buildAvailableStoryboardReferenceAssets(referenceLibrary).map((item) => item.id));
+}
+
+function buildStoryboardReferenceLibraryPrompt(referenceLibrary?: ProjectReferenceLibrary): string {
+  const availableAssets = referenceLibrary ? buildAvailableStoryboardReferenceAssets(referenceLibrary) : [];
+
+  if (!availableAssets.length) {
+    return '当前没有可直接使用的参考资产。';
+  }
+
+  const sections = ([
+    ['character', '角色资产'],
+    ['scene', '场景资产'],
+    ['object', '物品资产']
+  ] as Array<[ReferenceAssetKind, string]>)
+    .map(([kind, label]) => {
+      const items = availableAssets.filter((item) => item.kind === kind);
+
+      if (!items.length) {
+        return '';
+      }
+
+      return [
+        `${label}：`,
+        ...items.map(
+          (item) =>
+            `- id: ${item.id} | 名称: ${item.name} | 摘要: ${item.summary || '无'} | 细节: ${item.detail || '无'}`
+        )
+      ].join('\n');
+    })
+    .filter(Boolean);
+
+  return sections.join('\n\n');
+}
+
+function normalizeStoryboardReferenceAssetIds(
+  value: unknown,
+  availableReferenceAssetIds?: Set<string>
+): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const normalized = [...new Set(value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean))];
+
+  if (!availableReferenceAssetIds?.size) {
+    return normalized;
+  }
+
+  return normalized.filter((item) => availableReferenceAssetIds.has(item));
+}
+
 interface StoryboardValidationResult {
   ok: boolean;
   feedback: string;
@@ -754,6 +852,7 @@ interface StoryboardShotPayload {
   videoPrompt?: string;
   backgroundSoundPrompt?: string;
   speechPrompt?: string;
+  referenceAssetIds?: string[];
 }
 
 interface StoryboardPayload {
@@ -779,6 +878,7 @@ interface StoryboardSceneGeneratedEvent extends StoryboardSceneStartEvent {
 
 interface StoryboardGenerationOptions {
   signal?: AbortSignal;
+  referenceLibrary?: ProjectReferenceLibrary;
   onSceneStart?: (event: StoryboardSceneStartEvent) => Promise<void> | void;
   onSceneGenerated?: (event: StoryboardSceneGeneratedEvent) => Promise<void> | void;
 }
@@ -815,7 +915,8 @@ function getStoryboardSceneCoverageIssues(
 function validateStoryboardAgainstScript(
   script: ScriptPackage,
   shots: StoryboardShot[],
-  settings: ProjectSettings
+  settings: ProjectSettings,
+  availableReferenceAssetIds?: Set<string>
 ): StoryboardValidationResult {
   if (!shots.length) {
     return {
@@ -866,6 +967,24 @@ function validateStoryboardAgainstScript(
     issues.push(`每场镜头的 shotNumber 必须从 1 连续递增，当前异常场景: ${invalidShotNumberScenes.join(', ')}`);
   }
 
+  if (availableReferenceAssetIds?.size) {
+    const missingReferenceShots = shots
+      .filter((shot) => !shot.referenceAssetIds.length)
+      .map((shot) => `scene ${shot.sceneNumber} shot ${shot.shotNumber}`);
+
+    if (missingReferenceShots.length) {
+      issues.push(`每个镜头都必须给出 referenceAssetIds，当前缺失：${missingReferenceShots.join('；')}`);
+    }
+
+    const invalidReferenceIds = [...new Set(
+      shots.flatMap((shot) => shot.referenceAssetIds.filter((item) => !availableReferenceAssetIds.has(item)))
+    )];
+
+    if (invalidReferenceIds.length) {
+      issues.push(`referenceAssetIds 只能使用可用资产列表中的 ID，当前存在无效值：${invalidReferenceIds.join(', ')}`);
+    }
+  }
+
   return {
     ok: issues.length === 0,
     feedback: issues.join('；')
@@ -875,10 +994,20 @@ function validateStoryboardAgainstScript(
 function normalizeAndFinalizeStoryboardShots(
   inputs: Array<Partial<StoryboardShot> | undefined>,
   settings: ProjectSettings,
-  expectedSceneNumbers?: number[]
+  expectedSceneNumbers?: number[],
+  availableReferenceAssetIds?: Set<string>
 ): StoryboardShot[] {
   const expectedSceneNumberSet = expectedSceneNumbers?.length ? new Set(expectedSceneNumbers) : null;
-  const normalized = normalizeStoryboardShots(inputs, settings)
+  const normalized = normalizeStoryboardShots(
+    inputs.map((input) => ({
+      ...(input ?? {}),
+      referenceAssetIds: normalizeStoryboardReferenceAssetIds(
+        (input as StoryboardShotPayload | undefined)?.referenceAssetIds,
+        availableReferenceAssetIds
+      )
+    })),
+    settings
+  )
     .filter((shot) => (expectedSceneNumberSet ? expectedSceneNumberSet.has(shot.sceneNumber) : true))
     .sort((left, right) => {
       if (left.sceneNumber !== right.sceneNumber) {
@@ -910,7 +1039,8 @@ function normalizeAndFinalizeStoryboardShots(
 
 function buildStoryboardConversationPrelude(
   script: ScriptPackage,
-  settings: ProjectSettings
+  settings: ProjectSettings,
+  referenceLibrary?: ProjectReferenceLibrary
 ): ChatCompletionMessageParam[] {
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
   const splitReferenceSeconds = getStoryboardShotSplitReferenceSeconds(settings);
@@ -951,10 +1081,15 @@ ${sceneRules}
 14. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
 15. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
 16. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、lastFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句，但 firstFramePrompt 和 lastFramePrompt 必须优先保证画面信息完整，不要偷懒简写成剧情提示
-17. 后续每一轮你只能输出当前指定场景的 JSON，不能提前生成其他场景，也不要重复已完成场景
+17. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头在首帧/视频生成时要加载哪些参考资产。你必须结合下方“可用参考资产列表”中的名称、类别、摘要和细节判断该镜头实际要用哪些资产，不能只看 ID 猜测
+18. referenceAssetIds 只能使用“可用参考资产列表”里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
+19. 后续每一轮你只能输出当前指定场景的 JSON，不能提前生成其他场景，也不要重复已完成场景
 
 剧本 JSON：
-${JSON.stringify(script, null, 2)}`
+${JSON.stringify(script, null, 2)}
+
+可用参考资产列表：
+${buildStoryboardReferenceLibraryPrompt(referenceLibrary)}`
     }
   ];
 }
@@ -1041,7 +1176,8 @@ ${continuityNotice}
 13. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前场与相邻场之间保持稳定
 14. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
 15. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、lastFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句，但 firstFramePrompt 和 lastFramePrompt 必须优先保证画面信息完整，不要偷懒简写成剧情提示
-16. 输出结构：
+16. 你必须结合上文“可用参考资产列表”里的名称、摘要和细节判断每个镜头该用哪些资产，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义
+17. 输出结构：
 {
   "shots": [
     {
@@ -1060,7 +1196,8 @@ ${continuityNotice}
       "lastFramePrompt": "用于尾帧静态图生成的详细中文提示词，明确镜头结束时的构图、人物状态和环境状态",
       "videoPrompt": "用于视频生成的详细中文提示词；先写景别、机位、运镜和镜头节奏，再写人物动作、表演、环境、光线和氛围，不要用引号包裹台词文本",
       "backgroundSoundPrompt": "用于背景声音生成的详细中文提示词；无对白时也要写自然环境声、动作声和空间氛围声，不含人物对白",
-      "speechPrompt": "用于台词或旁白配音的详细中文提示词；有语音内容时通过人物特征明确说话者，没有语音内容时明确写无语音，不要用引号包裹台词文本"
+      "speechPrompt": "用于台词或旁白配音的详细中文提示词；有语音内容时通过人物特征明确说话者，没有语音内容时明确写无语音，不要用引号包裹台词文本",
+      "referenceAssetIds": ["scene:场景资产ID", "character:角色资产ID", "object:物品资产ID"]
     }
   ]
 }
@@ -1088,7 +1225,8 @@ function buildStoryboardConversationAssistantMessage(sceneShots: StoryboardShot[
         lastFramePrompt: shot.lastFramePrompt,
         videoPrompt: shot.videoPrompt,
         backgroundSoundPrompt: shot.backgroundSoundPrompt,
-        speechPrompt: shot.speechPrompt
+        speechPrompt: shot.speechPrompt,
+        referenceAssetIds: shot.referenceAssetIds
       }))
     },
     null,
@@ -1105,6 +1243,7 @@ async function generateStoryboardForScene(
   options?: StoryboardGenerationOptions
 ): Promise<{ requestPrompt: string; sceneShots: StoryboardShot[] }> {
   let retryFeedback = '';
+  const availableReferenceAssetIds = getStoryboardAvailableReferenceAssetIdSet(options?.referenceLibrary);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const requestPrompt = buildStoryboardSceneTurnPrompt(
@@ -1120,14 +1259,20 @@ async function generateStoryboardForScene(
       signal: options?.signal
     });
 
-    const storyboard = normalizeAndFinalizeStoryboardShots(payload.shots ?? [], settings, [scene.sceneNumber]);
+    const storyboard = normalizeAndFinalizeStoryboardShots(
+      payload.shots ?? [],
+      settings,
+      [scene.sceneNumber],
+      availableReferenceAssetIds
+    );
     const validation = validateStoryboardAgainstScript(
       {
         ...script,
         scenes: [scene]
       },
       storyboard,
-      settings
+      settings,
+      availableReferenceAssetIds
     );
 
     if (validation.ok) {
@@ -1361,7 +1506,8 @@ export async function generateStoryboardFromScript(
 ): Promise<StoryboardShot[]> {
   const expectedSceneNumbers = script.scenes.map((scene) => scene.sceneNumber);
   const totalScenes = script.scenes.length;
-  const conversation = buildStoryboardConversationPrelude(script, settings);
+  const availableReferenceAssetIds = getStoryboardAvailableReferenceAssetIdSet(options?.referenceLibrary);
+  const conversation = buildStoryboardConversationPrelude(script, settings, options?.referenceLibrary);
   let storyboard: StoryboardShot[] = [];
 
   for (const [index, scene] of script.scenes.entries()) {
@@ -1389,7 +1535,7 @@ export async function generateStoryboardFromScript(
     });
   }
 
-  const validation = validateStoryboardAgainstScript(script, storyboard, settings);
+  const validation = validateStoryboardAgainstScript(script, storyboard, settings, availableReferenceAssetIds);
   if (!validation.ok) {
     throw new Error(`分镜生成失败：最终结果不完整。${validation.feedback}`);
   }
