@@ -56,8 +56,10 @@ async function ensureProjectLayout(projectId: string): Promise<void> {
 function hydrateReferenceAssetItem(item: ReferenceAssetItem): ReferenceAssetItem {
   return {
     ...item,
+    ethnicityHint: item.ethnicityHint ?? '',
     error: item.error ?? null,
     referenceImage: item.referenceImage ?? null,
+    referenceAudio: item.referenceAudio ?? null,
     asset: item.asset ?? null,
     assetHistory: item.assetHistory ?? []
   };

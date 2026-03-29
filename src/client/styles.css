@@ -414,6 +414,12 @@ select:focus {
     box-shadow 140ms ease;
 }
 
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .button:hover:not(:disabled) {
   transform: translateY(-1px);
 }
@@ -1060,6 +1066,10 @@ select:focus {
   object-fit: cover;
 }
 
+.reference-preview audio {
+  width: 100%;
+}
+
 .reference-card > .button.secondary {
   margin-top: auto;
 }
@@ -1451,6 +1461,12 @@ select:focus {
 .final-video {
   display: flex;
   flex-direction: column;
+  gap: 12px;
+}
+
+.final-video-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 12px;
 }
 

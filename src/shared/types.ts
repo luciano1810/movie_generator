@@ -166,11 +166,13 @@ export interface ReferenceAssetItem {
   kind: ReferenceAssetKind;
   name: string;
   summary: string;
+  ethnicityHint: string;
   generationPrompt: string;
   status: StageStatus;
   error: string | null;
   updatedAt: string;
   referenceImage: GeneratedAsset | null;
+  referenceAudio: GeneratedAsset | null;
   asset: GeneratedAsset | null;
   assetHistory: GeneratedAsset[];
 }

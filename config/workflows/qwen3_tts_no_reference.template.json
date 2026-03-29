@@ -1,0 +1,35 @@
+{
+  "100": {
+    "inputs": {
+      "text": "{{tts_plain_text}}",
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "language": "Auto",
+      "instruct": "{{speech_prompt}}",
+      "top_p": 0.8,
+      "top_k": 20,
+      "temperature": 1,
+      "repetition_penalty": 1.05,
+      "attention": "auto",
+      "unload_model_after_generate": false
+    },
+    "class_type": "FB_Qwen3TTSVoiceDesign",
+    "_meta": {
+      "title": "Qwen3 TTS Voice Design"
+    }
+  },
+  "110": {
+    "inputs": {
+      "audio": [
+        "100",
+        0
+      ],
+      "filename_prefix": "{{output_prefix}}"
+    },
+    "class_type": "SaveAudio",
+    "_meta": {
+      "title": "保存音频"
+    }
+  }
+}

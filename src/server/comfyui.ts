@@ -227,7 +227,7 @@ export async function uploadImageToComfy(localPath: string, options: ComfyReques
   return uploadImageBufferToComfy(buffer, filename, options);
 }
 
-export async function uploadImageBufferToComfy(
+async function uploadInputBufferToComfy(
   buffer: Buffer,
   filename: string,
   options: ComfyRequestOptions = {}
@@ -254,4 +254,27 @@ export async function uploadImageBufferToComfy(
 
   const data = (await response.json()) as { name?: string; filename?: string };
   return data.name ?? data.filename ?? filename;
+}
+
+export async function uploadImageBufferToComfy(
+  buffer: Buffer,
+  filename: string,
+  options: ComfyRequestOptions = {}
+): Promise<string> {
+  return uploadInputBufferToComfy(buffer, filename, options);
+}
+
+export async function uploadAudioToComfy(localPath: string, options: ComfyRequestOptions = {}): Promise<string> {
+  const buffer = await readFile(localPath);
+  const filename = path.basename(localPath);
+  return uploadAudioBufferToComfy(buffer, filename, options);
+}
+
+export async function uploadAudioBufferToComfy(
+  buffer: Buffer,
+  filename: string,
+  options: ComfyRequestOptions = {}
+): Promise<string> {
+  // ComfyUI stores uploaded input files through the same multipart endpoint; LoadAudio can read the saved filename.
+  return uploadInputBufferToComfy(buffer, filename, options);
 }

@@ -1,0 +1,233 @@
+{
+  "100": {
+    "inputs": {
+      "audio": "{{narrator_reference_audio}}"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "加载音频（旁白参考）"
+    }
+  },
+  "101": {
+    "inputs": {
+      "audio": "{{speaker_1_reference_audio}}"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "加载音频（角色1参考）"
+    }
+  },
+  "102": {
+    "inputs": {
+      "audio": "{{speaker_2_reference_audio}}"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "加载音频（角色2参考）"
+    }
+  },
+  "110": {
+    "inputs": {
+      "repo_id": "Qwen/Qwen3-ASR-1.7B",
+      "source": "ModelScope",
+      "precision": "bf16",
+      "attention": "auto",
+      "forced_aligner": "None",
+      "local_model_path": ""
+    },
+    "class_type": "Qwen3ASRLoader",
+    "_meta": {
+      "title": "Qwen3 ASR Loader"
+    }
+  },
+  "120": {
+    "inputs": {
+      "model": [
+        "110",
+        0
+      ],
+      "audio": [
+        "100",
+        0
+      ],
+      "language": "auto",
+      "context": "",
+      "return_timestamps": false
+    },
+    "class_type": "Qwen3ASRTranscribe",
+    "_meta": {
+      "title": "旁白参考转写"
+    }
+  },
+  "121": {
+    "inputs": {
+      "model": [
+        "110",
+        0
+      ],
+      "audio": [
+        "101",
+        0
+      ],
+      "language": "auto",
+      "context": "",
+      "return_timestamps": false
+    },
+    "class_type": "Qwen3ASRTranscribe",
+    "_meta": {
+      "title": "角色1参考转写"
+    }
+  },
+  "122": {
+    "inputs": {
+      "model": [
+        "110",
+        0
+      ],
+      "audio": [
+        "102",
+        0
+      ],
+      "language": "auto",
+      "context": "",
+      "return_timestamps": false
+    },
+    "class_type": "Qwen3ASRTranscribe",
+    "_meta": {
+      "title": "角色2参考转写"
+    }
+  },
+  "130": {
+    "inputs": {
+      "ref_audio": [
+        "100",
+        0
+      ],
+      "ref_text": [
+        "120",
+        0
+      ],
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "attention": "auto",
+      "x_vector_only": false,
+      "unload_model_after_generate": false
+    },
+    "class_type": "FB_Qwen3TTSVoiceClonePrompt",
+    "_meta": {
+      "title": "旁白音色提示"
+    }
+  },
+  "131": {
+    "inputs": {
+      "ref_audio": [
+        "101",
+        0
+      ],
+      "ref_text": [
+        "121",
+        0
+      ],
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "attention": "auto",
+      "x_vector_only": false,
+      "unload_model_after_generate": false
+    },
+    "class_type": "FB_Qwen3TTSVoiceClonePrompt",
+    "_meta": {
+      "title": "角色1音色提示"
+    }
+  },
+  "132": {
+    "inputs": {
+      "ref_audio": [
+        "102",
+        0
+      ],
+      "ref_text": [
+        "122",
+        0
+      ],
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "attention": "auto",
+      "x_vector_only": false,
+      "unload_model_after_generate": false
+    },
+    "class_type": "FB_Qwen3TTSVoiceClonePrompt",
+    "_meta": {
+      "title": "角色2音色提示"
+    }
+  },
+  "140": {
+    "inputs": {
+      "prompt_1": [
+        "130",
+        0
+      ],
+      "prompt_2": [
+        "131",
+        0
+      ],
+      "prompt_3": [
+        "132",
+        0
+      ],
+      "role_name_1": "{{tts_role_1_name}}",
+      "role_name_2": "{{tts_role_2_name}}",
+      "role_name_3": "{{tts_role_3_name}}"
+    },
+    "class_type": "FB_Qwen3TTSRoleBank",
+    "_meta": {
+      "title": "Qwen3 TTS Role Bank"
+    }
+  },
+  "150": {
+    "inputs": {
+      "role_bank": [
+        "140",
+        0
+      ],
+      "script": "{{tts_script}}",
+      "model_choice": "1.7B",
+      "device": "auto",
+      "precision": "bf16",
+      "language": "Auto",
+      "pause_linebreak": 0.5,
+      "period_pause": 0.4,
+      "comma_pause": 0.2,
+      "question_pause": 0.6,
+      "hyphen_pause": 0.3,
+      "merge_outputs": true,
+      "batch_size": 20,
+      "seed": "{{seed}}",
+      "top_p": 0.8,
+      "top_k": 20,
+      "temperature": 1,
+      "repetition_penalty": 1.05,
+      "attention": "auto",
+      "unload_model_after_generate": false
+    },
+    "class_type": "FB_Qwen3TTSDialogueInference",
+    "_meta": {
+      "title": "Qwen3 TTS Dialogue Inference"
+    }
+  },
+  "160": {
+    "inputs": {
+      "audio": [
+        "150",
+        0
+      ],
+      "filename_prefix": "{{output_prefix}}"
+    },
+    "class_type": "SaveAudio",
+    "_meta": {
+      "title": "保存音频"
+    }
+  }
+}

@@ -74,6 +74,14 @@ export async function updateAppSettings(input: Partial<AppSettings>): Promise<Ap
 }
 
 export function getRuntimeStatus(settings = getAppSettings()): RuntimeStatus {
+  const placeholderMarkers = [
+    'ReplaceMeWithYourVideoWorkflow',
+    'ReplaceWithYourCheckpointInWorkflow',
+    'ReplaceWithNarratorReferenceAudio.wav',
+    'ReplaceWithSpeaker1ReferenceAudio.wav',
+    'ReplaceWithSpeaker2ReferenceAudio.wav',
+    'ReplaceWithYourPreferredVoiceDesignNode'
+  ];
   const workflowExists = (workflowPath: string): boolean => {
     if (!workflowPath || !existsSync(workflowPath)) {
       return false;
@@ -81,10 +89,7 @@ export function getRuntimeStatus(settings = getAppSettings()): RuntimeStatus {
 
     try {
       const content = readFileSync(workflowPath, 'utf8');
-      return !(
-        content.includes('ReplaceMeWithYourVideoWorkflow') ||
-        content.includes('ReplaceWithYourCheckpointInWorkflow')
-      );
+      return !placeholderMarkers.some((marker) => content.includes(marker));
     } catch {
       return false;
     }

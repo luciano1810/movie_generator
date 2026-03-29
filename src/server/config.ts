@@ -84,9 +84,10 @@ export const envAppSettingsDefaults: AppSettings = {
         )
       },
       tts: {
-        workflowPath: process.env.COMFYUI_TTS_WORKFLOW
-          ? resolveMaybeRelative(process.env.COMFYUI_TTS_WORKFLOW, process.env.COMFYUI_TTS_WORKFLOW)
-          : ''
+        workflowPath: resolveMaybeRelative(
+          process.env.COMFYUI_TTS_WORKFLOW,
+          'config/workflows/qwen3_tts_dialogue.template.json'
+        )
       }
     },
     pollIntervalMs: Number(process.env.COMFYUI_POLL_INTERVAL_MS ?? 3000),

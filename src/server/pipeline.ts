@@ -37,10 +37,11 @@ import {
   type TemplateVariable,
   fetchComfyOutputFile,
   runComfyWorkflow,
+  uploadAudioToComfy,
   uploadImageBufferToComfy,
   uploadImageToComfy
 } from './comfyui.js';
-import { extractLastFrame, stitchVideos } from './video-editor.js';
+import { extractLastFrame, getMediaDurationSeconds, stitchVideos } from './video-editor.js';
 
 const runningProjects = new Map<string, Promise<void>>();
 const runningReferenceGenerations = new Map<string, Promise<void>>();
@@ -60,24 +61,75 @@ interface GenerationReferenceInputs {
   referenceImages: string[];
 }
 
+interface TtsPlan {
+  dialogueScript: string;
+  plainText: string;
+  narratorRoleName: string;
+  speaker1RoleName: string;
+  speaker2RoleName: string;
+}
+
+interface TtsReferenceAudioPlan {
+  useReferenceAudio: boolean;
+  narratorReferenceAudio: string;
+  speaker1ReferenceAudio: string;
+  speaker2ReferenceAudio: string;
+}
+
 const DEFAULT_CHARACTER_POSE_REFERENCE_PATH = path.resolve(
   process.cwd(),
   'config/reference-images/character-pose-three-view.png'
+);
+const DEFAULT_NO_REFERENCE_TTS_WORKFLOW_PATH = path.resolve(
+  process.cwd(),
+  'config/workflows/qwen3_tts_no_reference.template.json'
+);
+const DEFAULT_REFERENCE_AUDIO_TTS_WORKFLOW_PATH = path.resolve(
+  process.cwd(),
+  'config/workflows/qwen3_tts_dialogue.template.json'
 );
 const MAX_STORYBOARD_REFERENCE_IMAGES_PER_RUN = 3;
 const MAX_STORYBOARD_REFERENCE_IMAGES_PER_CHAIN_RUN = 2;
 const LTX_TARGET_LONG_SIDE = 720;
 const LTX_DIMENSION_MULTIPLE = 16;
 
-function buildCharacterAssetWorkflowPrompt(prompt: string, hasReferenceImage: boolean): string {
-  if (hasReferenceImage) {
-    return '根据参考三视图生成提供人物图片的三视图';
+function buildCharacterReferenceDetail(
+  item: Pick<ReferenceAssetItem, 'generationPrompt' | 'summary' | 'ethnicityHint'>
+): string {
+  const baseDetail = item.generationPrompt.trim() || item.summary.trim();
+  const trimmedEthnicityHint = item.ethnicityHint.trim();
+
+  if (trimmedEthnicityHint && baseDetail) {
+    return `人种/族裔提示：${trimmedEthnicityHint}；${baseDetail}`;
   }
 
-  const trimmedPrompt = prompt.trim();
-  return trimmedPrompt
-    ? `根据参考三视图生成提供人物的三视图，特点为${trimmedPrompt}`
-    : '根据参考三视图生成提供人物的三视图';
+  if (trimmedEthnicityHint) {
+    return `人种/族裔提示：${trimmedEthnicityHint}`;
+  }
+
+  return baseDetail;
+}
+
+function buildCharacterAssetWorkflowPrompt(
+  characterName: string,
+  prompt: string,
+  ethnicityHint: string,
+  hasReferenceImage: boolean
+): string {
+  const trimmedName = characterName.trim();
+  const detail = buildCharacterReferenceDetail({
+    generationPrompt: prompt,
+    summary: '',
+    ethnicityHint
+  });
+  const prefix = trimmedName ? `角色名：${trimmedName}。` : '';
+  const detailSentence = detail ? `角色设定：${detail}。` : '';
+
+  if (hasReferenceImage) {
+    return `${prefix}${detailSentence}根据参考三视图生成该角色的人物三视图，保持角色姓名、人种/族裔提示与人物外貌设定一致。`;
+  }
+
+  return `${prefix}${detailSentence}根据参考三视图生成该角色的三视图。`;
 }
 
 function now(): string {
@@ -514,10 +566,13 @@ function buildReferenceContext(referenceLibrary: Project['referenceLibrary']): s
     ['object', '物品参考', referenceLibrary.objects]
   ];
 
-  for (const [_kind, label, items] of collections) {
+  for (const [kind, label, items] of collections) {
     const formatted = items
       .map((item) => {
-        const detail = item.summary.trim() || item.generationPrompt.trim();
+        const detail =
+          kind === 'character'
+            ? buildCharacterReferenceDetail(item)
+            : item.summary.trim() || item.generationPrompt.trim();
         return detail ? `${item.name}（${detail}）` : item.name;
       })
       .filter(Boolean);
@@ -539,7 +594,7 @@ function buildVideoCharacterReferencePrompt(
   const characters = referenceLibrary.characters
     .map((item) => ({
       name: item.name.trim(),
-      detail: item.generationPrompt.trim() || item.summary.trim()
+      detail: buildCharacterReferenceDetail(item)
     }))
     .filter((item) => item.name && item.detail);
 
@@ -646,7 +701,8 @@ async function buildGenerationReferenceInputs(
         id: item.id,
         name: item.name,
         summary: item.summary,
-        generation_prompt: item.generationPrompt,
+        generation_prompt: kind === 'character' ? buildCharacterReferenceDetail(item) : item.generationPrompt,
+        ethnicity_hint: item.ethnicityHint,
         input_image: inputImage,
         relative_path: relativePath
       });
@@ -813,26 +869,239 @@ function getVideoWorkflowPrompt(project: Project, shot: Project['storyboard'][nu
   );
 }
 
-function shouldGenerateTtsForShot(shot: Project['storyboard'][number]): boolean {
-  const speechPrompt = shot.speechPrompt.trim();
+function isSpeechPromptDisabled(speechPrompt: string): boolean {
+  return /无语音内容|不生成语音|无需语音|无台词|无旁白/.test(speechPrompt.trim());
+}
 
-  if (!speechPrompt) {
+function normalizeTtsSpeechText(value: string): string {
+  return value
+    .replace(/\s+/g, ' ')
+    .replace(/^[“"'`]+|[”"'`]+$/g, '')
+    .trim();
+}
+
+function extractDialogueSegments(
+  dialogue: string
+): Array<{
+  speaker: string | null;
+  text: string;
+}> {
+  const lines = dialogue
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (!lines.length) {
+    return [];
+  }
+
+  return lines
+    .map((line) => {
+      const matched = line.match(/^([^:：]{1,20})[:：]\s*(.+)$/);
+
+      if (matched) {
+        return {
+          speaker: matched[1].trim(),
+          text: normalizeTtsSpeechText(matched[2])
+        };
+      }
+
+      return {
+        speaker: null,
+        text: normalizeTtsSpeechText(line)
+      };
+    })
+    .filter((segment) => Boolean(segment.text));
+}
+
+function buildTtsPlan(shot: Project['storyboard'][number]): TtsPlan {
+  if (isSpeechPromptDisabled(shot.speechPrompt)) {
+    return {
+      dialogueScript: '',
+      plainText: '',
+      narratorRoleName: '旁白',
+      speaker1RoleName: '角色1',
+      speaker2RoleName: '角色2'
+    };
+  }
+
+  const dialogueLines: string[] = [];
+  const plainTextLines: string[] = [];
+  const speakerMap = new Map<string, { label: '角色1' | '角色2'; displayName: string }>();
+  const dialogueSegments = extractDialogueSegments(shot.dialogue.trim());
+
+  if (shot.voiceover.trim()) {
+    const voiceover = normalizeTtsSpeechText(shot.voiceover);
+    if (voiceover) {
+      dialogueLines.push(`旁白: ${voiceover}`);
+      plainTextLines.push(voiceover);
+    }
+  }
+
+  for (const segment of dialogueSegments) {
+    let role = '角色1';
+    let displayName = '角色1';
+
+    if (segment.speaker) {
+      const existingRole = speakerMap.get(segment.speaker);
+      if (existingRole) {
+        role = existingRole.label;
+        displayName = existingRole.displayName;
+      } else {
+        role = speakerMap.size === 0 ? '角色1' : '角色2';
+        displayName = segment.speaker;
+        speakerMap.set(segment.speaker, {
+          label: role as '角色1' | '角色2',
+          displayName
+        });
+      }
+    } else if (speakerMap.size > 1) {
+      role = '角色2';
+      displayName = [...speakerMap.values()].find((item) => item.label === '角色2')?.displayName ?? '角色2';
+    } else if (speakerMap.size === 1) {
+      role = '角色1';
+      displayName = [...speakerMap.values()][0]?.displayName ?? '角色1';
+    }
+
+    dialogueLines.push(`${role}: ${segment.text}`);
+    plainTextLines.push(segment.text);
+  }
+
+  if (!dialogueLines.length && !plainTextLines.length) {
+    return {
+      dialogueScript: '',
+      plainText: '',
+      narratorRoleName: '旁白',
+      speaker1RoleName: '角色1',
+      speaker2RoleName: '角色2'
+    };
+  }
+
+  const speakerAssignments = [...speakerMap.values()];
+
+  return {
+    dialogueScript: dialogueLines.join('\n'),
+    plainText: plainTextLines.join('\n'),
+    narratorRoleName: '旁白',
+    speaker1RoleName: speakerAssignments.find((item) => item.label === '角色1')?.displayName ?? '角色1',
+    speaker2RoleName: speakerAssignments.find((item) => item.label === '角色2')?.displayName ?? '角色2'
+  };
+}
+
+function normalizeReferenceSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\s"'`“”‘’「」『』（）()【】[\]{}<>《》，,。.!！？?；;：:/\\|_-]+/g, '')
+    .trim();
+}
+
+function matchesReferenceName(haystack: string, needle: string): boolean {
+  const normalizedHaystack = normalizeReferenceSearchText(haystack);
+  const normalizedNeedle = normalizeReferenceSearchText(needle);
+
+  if (!normalizedHaystack || !normalizedNeedle) {
     return false;
   }
 
-  if (!shot.dialogue.trim() && !shot.voiceover.trim()) {
-    return !/无语音内容|不生成语音|无需语音|无台词|无旁白/.test(speechPrompt);
+  return normalizedHaystack.includes(normalizedNeedle) || normalizedNeedle.includes(normalizedHaystack);
+}
+
+function getShotMatchedCharacterReferenceAudios(
+  project: Project,
+  shot: Project['storyboard'][number]
+): ReferenceAssetItem[] {
+  const referenceLibrary = filterReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const charactersWithAudio = referenceLibrary.characters.filter((item) => item.referenceAudio?.relativePath);
+
+  if (!charactersWithAudio.length) {
+    return [];
   }
 
-  return true;
+  const haystack = `${shot.dialogue}\n${shot.voiceover}\n${shot.speechPrompt}\n${shot.videoPrompt}`;
+  const matchedCharacters = charactersWithAudio.filter((item) => matchesReferenceName(haystack, item.name));
+  return (matchedCharacters.length ? matchedCharacters : charactersWithAudio).slice(0, 2);
+}
+
+async function uploadAudioToComfyCached(
+  localPath: string,
+  cache: Map<string, string>,
+  signal?: AbortSignal
+): Promise<string> {
+  const cached = cache.get(localPath);
+  if (cached) {
+    return cached;
+  }
+
+  const uploaded = await uploadAudioToComfy(localPath, { signal });
+  cache.set(localPath, uploaded);
+  return uploaded;
+}
+
+async function buildTtsReferenceAudioPlan(
+  project: Project,
+  shot: Project['storyboard'][number],
+  uploadCache: Map<string, string>
+): Promise<TtsReferenceAudioPlan> {
+  const matchedItems = getShotMatchedCharacterReferenceAudios(project, shot);
+
+  if (!matchedItems.length) {
+    return {
+      useReferenceAudio: false,
+      narratorReferenceAudio: '',
+      speaker1ReferenceAudio: '',
+      speaker2ReferenceAudio: ''
+    };
+  }
+
+  const signal = getProjectAbortSignal(project.id);
+  const uploadedAudios = await Promise.all(
+    matchedItems.map((item) => uploadAudioToComfyCached(fromStorageRelative(item.referenceAudio!.relativePath), uploadCache, signal))
+  );
+  const primaryAudio = uploadedAudios[0];
+
+  return {
+    useReferenceAudio: true,
+    narratorReferenceAudio: primaryAudio,
+    speaker1ReferenceAudio: primaryAudio,
+    speaker2ReferenceAudio: uploadedAudios[1] ?? primaryAudio
+  };
+}
+
+function resolveTtsWorkflowPath(appSettings: AppSettings, useReferenceAudio: boolean): string {
+  const configuredWorkflowPath = appSettings.comfyui.workflows.tts.workflowPath;
+
+  if (
+    configuredWorkflowPath === DEFAULT_NO_REFERENCE_TTS_WORKFLOW_PATH ||
+    configuredWorkflowPath === DEFAULT_REFERENCE_AUDIO_TTS_WORKFLOW_PATH
+  ) {
+    return useReferenceAudio ? DEFAULT_REFERENCE_AUDIO_TTS_WORKFLOW_PATH : DEFAULT_NO_REFERENCE_TTS_WORKFLOW_PATH;
+  }
+
+  return configuredWorkflowPath;
 }
 
 function buildTtsVariables(
   project: Project,
-  shot: Project['storyboard'][number]
+  shot: Project['storyboard'][number],
+  ttsPlan: TtsPlan,
+  referenceAudioPlan: TtsReferenceAudioPlan
 ) {
+  const ttsScript = ttsPlan.dialogueScript;
+
   return {
     prompt: shot.speechPrompt,
+    speech_prompt: shot.speechPrompt,
+    dialogue: shot.dialogue,
+    voiceover: shot.voiceover,
+    tts_script: ttsScript,
+    tts_plain_text: ttsPlan.plainText,
+    tts_role_1_name: ttsPlan.narratorRoleName,
+    tts_role_2_name: ttsPlan.speaker1RoleName,
+    tts_role_3_name: ttsPlan.speaker2RoleName,
+    narrator_reference_audio: referenceAudioPlan.narratorReferenceAudio,
+    speaker_1_reference_audio: referenceAudioPlan.speaker1ReferenceAudio,
+    speaker_2_reference_audio: referenceAudioPlan.speaker2ReferenceAudio,
+    tts_default_speaker: 'Vivian',
     negative_prompt: project.settings.negativePrompt,
     output_prefix: `${project.id}_${shot.id}_tts`,
     image_width: project.settings.imageWidth,
@@ -1285,6 +1554,7 @@ async function generateReferenceAssetForProject(
   prompt?: string,
   options: {
     useReferenceImage?: boolean;
+    ethnicityHint?: string;
   } = {}
 ): Promise<void> {
   const appSettings = getAppSettings();
@@ -1298,17 +1568,20 @@ async function generateReferenceAssetForProject(
 
   let generationPrompt = '';
   let itemName = '';
+  let ethnicityHint = '';
   let referenceImageRelativePath = '';
   let temporaryReferenceImage: GeneratedAsset | null = null;
 
   updateReferenceItem(project, kind, itemId, (item) => {
     generationPrompt = prompt?.trim() || item.generationPrompt;
     itemName = item.name;
+    ethnicityHint = kind === 'character' ? (options.ethnicityHint?.trim() ?? item.ethnicityHint.trim()) : item.ethnicityHint;
     referenceImageRelativePath = item.referenceImage?.relativePath ?? '';
     temporaryReferenceImage = item.referenceImage;
 
     return {
       ...item,
+      ethnicityHint,
       generationPrompt,
       status: 'running',
       error: null,
@@ -1336,7 +1609,7 @@ async function generateReferenceAssetForProject(
     const editImage3 = uploadedCharacterPoseImage;
     const workflowPrompt =
       kind === 'character'
-        ? buildCharacterAssetWorkflowPrompt(generationPrompt, shouldUseReferenceImage)
+        ? buildCharacterAssetWorkflowPrompt(itemName, generationPrompt, ethnicityHint, shouldUseReferenceImage)
         : generationPrompt;
 
     const outputFiles = await runComfyWorkflow(workflow.workflowPath, {
@@ -1370,12 +1643,13 @@ async function generateReferenceAssetForProject(
 
     updateReferenceItem(project, kind, itemId, (item) => ({
       ...item,
+      ethnicityHint,
       generationPrompt,
       status: 'success',
       error: null,
       updatedAt: now(),
       referenceImage: shouldUseReferenceImage ? null : item.referenceImage,
-      asset: buildAsset(saved.relativePath, generationPrompt, null, null),
+      asset: buildAsset(saved.relativePath, workflowPrompt, null, null),
       assetHistory: item.asset
         ? [
             item.asset,
@@ -1410,6 +1684,7 @@ async function generateReferenceAssetForProject(
     if (isStopRequested(project.id)) {
       updateReferenceItem(project, kind, itemId, (item) => ({
         ...item,
+        ethnicityHint,
         generationPrompt,
         status: item.asset ? 'success' : 'idle',
         error: null,
@@ -1424,6 +1699,7 @@ async function generateReferenceAssetForProject(
 
     updateReferenceItem(project, kind, itemId, (item) => ({
       ...item,
+      ethnicityHint,
       generationPrompt,
       status: 'error',
       error: message,
@@ -1462,6 +1738,46 @@ function guessImageExtension(filename: string, mimeType: string): string {
   }
 
   return '.png';
+}
+
+function guessAudioExtension(filename: string, mimeType: string): string {
+  const fromName = path.extname(filename).toLowerCase();
+  if (AUDIO_EXTENSIONS.has(fromName)) {
+    return fromName;
+  }
+
+  if (mimeType === 'audio/wav' || mimeType === 'audio/x-wav' || mimeType === 'audio/wave') {
+    return '.wav';
+  }
+
+  if (mimeType === 'audio/mpeg' || mimeType === 'audio/mp3') {
+    return '.mp3';
+  }
+
+  if (mimeType === 'audio/mp4' || mimeType === 'audio/m4a' || mimeType === 'audio/x-m4a') {
+    return '.m4a';
+  }
+
+  if (mimeType === 'audio/aac') {
+    return '.aac';
+  }
+
+  if (mimeType === 'audio/ogg') {
+    return '.ogg';
+  }
+
+  if (mimeType === 'audio/flac') {
+    return '.flac';
+  }
+
+  return '.wav';
+}
+
+function invalidateEditOutputFromReferenceAudio(project: Project): boolean {
+  const hadFinalVideo = Boolean(project.assets.finalVideo);
+  project.assets.finalVideo = null;
+  resetStage(project, 'edit');
+  return hadFinalVideo;
 }
 
 export async function uploadReferenceImageForAsset(
@@ -1542,6 +1858,104 @@ export async function removeReferenceImageForAsset(
   appendLog(
     project,
     `${item.name}${assetKindLabel(kind)}上传参考图已移除。`
+  );
+  await persistReferenceLibrary(project);
+  await saveProject(project);
+  return project;
+}
+
+export async function uploadReferenceAudioForAsset(
+  projectId: string,
+  kind: ReferenceAssetKind,
+  itemId: string,
+  input: {
+    filename: string;
+    mimeType: string;
+    buffer: Buffer;
+  }
+): Promise<Project> {
+  if (kind !== 'character') {
+    throw new Error('只有角色资产支持上传参考音频。');
+  }
+
+  const project = await readProject(projectId);
+  const item = getReferenceCollection(project, kind).find((candidate) => candidate.id === itemId);
+
+  if (!item) {
+    throw new Error(`未找到 ${kind} 资产项 ${itemId}`);
+  }
+
+  const extension = guessAudioExtension(input.filename, input.mimeType);
+  const saved = await writeProjectFile(
+    project.id,
+    path.join('references', 'uploads', kind, `${itemId}-voice${extension}`),
+    input.buffer
+  );
+  const previousReferenceAudio = item.referenceAudio;
+  const hadFinalVideo = invalidateEditOutputFromReferenceAudio(project);
+
+  updateReferenceItem(project, kind, itemId, (current) => ({
+    ...current,
+    status: current.asset ? 'success' : 'idle',
+    updatedAt: now(),
+    referenceAudio: buildAsset(saved.relativePath, '用户上传参考音频', null, null),
+    error: null
+  }));
+
+  if (previousReferenceAudio && previousReferenceAudio.relativePath !== saved.relativePath) {
+    await deleteStoredAsset(previousReferenceAudio);
+  }
+
+  appendLog(
+    project,
+    hadFinalVideo
+      ? `${item.name}${assetKindLabel(kind)}参考音频已上传；后续剪辑会优先使用角色参考音频进行配音，原成片已失效，请重新执行视频剪辑。`
+      : `${item.name}${assetKindLabel(kind)}参考音频已上传；后续剪辑会优先使用角色参考音频进行配音。`,
+    hadFinalVideo ? 'warn' : 'info'
+  );
+  await persistReferenceLibrary(project);
+  await saveProject(project);
+  return project;
+}
+
+export async function removeReferenceAudioForAsset(
+  projectId: string,
+  kind: ReferenceAssetKind,
+  itemId: string
+): Promise<Project> {
+  if (kind !== 'character') {
+    throw new Error('只有角色资产支持移除参考音频。');
+  }
+
+  const project = await readProject(projectId);
+  const item = getReferenceCollection(project, kind).find((candidate) => candidate.id === itemId);
+
+  if (!item) {
+    throw new Error(`未找到 ${kind} 资产项 ${itemId}`);
+  }
+
+  if (!item.referenceAudio) {
+    return project;
+  }
+
+  const previousReferenceAudio = item.referenceAudio;
+  const hadFinalVideo = invalidateEditOutputFromReferenceAudio(project);
+
+  updateReferenceItem(project, kind, itemId, (current) => ({
+    ...current,
+    status: current.asset ? 'success' : 'idle',
+    error: null,
+    updatedAt: now(),
+    referenceAudio: null
+  }));
+  await deleteStoredAsset(previousReferenceAudio);
+
+  appendLog(
+    project,
+    hadFinalVideo
+      ? `${item.name}${assetKindLabel(kind)}上传参考音频已移除；后续剪辑会回退到无参考音频版 TTS，原成片已失效，请重新执行视频剪辑。`
+      : `${item.name}${assetKindLabel(kind)}上传参考音频已移除；后续剪辑会回退到无参考音频版 TTS。`,
+    hadFinalVideo ? 'warn' : 'info'
   );
   await persistReferenceLibrary(project);
   await saveProject(project);
@@ -2093,6 +2507,7 @@ async function runEditStage(project: Project): Promise<void> {
   const appSettings = getAppSettings();
   const signal = getProjectAbortSignal(project.id);
   const orderedAudioPaths: Array<string | null> = [];
+  const ttsReferenceAudioUploadCache = new Map<string, string>();
 
   if (hasConfiguredTtsWorkflow(appSettings)) {
     appendLog(project, '已配置 TTS 工作流，开始为镜头生成配音音频。');
@@ -2102,18 +2517,25 @@ async function runEditStage(project: Project): Promise<void> {
       await throwIfRunInterrupted(project.id, 'edit');
 
       const shot = project.storyboard[index];
+      const ttsPlan = buildTtsPlan(shot);
 
-      if (!shouldGenerateTtsForShot(shot)) {
+      if (!ttsPlan.plainText) {
         orderedAudioPaths.push(null);
         continue;
       }
 
-      appendLog(project, `TTS 配音 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
+      const referenceAudioPlan = await buildTtsReferenceAudioPlan(project, shot, ttsReferenceAudioUploadCache);
+      const ttsWorkflowPath = resolveTtsWorkflowPath(appSettings, referenceAudioPlan.useReferenceAudio);
+
+      appendLog(
+        project,
+        `TTS 配音 ${index + 1}/${project.storyboard.length}: ${shot.title}（${referenceAudioPlan.useReferenceAudio ? '角色参考音频' : '无参考音频默认音色'}）`
+      );
       await saveProject(project);
 
       const outputFiles = await runComfyWorkflow(
-        appSettings.comfyui.workflows.tts.workflowPath,
-        buildTtsVariables(project, shot),
+        ttsWorkflowPath,
+        buildTtsVariables(project, shot, ttsPlan, referenceAudioPlan),
         {
           signal
         }
@@ -2122,7 +2544,31 @@ async function runEditStage(project: Project): Promise<void> {
       const buffer = await fetchComfyOutputFile(outputFile, { signal });
       const extension = path.extname(outputFile.filename) || '.wav';
       const saved = await writeProjectFile(project.id, `audio/${shot.id}${extension}`, buffer);
-      orderedAudioPaths.push(fromStorageRelative(saved.relativePath));
+      const audioPath = fromStorageRelative(saved.relativePath);
+      orderedAudioPaths.push(audioPath);
+
+      try {
+        const [audioDurationSeconds, videoDurationSeconds] = await Promise.all([
+          getMediaDurationSeconds(audioPath, { signal }),
+          getMediaDurationSeconds(fromStorageRelative(orderedVideoAssets[index].relativePath), { signal })
+        ]);
+        const durationDelta = audioDurationSeconds - videoDurationSeconds;
+
+        if (durationDelta > 0.05) {
+          appendLog(
+            project,
+            `镜头 ${shot.title} 的对白时长约 ${audioDurationSeconds.toFixed(2)} 秒，超过视频片段 ${videoDurationSeconds.toFixed(2)} 秒；最终剪辑会自动延长尾帧 ${durationDelta.toFixed(2)} 秒以容纳完整对白。`
+          );
+          await saveProject(project);
+        }
+      } catch (error) {
+        appendLog(
+          project,
+          `镜头 ${shot.title} 的音视频时长预检失败，剪辑阶段将继续尝试自动对齐：${error instanceof Error ? error.message : String(error)}`,
+          'warn'
+        );
+        await saveProject(project);
+      }
     }
 
     appendLog(project, '镜头配音音频生成完成，开始合成成片。');
@@ -2210,6 +2656,7 @@ async function executeReferenceGeneration(
   prompt?: string,
   options: {
     useReferenceImage?: boolean;
+    ethnicityHint?: string;
   } = {}
 ): Promise<void> {
   const project = await readProject(projectId);
@@ -2495,6 +2942,7 @@ export async function enqueueReferenceGeneration(
   prompt?: string,
   options: {
     useReferenceImage?: boolean;
+    ethnicityHint?: string;
   } = {}
 ): Promise<void> {
   if (runningReferenceGenerations.has(projectId)) {

@@ -157,6 +157,10 @@ function assetUrl(relativePath: string): string {
   return apiPath(`/storage/${relativePath}`);
 }
 
+function finalVideoDownloadUrl(projectId: string): string {
+  return apiPath(`/api/projects/${projectId}/final-video/download`);
+}
+
 async function requestJson<T>(pathname: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiPath(pathname), {
     headers: {
@@ -182,14 +186,14 @@ async function fileToDataUrl(file: File): Promise<string> {
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result !== 'string') {
-        reject(new Error('读取参考图失败'));
+        reject(new Error('读取文件失败'));
         return;
       }
 
       resolve(reader.result);
     };
     reader.onerror = () => {
-      reject(new Error('读取参考图失败'));
+      reject(new Error('读取文件失败'));
     };
     reader.readAsDataURL(file);
   });
@@ -506,7 +510,7 @@ function buildReferenceLibraryAssets(
           projectTitle: project.title,
           createdAt: item.asset!.createdAt,
           relativePath: item.asset!.relativePath,
-          prompt: item.generationPrompt,
+          prompt: item.asset!.prompt || item.generationPrompt,
           name: item.name,
           summary: item.summary
         }))
@@ -839,6 +843,7 @@ export function App() {
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false);
   const [draftDirty, setDraftDirty] = useState(false);
   const [referencePromptDrafts, setReferencePromptDrafts] = useState<Record<string, string>>({});
+  const [referenceEthnicityDrafts, setReferenceEthnicityDrafts] = useState<Record<string, string>>({});
   const [referenceLibrarySelections, setReferenceLibrarySelections] = useState<Record<string, string>>({});
   const [referenceAssetVersionIndices, setReferenceAssetVersionIndices] = useState<Record<string, number>>({});
   const [imageAssetVersionIndices, setImageAssetVersionIndices] = useState<Record<string, number>>({});
@@ -865,6 +870,7 @@ export function App() {
     setProjectSettingsOpen(false);
     setDraftDirty(false);
     setReferencePromptDrafts({});
+    setReferenceEthnicityDrafts({});
     setReferenceLibrarySelections({});
     setReferenceAssetVersionIndices({});
     setImageAssetVersionIndices({});
@@ -881,6 +887,7 @@ export function App() {
     setProjectSettingsOpen(false);
     setDraftDirty(false);
     setReferencePromptDrafts({});
+    setReferenceEthnicityDrafts({});
     setReferenceLibrarySelections({});
     setReferenceAssetVersionIndices({});
     setImageAssetVersionIndices({});
@@ -963,6 +970,7 @@ export function App() {
     }
 
     setReferencePromptDrafts({});
+    setReferenceEthnicityDrafts({});
     setReferenceLibrarySelections({});
     setImageAssetVersionIndices({});
     setVideoAssetVersionIndices({});
@@ -1306,6 +1314,7 @@ export function App() {
 
     const key = referenceDraftKey(kind, item.id);
     const prompt = referencePromptDrafts[key]?.trim() || item.generationPrompt;
+    const ethnicityHint = kind === 'character' ? (referenceEthnicityDrafts[key] ?? item.ethnicityHint).trim() : '';
     const shouldUseReferenceImage = Boolean(item.referenceImage);
 
     try {
@@ -1320,17 +1329,18 @@ export function App() {
           method: 'POST',
           body: JSON.stringify({
             prompt,
-            useReferenceImage: shouldUseReferenceImage
+            useReferenceImage: shouldUseReferenceImage,
+            ethnicityHint
           })
         }
       );
       setNotice(
         kind === 'character'
           ? shouldUseReferenceImage
-            ? `已提交角色“${item.name}”的三视图生成任务，将按参考图和固定三视图模板生成；人物特点 Prompt 会并入后续视频生成提示词`
+            ? `已提交角色“${item.name}”的三视图生成任务，将按参考图、角色名、人种/族裔提示和固定三视图模板生成；人物特点 Prompt 会并入后续视频生成提示词`
             : item.asset
-              ? `已提交角色“${item.name}”的三视图重新生成任务，将使用默认三视图姿态参考和人物外貌特点`
-              : `已提交角色“${item.name}”的三视图生成任务，将使用默认三视图姿态参考和人物外貌特点`
+              ? `已提交角色“${item.name}”的三视图重新生成任务，将使用角色名、人种/族裔提示、默认三视图姿态参考和人物外貌特点`
+              : `已提交角色“${item.name}”的三视图生成任务，将使用角色名、人种/族裔提示、默认三视图姿态参考和人物外貌特点`
           : shouldUseReferenceImage
             ? `已提交${referenceKindLabel(kind)}“${item.name}”的“参考图 + Prompt”生成任务，成功后会自动清除临时参考图`
             : item.asset
@@ -1387,6 +1397,48 @@ export function App() {
     }
   }
 
+  async function handleUploadReferenceAudio(kind: ReferenceAssetKind, item: ReferenceAssetItem, file: File) {
+    if (!selectedId) {
+      return;
+    }
+
+    if (kind !== 'character') {
+      setNotice('只有角色资产支持上传参考音频');
+      return;
+    }
+
+    if (!file.type.startsWith('audio/')) {
+      setNotice('只能上传音频文件');
+      return;
+    }
+
+    try {
+      setPending(`reference-audio-upload:${kind}:${item.id}`);
+      const dataUrl = await fileToDataUrl(file);
+      const updated = await requestJson<Project>(
+        `/api/projects/${selectedId}/reference-library/${kind}/${item.id}/reference-audio`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            filename: file.name,
+            dataUrl
+          })
+        }
+      );
+      setProject(updated);
+      setReferenceAssetVersionIndices((current) => ({
+        ...current,
+        [referenceDraftKey(kind, item.id)]: 0
+      }));
+      setNotice(`角色“${item.name}”的参考音频已上传；后续视频剪辑会优先使用角色参考音频配音，未匹配到参考音频的镜头仍会回退到无参考音频版 TTS`);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '上传参考音频失败');
+    } finally {
+      setPending('');
+    }
+  }
+
   async function handleRemoveReferenceImage(kind: ReferenceAssetKind, item: ReferenceAssetItem) {
     if (!selectedId) {
       return;
@@ -1409,6 +1461,33 @@ export function App() {
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '移除参考图失败');
+    } finally {
+      setPending('');
+    }
+  }
+
+  async function handleRemoveReferenceAudio(kind: ReferenceAssetKind, item: ReferenceAssetItem) {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending(`reference-audio-remove:${kind}:${item.id}`);
+      const updated = await requestJson<Project>(
+        `/api/projects/${selectedId}/reference-library/${kind}/${item.id}/reference-audio`,
+        {
+          method: 'DELETE'
+        }
+      );
+      setProject(updated);
+      setReferenceAssetVersionIndices((current) => ({
+        ...current,
+        [referenceDraftKey(kind, item.id)]: 0
+      }));
+      setNotice(`角色“${item.name}”的参考音频已移除`);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '移除参考音频失败');
     } finally {
       setPending('');
     }
@@ -2251,6 +2330,7 @@ export function App() {
                               const key = referenceDraftKey(kind, item.id);
                               const librarySelectionKey = referenceLibrarySelectionKey(kind, item.id);
                               const promptValue = referencePromptDrafts[key] ?? item.generationPrompt;
+                              const ethnicityValue = referenceEthnicityDrafts[key] ?? item.ethnicityHint;
                               const assetVersions = getReferenceAssetVersions(item);
                               const selectedAssetIndex = Math.min(
                                 referenceAssetVersionIndices[key] ?? 0,
@@ -2294,10 +2374,29 @@ export function App() {
                                     />
                                     {kind === 'character' ? (
                                       <small className="inline-note">
-                                        无参考图时，角色三视图会使用固定模板加人物外貌特点；这里的人物特点 Prompt 也会并入后续视频生成提示词。
+                                        无参考图时，角色三视图会自动把角色名、人种/族裔提示和人物外貌特点拼进实际 Prompt；这里的人物特点 Prompt 也会并入后续视频生成提示词。
                                       </small>
                                     ) : null}
                                   </label>
+                                  {kind === 'character' ? (
+                                    <label className="field">
+                                      <span>人种 / 族裔提示</span>
+                                      <input
+                                        type="text"
+                                        value={ethnicityValue}
+                                        placeholder="如：东亚面孔、白人、拉丁裔、阿拉伯裔"
+                                        onChange={(event) =>
+                                          setReferenceEthnicityDrafts((current) => ({
+                                            ...current,
+                                            [key]: event.target.value
+                                          }))
+                                        }
+                                      />
+                                      <small className="inline-note">
+                                        这项会和角色名一起拼进人物资产生成 Prompt，也会随角色参考信息一起传给后续图片和视频阶段。
+                                      </small>
+                                    </label>
+                                  ) : null}
                                   <div className="form-grid">
                                     <label className="field span-2">
                                       <span>{item.referenceImage ? '上传/更换参考图' : '上传参考图'}</span>
@@ -2320,6 +2419,32 @@ export function App() {
                                         }}
                                       />
                                     </label>
+                                    {kind === 'character' ? (
+                                      <label className="field span-2">
+                                        <span>{item.referenceAudio ? '上传/更换参考音频' : '上传参考音频'}</span>
+                                        <input
+                                          type="file"
+                                          accept="audio/*"
+                                          disabled={
+                                            Boolean(project.runState.isRunning) ||
+                                            item.status === 'running' ||
+                                            pending === `reference-audio-upload:${kind}:${item.id}`
+                                          }
+                                          onChange={(event) => {
+                                            const file = event.currentTarget.files?.[0];
+                                            event.currentTarget.value = '';
+                                            if (!file) {
+                                              return;
+                                            }
+
+                                            void handleUploadReferenceAudio(kind, item, file);
+                                          }}
+                                        />
+                                        <small className="inline-note">
+                                          这份音频只用于最终剪辑前的角色配音参考；不上传时，会自动回退到无参考音频版 TTS。
+                                        </small>
+                                      </label>
+                                    ) : null}
                                     <div className="field span-2">
                                       <span>从资产库直接选用</span>
                                       <ReferenceLibraryPicker
@@ -2395,8 +2520,34 @@ export function App() {
                                     </p>
                                   ) : kind === 'character' ? (
                                     <p className="settings-hint">
-                                      未上传人物参考图时，角色三视图会按“根据参考三视图生成提供人物的三视图，特点为
-                                      {'{外貌特点}'}”生成；这里的人物特点 Prompt 也会并入后续视频生成提示词。
+                                      未上传人物参考图时，角色三视图会自动把“角色名 + 人种/族裔提示 + 人物特点”拼进实际生成 Prompt；这里的人物特点 Prompt 也会并入后续视频生成提示词。
+                                    </p>
+                                  ) : null}
+                                  {kind === 'character' && item.referenceAudio ? (
+                                    <div className="reference-preview">
+                                      <audio src={assetUrl(item.referenceAudio.relativePath)} controls preload="none" />
+                                      <a href={assetUrl(item.referenceAudio.relativePath)} target="_blank" rel="noreferrer">
+                                        打开上传参考音频
+                                      </a>
+                                      <button
+                                        className="button ghost mini-button"
+                                        disabled={
+                                          Boolean(project.runState.isRunning) ||
+                                          item.status === 'running' ||
+                                          pending === `reference-audio-remove:${kind}:${item.id}`
+                                        }
+                                        onClick={() => void handleRemoveReferenceAudio(kind, item)}
+                                        type="button"
+                                      >
+                                        {pending === `reference-audio-remove:${kind}:${item.id}` ? '移除中...' : '移除参考音频'}
+                                      </button>
+                                    </div>
+                                  ) : null}
+                                  {kind === 'character' ? (
+                                    <p className="settings-hint">
+                                      {item.referenceAudio
+                                        ? '已上传角色参考音频；视频剪辑阶段会优先为匹配到该角色的镜头使用参考音频版 TTS，未匹配到的镜头会自动回退到无参考音频版 TTS。'
+                                        : '未上传角色参考音频时，视频剪辑阶段会自动使用无参考音频版 TTS，根据镜头的台词/旁白文字直接生成语音。'}
                                     </p>
                                   ) : null}
                                   {item.error ? <div className="error-box">{item.error}</div> : null}
@@ -2447,7 +2598,9 @@ export function App() {
                                       Boolean(project.runState.isRunning) ||
                                       item.status === 'running' ||
                                       pending === `reference-upload:${kind}:${item.id}` ||
-                                      pending === `reference-remove:${kind}:${item.id}`
+                                      pending === `reference-remove:${kind}:${item.id}` ||
+                                      pending === `reference-audio-upload:${kind}:${item.id}` ||
+                                      pending === `reference-audio-remove:${kind}:${item.id}`
                                     }
                                     onClick={() => void handleGenerateReferenceAsset(kind, item)}
                                     type="button"
@@ -3138,9 +3291,19 @@ export function App() {
                     {project.assets.finalVideo ? (
                       <div className="final-video">
                         <video src={assetUrl(project.assets.finalVideo.relativePath)} controls playsInline />
-                        <a href={assetUrl(project.assets.finalVideo.relativePath)} target="_blank" rel="noreferrer">
-                          打开最终视频
-                        </a>
+                        <div className="final-video-actions">
+                          <a className="button secondary button-link" href={finalVideoDownloadUrl(project.id)}>
+                            下载视频
+                          </a>
+                          <a
+                            className="button ghost button-link"
+                            href={assetUrl(project.assets.finalVideo.relativePath)}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            打开最终视频
+                          </a>
+                        </div>
                       </div>
                     ) : (
                       <div className="empty-card">执行第 6 阶段后会在这里预览最终成片。</div>

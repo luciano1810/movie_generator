@@ -7,8 +7,29 @@ interface FfmpegRunOptions {
   signal?: AbortSignal;
 }
 
+const DURATION_REGEX = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/;
+const AUDIO_SYNC_TOLERANCE_SECONDS = 0.05;
+
 function escapeConcatPath(filePath: string): string {
   return filePath.replace(/'/g, `'\\''`);
+}
+
+function parseDurationMatch(stderr: string): number | null {
+  const matched = stderr.match(DURATION_REGEX);
+
+  if (!matched) {
+    return null;
+  }
+
+  const hours = Number(matched[1]);
+  const minutes = Number(matched[2]);
+  const seconds = Number(matched[3]);
+
+  if (![hours, minutes, seconds].every(Number.isFinite)) {
+    return null;
+  }
+
+  return hours * 3600 + minutes * 60 + seconds;
 }
 
 function createAbortError(): Error {
@@ -68,6 +89,60 @@ async function runFfmpeg(args: string[], options: FfmpegRunOptions = {}): Promis
   });
 }
 
+export async function getMediaDurationSeconds(
+  inputPath: string,
+  options: FfmpegRunOptions = {}
+): Promise<number> {
+  const settings = getAppSettings();
+
+  if (!settings.ffmpeg.binaryPath) {
+    throw new Error('未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定可执行文件路径。');
+  }
+
+  if (options.signal?.aborted) {
+    throw createAbortError();
+  }
+
+  return await new Promise<number>((resolve, reject) => {
+    const child = spawn(settings.ffmpeg.binaryPath, ['-hide_banner', '-i', inputPath]);
+    let aborted = false;
+    let stderr = '';
+
+    const handleAbort = () => {
+      aborted = true;
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (!child.killed) {
+          child.kill('SIGKILL');
+        }
+      }, 1000).unref();
+    };
+
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+
+    child.on('error', reject);
+    child.on('close', () => {
+      options.signal?.removeEventListener('abort', handleAbort);
+
+      if (aborted) {
+        reject(createAbortError());
+        return;
+      }
+
+      const durationSeconds = parseDurationMatch(stderr);
+      if (durationSeconds === null) {
+        reject(new Error(`无法读取媒体时长: ${inputPath}`));
+        return;
+      }
+
+      resolve(durationSeconds);
+    });
+  });
+}
+
 async function hasAudioStream(inputPath: string, options: FfmpegRunOptions = {}): Promise<boolean> {
   const settings = getAppSettings();
 
@@ -122,9 +197,21 @@ async function normalizeSegmentsWithAudio(
     const sourceHasAudio = await hasAudioStream(videoPath, options);
     const segmentPath = path.join(segmentsDir, `segment-${String(index + 1).padStart(3, '0')}.mp4`);
     const args = ['-y', '-i', videoPath];
+    let targetDurationSeconds: number | null = null;
     let audioMap = '';
 
     if (audioPath) {
+      const [videoDurationSeconds, audioDurationSeconds] = await Promise.all([
+        getMediaDurationSeconds(videoPath, options),
+        getMediaDurationSeconds(audioPath, options)
+      ]);
+
+      if (audioDurationSeconds > videoDurationSeconds + AUDIO_SYNC_TOLERANCE_SECONDS) {
+        const padDurationSeconds = audioDurationSeconds - videoDurationSeconds;
+        args.push('-vf', `tpad=stop_mode=clone:stop_duration=${padDurationSeconds.toFixed(3)}`);
+        targetDurationSeconds = audioDurationSeconds;
+      }
+
       args.push('-i', audioPath);
       if (sourceHasAudio) {
         args.push(
@@ -157,6 +244,7 @@ async function normalizeSegmentsWithAudio(
       '48000',
       '-ac',
       '2',
+      ...(targetDurationSeconds === null ? [] : ['-t', targetDurationSeconds.toFixed(3)]),
       '-shortest',
       '-movflags',
       '+faststart',

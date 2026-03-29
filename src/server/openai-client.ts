@@ -373,6 +373,10 @@ function normalizeString(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
+function normalizeOptionalString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 function normalizeDuration(value: unknown, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
@@ -392,18 +396,21 @@ function createReferenceItem(
   name: string,
   summary: string,
   generationPrompt: string,
-  index: number
+  index: number,
+  ethnicityHint = ''
 ): ReferenceAssetItem {
   return {
     id: makeReferenceId(kind, name, index),
     kind,
     name,
     summary,
+    ethnicityHint,
     generationPrompt,
     status: 'idle',
     error: null,
     updatedAt: new Date().toISOString(),
     referenceImage: null,
+    referenceAudio: null,
     asset: null,
     assetHistory: []
   };
@@ -532,6 +539,7 @@ export async function extractReferenceLibraryFromScript(
     characters?: Array<{
       name?: string;
       summary?: string;
+      ethnicityHint?: string;
       generationPrompt?: string;
     }>;
     scenes?: Array<{
@@ -561,17 +569,19 @@ export async function extractReferenceLibraryFromScript(
 
 要求：
 1. characters.generationPrompt 由你在这个阶段直接生成人物外貌特点，供“无参考图角色三视图生成”与后续首帧/视频生成功能共用；只写稳定的人物外观与身份特征，重点描述年龄感、脸型五官、发型、体型、服装、气质、常态表情，不要写三视图、镜头运动或具体剧情动作
-2. scenes.generationPrompt 和 objects.generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一，并体现视觉风格：${settings.visualStyle}
-3. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
-4. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版
-5. 物品 prompt 要强调材质、状态、摆放方式、特写形式
-6. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
-7. 只输出 JSON，结构如下：
+2. characters.ethnicityHint 需要额外给出一个简短的人种/族裔提示，用于稳定角色的人群观感、面部特征和肤色倾向；优先依据剧本明确线索，若剧本没有明确写出，可根据角色姓名、时代、地域和语境给出最稳妥的默认提示，使用简短短语即可
+3. scenes.generationPrompt 和 objects.generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一，并体现视觉风格：${settings.visualStyle}
+4. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
+5. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版
+6. 物品 prompt 要强调材质、状态、摆放方式、特写形式
+7. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
+8. 只输出 JSON，结构如下：
 {
   "characters": [
     {
       "name": "角色名",
       "summary": "角色作用和外观摘要",
+      "ethnicityHint": "简短的人种/族裔提示",
       "generationPrompt": "人物外貌特点提示词，用于无参考图角色三视图生成和后续首帧/视频约束"
     }
   ],
@@ -607,7 +617,8 @@ ${JSON.stringify(script, null, 2)}`
       normalizeString(item.name, `角色${index + 1}`),
       normalizeString(item.summary, '核心角色设定'),
       normalizeString(item.generationPrompt, normalizeString(item.summary, `${settings.visualStyle}，人物外观与服装特征稳定设定`)),
-      index
+      index,
+      normalizeOptionalString(item.ethnicityHint)
     )
   );
 

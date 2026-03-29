@@ -99,7 +99,8 @@ npm start
 - 真实项目里，最稳妥的做法是从你自己的 ComfyUI 里导出 API Workflow JSON，再替换模板
 - 现在支持为人物资产、分镜图片、文生图、参考图生图、图片编辑、文生视频、图生视频、TTS 八类任务分别绑定不同工作流
 - `COMFYUI_TTS_WORKFLOW` 是可选配置；如果未配置，分镜里的背景声音 prompt 和台词/旁白 prompt 会自动合并到视频工作流的 `{{prompt}}` 输入
-- 如果配置了可用的 `COMFYUI_TTS_WORKFLOW`，项目在“视频剪辑”阶段会先按镜头生成 TTS 配音，再把配音混入各个视频片段并导出最终成片
+- 默认 TTS 现在分成两条：参考音频版工作流作为默认模板；当镜头没有可用的角色参考音频时，视频剪辑阶段会自动回退到无参考音频版，直接根据对白文字生成语音
+- 如果配置了可用的 `COMFYUI_TTS_WORKFLOW`，项目在“视频剪辑”阶段会先按镜头生成 TTS 配音，再按对白长度自动对齐视频片段时长，最后把配音混入各个视频片段并导出最终成片
 - 当前主流程实际会使用到：人物资产、分镜图片、文生图、参考图生图、图生视频、TTS；图片阶段会优先使用 `storyboard_image` 工作流，若未配置则回退到 `image_edit`，缺少参考图时再回退到 `text_to_image`
 
 ### 支持的占位符
@@ -146,6 +147,18 @@ npm start
 - `{{scene_number}}`
 - `{{shot_number}}`
 - `{{seed}}`
+- `{{dialogue}}`
+- `{{voiceover}}`
+- `{{speech_prompt}}`
+- `{{tts_script}}`
+- `{{tts_plain_text}}`
+- `{{tts_role_1_name}}`
+- `{{tts_role_2_name}}`
+- `{{tts_role_3_name}}`
+- `{{narrator_reference_audio}}`
+- `{{speaker_1_reference_audio}}`
+- `{{speaker_2_reference_audio}}`
+- `{{tts_default_speaker}}`
 
 说明：
 
@@ -175,6 +188,21 @@ npm start
 项目默认的图生视频工作流现在是 `config/workflows/ltx_2.3_ti2v_api.template.json`。这份模板已经接好 `{{input_image}}`、`{{prompt}}`、`{{negative_prompt}}`、`{{fps}}`、`{{frame_count}}`、`{{latent_video_width}}`、`{{latent_video_height}}`、`{{output_prefix}}` 和 `{{seed}}`，可以直接作为 LTX 2.3 的默认视频工作流使用。
 
 `config/workflows/video-workflow.template.json` 仍然保留为通用占位示例；如果你以后切换到别的视频模型，可以继续替换成自己的 API Workflow JSON。
+
+### TTS 模板
+
+项目现在内置了两份默认 TTS 模板：
+
+- `config/workflows/qwen3_tts_no_reference.template.json`
+  用于“无参考音频版”默认配音，直接根据镜头对白/旁白文字和 `speechPrompt` 生成语音
+- `config/workflows/qwen3_tts_dialogue.template.json`
+  用于“参考音频版”多角色配音，它是根据你提供的 LTX 2.3 全栈工作流里那条 Qwen3 TTS 多角色支线整理出来的 API 模板
+
+系统设置中的默认 `COMFYUI_TTS_WORKFLOW` 现在会指向参考音频版模板；如果镜头里匹配到的角色没有上传可用参考音频，视频剪辑阶段会自动回退到无参考音频版模板继续执行。
+
+参考音频版模板内部使用 `{{tts_script}}` 作为多角色对话脚本，后台会自动把每个镜头的 `dialogue` / `voiceover` 整理成 `旁白`、`角色1`、`角色2` 三类角色脚本，并注入 `{{narrator_reference_audio}}`、`{{speaker_1_reference_audio}}`、`{{speaker_2_reference_audio}}`。当角色资产上传了参考音频后，匹配到该角色的镜头会优先使用这些角色参考音色。
+
+无参考音频版模板使用 `{{tts_plain_text}}` 作为纯朗读文本，不带角色标签；当镜头没有上传可用角色参考音频时，会自动回退到这条默认链路。
 
 建议步骤：
 
