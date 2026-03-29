@@ -14,6 +14,8 @@ import {
   type StageId,
   createIdleRunState,
   createEmptyReferenceLibrary,
+  filterReferenceLibraryForShot,
+  normalizeStoryboardShots,
   STAGES,
   STAGE_LABELS
 } from '../shared/types.js';
@@ -196,6 +198,15 @@ async function persistReferenceLibrary(project: Project): Promise<void> {
     JSON.stringify(project.referenceLibrary, null, 2)
   );
   project.artifacts.referenceLibraryJson = libraryFile.relativePath;
+}
+
+async function persistStoryboard(project: Project): Promise<void> {
+  const storyboardFile = await writeProjectFile(
+    project.id,
+    'storyboard/storyboard.json',
+    JSON.stringify({ shots: project.storyboard }, null, 2)
+  );
+  project.artifacts.storyboardJson = storyboardFile.relativePath;
 }
 
 function hasGeneratedMediaOutputs(project: Project): boolean {
@@ -487,20 +498,20 @@ function hasConfiguredTtsWorkflow(appSettings: AppSettings): boolean {
   return getRuntimeStatus(appSettings).ttsWorkflowExists;
 }
 
-function getAllReferenceItems(project: Project): ReferenceAssetItem[] {
+function getAllReferenceItems(referenceLibrary: Project['referenceLibrary']): ReferenceAssetItem[] {
   return [
-    ...project.referenceLibrary.characters,
-    ...project.referenceLibrary.scenes,
-    ...project.referenceLibrary.objects
+    ...referenceLibrary.characters,
+    ...referenceLibrary.scenes,
+    ...referenceLibrary.objects
   ];
 }
 
-function buildReferenceContext(project: Project): string {
+function buildReferenceContext(referenceLibrary: Project['referenceLibrary']): string {
   const sections: string[] = [];
   const collections: Array<[ReferenceAssetKind, string, ReferenceAssetItem[]]> = [
-    ['character', '角色参考', project.referenceLibrary.characters],
-    ['scene', '场景参考', project.referenceLibrary.scenes],
-    ['object', '物品参考', project.referenceLibrary.objects]
+    ['character', '角色参考', referenceLibrary.characters],
+    ['scene', '场景参考', referenceLibrary.scenes],
+    ['object', '物品参考', referenceLibrary.objects]
   ];
 
   for (const [_kind, label, items] of collections) {
@@ -524,7 +535,8 @@ function buildVideoCharacterReferencePrompt(
   shot: Project['storyboard'][number]
 ): string {
   const hasSpeechContent = Boolean(shot.dialogue.trim() || shot.voiceover.trim());
-  const characters = project.referenceLibrary.characters
+  const referenceLibrary = filterReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const characters = referenceLibrary.characters
     .map((item) => ({
       name: item.name.trim(),
       detail: item.generationPrompt.trim() || item.summary.trim()
@@ -542,11 +554,42 @@ function buildVideoCharacterReferencePrompt(
   const selectedCharacters = (matchedCharacters.length ? matchedCharacters : characters).slice(0, hasSpeechContent ? 4 : 6);
 
   return [
-    hasSpeechContent ? '人物特征与说话者识别：' : '人物特征约束：',
+    hasSpeechContent ? '人物一致性与说话者识别：' : '人物一致性约束：',
     ...selectedCharacters.map((item) => `- ${item.name}：${item.detail}`),
     hasSpeechContent
-      ? '镜头内如有对白或旁白，必须根据这些人物外观、身份和气质特征明确当前说话者，并让对应人物的口型、表情、动作与发声主体一致，不要只写角色名。'
-      : '保持人物外观、服装和气质稳定一致。'
+      ? '上述设定属于硬约束：脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和气质保持稳定。镜头内如有对白或旁白，必须根据这些人物外观、身份和气质特征明确当前说话者，并让对应人物的口型、表情、动作与发声主体一致，不要只写角色名。'
+      : '上述设定属于硬约束：脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和气质保持稳定，除非剧情明确要求，否则不要擅自换脸、换装或改变人物年龄感。'
+  ].join('\n');
+}
+
+function sanitizeVideoPromptText(text: string): string {
+  return text
+    .trim()
+    .replace(/[“”"「」『』]/g, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n');
+}
+
+function buildVideoShotDirectivePrompt(shot: Project['storyboard'][number]): string {
+  const camera = sanitizeVideoPromptText(shot.camera);
+  const composition = sanitizeVideoPromptText(shot.composition);
+
+  return [
+    '镜头要求：',
+    camera ? `- 景别与运镜：${camera}` : '',
+    composition ? `- 构图与主体：${composition}` : '',
+    `- 时长节奏：按 ${shot.durationSeconds} 秒镜头完整展开动作与表演，保留起势、过程、停顿和收势，不要在前半段过快完成全部信息，也不要突然硬切、突然停住或仓促收尾。`
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function buildVideoContinuityPrompt(): string {
+  return [
+    '连贯性要求：',
+    '- 镜头内部优先通过人物走位、视线变化、前后景层次和轻微运镜推进节奏，不要频繁跳变构图或突然切到另一个状态。',
+    '- 表演与动作要连续自然，保留细微停顿、呼吸感和余韵，避免生硬跳切感。'
   ].join('\n');
 }
 
@@ -567,14 +610,18 @@ async function uploadImageToComfyCached(
 
 async function buildGenerationReferenceInputs(
   project: Project,
-  uploadCache: Map<string, string>
+  uploadCache: Map<string, string>,
+  shot?: Project['storyboard'][number]
 ): Promise<GenerationReferenceInputs> {
   const signal = getProjectAbortSignal(project.id);
-  const referenceContext = buildReferenceContext(project);
+  const referenceLibrary = shot
+    ? filterReferenceLibraryForShot(project.referenceLibrary, shot, project.script)
+    : project.referenceLibrary;
+  const referenceContext = buildReferenceContext(referenceLibrary);
   const collections: Array<[ReferenceAssetKind, ReferenceAssetItem[]]> = [
-    ['character', project.referenceLibrary.characters],
-    ['scene', project.referenceLibrary.scenes],
-    ['object', project.referenceLibrary.objects]
+    ['character', referenceLibrary.characters],
+    ['scene', referenceLibrary.scenes],
+    ['object', referenceLibrary.objects]
   ];
   const preparedByKind = {
     character: [] as Array<Record<string, TemplateVariable>>,
@@ -623,12 +670,12 @@ async function buildGenerationReferenceInputs(
 
   return {
     referenceContext,
-    referenceCount: getAllReferenceItems(project).length,
+    referenceCount: getAllReferenceItems(referenceLibrary).length,
     referenceImageCount,
     referenceImages,
     referenceVariables: {
       reference_context: referenceContext,
-      reference_count: getAllReferenceItems(project).length,
+      reference_count: getAllReferenceItems(referenceLibrary).length,
       reference_image_count: referenceImageCount,
       reference_assets: referenceAssets,
       reference_assets_json: JSON.stringify(referenceAssets),
@@ -658,22 +705,46 @@ function appendReferenceContext(prompt: string, referenceContext: string): strin
   return `${prompt}\n\n参考资产约束：\n${referenceContext}`;
 }
 
+function buildFirstFrameShotDirectivePrompt(shot: Project['storyboard'][number]): string {
+  const detailLines = [
+    `- 镜头标题与作用：${shot.title.trim()}，${shot.purpose.trim()}`,
+    `- 景别与机位：${shot.camera.trim()}`,
+    `- 构图与主体：${shot.composition.trim()}`,
+    '- 定格要求：这是镜头开始瞬间的静态画面，要明确主体位置、朝向、视线、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次。',
+    '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物起始动作，不要只写剧情概述，不要只写某人正在做某事这种过于简略的提示。'
+  ];
+
+  if (shot.dialogue.trim()) {
+    detailLines.push(`- 对白语境：镜头相关台词为${shot.dialogue.trim()}。这句台词只用于帮助理解人物状态与冲突，不要直接生成字幕文字。`);
+  }
+
+  if (shot.voiceover.trim()) {
+    detailLines.push(`- 旁白语境：镜头相关画外音为${shot.voiceover.trim()}。仅用于帮助理解情绪和信息，不要直接生成字幕文字。`);
+  }
+
+  return ['首帧画面要求：', ...detailLines].join('\n');
+}
+
 function buildFirstFrameWorkflowPrompt(
   shot: Project['storyboard'][number],
   workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video'
 ): string {
   const basePrompt = shot.firstFramePrompt.trim();
+  const parts = [
+    buildFirstFrameShotDirectivePrompt(shot),
+    basePrompt,
+    '补充要求：把镜头开场一瞬间写实地冻结成一张完整画面，优先具体化角色状态、空间关系和环境信息。'
+  ];
 
-  if (workflow !== 'storyboard_image' && workflow !== 'image_edit') {
-    return basePrompt;
+  if (workflow === 'storyboard_image' || workflow === 'image_edit') {
+    parts.push(
+      '生成要求：基于参考输入重新生成一张全新的镜头首帧。',
+      '参考输入只用于提取人物身份、造型、服装、场景、物品和整体风格约束，不要把它当作待修补、待微调或待局部重绘的底图。',
+      '最终结果必须是一张新的完整画面，可以重新组织机位、景别、构图、动作、光线和背景，但要保持参考信息中的关键设定一致。'
+    );
   }
 
-  return [
-    basePrompt,
-    '生成要求：基于参考输入重新生成一张全新的镜头首帧。',
-    '参考输入只用于提取人物身份、造型、服装、场景、物品和整体风格约束，不要把它当作待修补、待微调或待局部重绘的底图。',
-    '最终结果必须是一张新的完整画面，可以重新组织机位、景别、构图、动作、光线和背景，但要保持参考信息中的关键设定一致。'
-  ].join('\n\n');
+  return parts.filter(Boolean).join('\n\n');
 }
 
 function buildMergedVideoPrompt(
@@ -684,10 +755,11 @@ function buildMergedVideoPrompt(
   }
 ): string {
   const hasSpeechContent = Boolean(shot.dialogue.trim() || shot.voiceover.trim());
-  const parts = [shot.videoPrompt.trim()];
+  const videoPrompt = sanitizeVideoPromptText(shot.videoPrompt);
   const characterPrompt = buildVideoCharacterReferencePrompt(project, shot);
-  const backgroundSoundPrompt = shot.backgroundSoundPrompt.trim();
-  const speechPrompt = shot.speechPrompt.trim();
+  const backgroundSoundPrompt = sanitizeVideoPromptText(shot.backgroundSoundPrompt);
+  const speechPrompt = sanitizeVideoPromptText(shot.speechPrompt);
+  const parts = [buildVideoShotDirectivePrompt(shot), videoPrompt, buildVideoContinuityPrompt()];
 
   if (characterPrompt) {
     parts.push(characterPrompt);
@@ -721,21 +793,23 @@ function buildMergedVideoPrompt(
 }
 
 function appendTransitionHint(prompt: string, shot: Project['storyboard'][number]): string {
-  const transitionHint = shot.transitionHint.trim();
+  const transitionHint = sanitizeVideoPromptText(shot.transitionHint);
 
   if (!transitionHint) {
     return prompt;
   }
 
-  return `${prompt}\n\n镜头衔接要求：${transitionHint}`;
+  return `${prompt}\n\n镜头衔接要求：${transitionHint}。优先通过动作延续、视线延续、空间方向延续或情绪延续自然进入下一镜，避免突兀跳切。`;
 }
 
 function getVideoWorkflowPrompt(project: Project, shot: Project['storyboard'][number], appSettings: AppSettings): string {
-  return appendTransitionHint(
-    buildMergedVideoPrompt(project, shot, {
-      includeSpeechPrompt: !hasConfiguredTtsWorkflow(appSettings)
-    }),
-    shot
+  return sanitizeVideoPromptText(
+    appendTransitionHint(
+      buildMergedVideoPrompt(project, shot, {
+        includeSpeechPrompt: !hasConfiguredTtsWorkflow(appSettings)
+      }),
+      shot
+    )
   );
 }
 
@@ -1019,10 +1093,10 @@ function buildSegmentVideoPrompt(
   }
 
   if (segmentIndex === segmentCount - 1) {
-    return `${basePrompt}\n\n本段是长镜头的收尾段，结尾画面必须收束到以下尾帧描述：${shot.lastFramePrompt}`;
+    return `${basePrompt}\n\n本段是长镜头的收尾段，动作、表演和运镜必须自然减速并收束到以下尾帧描述，不要突然停帧或骤然切换：${sanitizeVideoPromptText(shot.lastFramePrompt)}`;
   }
 
-  return `${basePrompt}\n\n本段是长镜头的第 ${segmentIndex + 1}/${segmentCount} 段，保持人物、机位、动作与光线连续，暂时不要提前收束到最终尾帧。`;
+  return `${basePrompt}\n\n本段是长镜头的第 ${segmentIndex + 1}/${segmentCount} 段，保持人物、机位、动作、表演与光线连续，让动作自然延续并留出下一段承接空间，暂时不要提前收束到最终尾帧，也不要突然切断当前动作。`;
 }
 
 function pickOutputFile(files: ComfyOutputFile[], kind: 'image' | 'video' | 'audio'): ComfyOutputFile {
@@ -1613,20 +1687,29 @@ async function runStoryboardStage(project: Project): Promise<void> {
   }
 
   appendLog(project, '开始根据剧本拆解分镜。');
+  project.storyboard = [];
+  await persistStoryboard(project);
   await saveProject(project);
 
   const storyboard = await generateStoryboardFromScript(project.script, project.settings, {
-    signal: getProjectAbortSignal(project.id)
+    signal: getProjectAbortSignal(project.id),
+    onSceneStart: async ({ scene, completedScenes, totalScenes }) => {
+      await throwIfRunInterrupted(project.id, 'storyboard');
+      appendLog(project, `分镜生成 ${completedScenes + 1}/${totalScenes}: 场景 ${scene.sceneNumber}`);
+      await saveProject(project);
+    },
+    onSceneGenerated: async ({ scene, sceneShots, storyboard: partialStoryboard, completedScenes, totalScenes }) => {
+      project.storyboard = partialStoryboard;
+      await persistStoryboard(project);
+      appendLog(
+        project,
+        `场景 ${scene.sceneNumber} 分镜生成完成，新增 ${sceneShots.length} 个镜头，当前已完成 ${completedScenes}/${totalScenes} 个场景，累计 ${partialStoryboard.length} 个镜头。`
+      );
+      await saveProject(project);
+    }
   });
   project.storyboard = storyboard;
-
-  const jsonFile = await writeProjectFile(
-    project.id,
-    'storyboard/storyboard.json',
-    JSON.stringify({ shots: storyboard }, null, 2)
-  );
-
-  project.artifacts.storyboardJson = jsonFile.relativePath;
+  await persistStoryboard(project);
   appendLog(
     project,
     `分镜生成完成，共 ${storyboard.length} 个镜头，总时长 ${storyboard.at(-1)?.endTimecode ?? '00:00'}。`
@@ -1710,6 +1793,10 @@ async function generateImageAssetForShot(
   generationReferenceInputs: GenerationReferenceInputs
 ): Promise<GeneratedAsset> {
   const signal = getProjectAbortSignal(project.id);
+  const generationPrompt = appendReferenceContext(
+    buildFirstFrameWorkflowPrompt(shot, selectedWorkflow.type),
+    generationReferenceInputs.referenceContext
+  );
   let buffer: Buffer;
   let extension: string;
 
@@ -1746,7 +1833,7 @@ async function generateImageAssetForShot(
   }
 
   const saved = await writeProjectFile(project.id, buildShotAssetOutputPath('images', shot.id, extension), buffer);
-  return buildAsset(saved.relativePath, shot.firstFramePrompt, shot.sceneNumber, shot.id);
+  return buildAsset(saved.relativePath, generationPrompt, shot.sceneNumber, shot.id);
 }
 
 async function generateVideoAssetForShot(
@@ -1906,16 +1993,15 @@ async function runImageStage(project: Project): Promise<void> {
 
   const appSettings = getAppSettings();
   const referenceUploadCache = new Map<string, string>();
-  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache);
-  const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
-  appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
-  await saveProject(project);
 
   for (let index = 0; index < project.storyboard.length; index += 1) {
     await throwIfRunInterrupted(project.id, 'images');
 
     const shot = project.storyboard[index];
+    const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
+    const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
     appendLog(project, `首帧生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
+    appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
     await saveProject(project);
 
     const imageAsset = await generateImageAssetForShot(project, shot, appSettings, selectedWorkflow, generationReferenceInputs);
@@ -1957,22 +2043,21 @@ async function runVideoStage(project: Project): Promise<void> {
   }
 
   const referenceUploadCache = new Map<string, string>();
-  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache);
-  appendLog(
-    project,
-    generationReferenceInputs.referenceCount
-      ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
-      : '资产库暂无可用参考项，视频生成将仅使用镜头 Prompt 和首尾帧。',
-    generationReferenceInputs.referenceCount ? 'info' : 'warn'
-  );
-  await saveProject(project);
 
   for (let index = 0; index < project.storyboard.length; index += 1) {
     await throwIfRunInterrupted(project.id, 'videos');
 
     const shot = project.storyboard[index];
+    const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
 
     appendLog(project, `视频生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
+    appendLog(
+      project,
+      generationReferenceInputs.referenceCount
+        ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
+        : '当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和首尾帧。',
+      generationReferenceInputs.referenceCount ? 'info' : 'warn'
+    );
     await saveProject(project);
     const videoAsset = await generateVideoAssetForShot(project, shot, appSettings, generationReferenceInputs);
     setActiveShotAsset(project, 'videos', shot.id, videoAsset);
@@ -2442,7 +2527,7 @@ async function executeStoryboardShotImageGeneration(projectId: string, shotId: s
 
   const appSettings = getAppSettings();
   const referenceUploadCache = new Map<string, string>();
-  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache);
+  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
   const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
   appendLog(project, `开始为镜头 ${shot.title} 单独执行首帧生成。`);
   appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
@@ -2498,13 +2583,13 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
   }
 
   const referenceUploadCache = new Map<string, string>();
-  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache);
+  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
   appendLog(project, `开始为镜头 ${shot.title} 单独生成视频片段。`);
   appendLog(
     project,
     generationReferenceInputs.referenceCount
-      ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
-      : '资产库暂无可用参考项，视频生成将仅使用镜头 Prompt 和首尾帧。',
+      ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
+      : '当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和首尾帧。',
     generationReferenceInputs.referenceCount ? 'info' : 'warn'
   );
   await saveProject(project);
@@ -2616,6 +2701,7 @@ export async function updateStoryboardShotPrompts(
   projectId: string,
   shotId: string,
   input: {
+    durationSeconds?: number;
     firstFramePrompt?: string;
     lastFramePrompt?: string;
     transitionHint?: string;
@@ -2636,6 +2722,23 @@ export async function updateStoryboardShotPrompts(
   let shouldInvalidateImageOutputs = false;
   let shouldInvalidateVideoOutputs = false;
   let shouldInvalidateEditOutput = false;
+  let shouldRecalculateStoryboardTimeline = false;
+
+  if (input.durationSeconds !== undefined) {
+    const parsedDuration = Number(input.durationSeconds);
+
+    if (!Number.isFinite(parsedDuration) || parsedDuration <= 0) {
+      throw new Error('镜头时长必须为正整数秒。');
+    }
+
+    const nextDuration = Math.round(parsedDuration);
+    if (shot.durationSeconds !== nextDuration) {
+      shot.durationSeconds = nextDuration;
+      changes.push('镜头时长');
+      shouldInvalidateVideoOutputs = true;
+      shouldRecalculateStoryboardTimeline = true;
+    }
+  }
 
   if (input.firstFramePrompt !== undefined) {
     const nextPrompt = input.firstFramePrompt.trim();
@@ -2726,6 +2829,10 @@ export async function updateStoryboardShotPrompts(
     return project;
   }
 
+  if (shouldRecalculateStoryboardTimeline) {
+    project.storyboard = normalizeStoryboardShots(project.storyboard, project.settings);
+  }
+
   if (shouldInvalidateImageOutputs) {
     clearActiveShotAsset(project, 'images', shotId);
     clearActiveShotAsset(project, 'videos', shotId);
@@ -2753,6 +2860,7 @@ export async function updateStoryboardShotPrompts(
         ? `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新执行视频剪辑以更新配音。`
       : `镜头 ${shot.title} 的${changes.join('、')}已更新。`
   );
+  await persistStoryboard(project);
   await saveProject(project);
   return project;
 }

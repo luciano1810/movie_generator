@@ -235,6 +235,105 @@ export interface AppMeta {
   workflowPaths: Record<ComfyWorkflowType, string>;
 }
 
+function normalizeReferenceSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\s"'`“”‘’「」『』（）()【】[\]{}<>《》，,。.!！？?；;：:/\\|_-]+/g, '')
+    .trim();
+}
+
+function normalizedTextMatches(left: string, right: string): boolean {
+  const normalizedLeft = normalizeReferenceSearchText(left);
+  const normalizedRight = normalizeReferenceSearchText(right);
+
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  return normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft);
+}
+
+function buildShotReferenceSearchTexts(shot: StoryboardShot): string[] {
+  return [
+    shot.title,
+    shot.purpose,
+    shot.dialogue,
+    shot.voiceover,
+    shot.camera,
+    shot.composition,
+    shot.transitionHint,
+    shot.firstFramePrompt,
+    shot.lastFramePrompt,
+    shot.videoPrompt,
+    shot.backgroundSoundPrompt,
+    shot.speechPrompt
+  ].filter(Boolean);
+}
+
+function buildSceneReferenceSearchTexts(scene: ScriptScene | null): string[] {
+  if (!scene) {
+    return [];
+  }
+
+  return [
+    scene.location,
+    scene.timeOfDay,
+    scene.summary,
+    scene.emotionalBeat,
+    scene.voiceover,
+    ...scene.dialogue.flatMap((line) => [line.character, line.line, line.performanceNote])
+  ].filter(Boolean);
+}
+
+function matchesAnySearchText(searchTexts: string[], candidate: string): boolean {
+  return searchTexts.some((text) => normalizedTextMatches(text, candidate));
+}
+
+export function filterReferenceLibraryForShot(
+  referenceLibrary: ProjectReferenceLibrary,
+  shot: StoryboardShot,
+  script: ScriptPackage | null
+): ProjectReferenceLibrary {
+  const scriptScene = script?.scenes.find((scene) => scene.sceneNumber === shot.sceneNumber) ?? null;
+  const shotSearchTexts = buildShotReferenceSearchTexts(shot);
+  const sceneSearchTexts = buildSceneReferenceSearchTexts(scriptScene);
+  const dialogueText = normalizeReferenceSearchText(shot.dialogue);
+  const matchedDialogueSpeakers = new Set(
+    (scriptScene?.dialogue ?? [])
+      .filter((line) => {
+        const lineText = normalizeReferenceSearchText(line.line);
+        return Boolean(dialogueText && lineText && (dialogueText.includes(lineText) || lineText.includes(dialogueText)));
+      })
+      .map((line) => normalizeReferenceSearchText(line.character))
+      .filter(Boolean)
+  );
+
+  const characters = referenceLibrary.characters.filter((item) => {
+    const normalizedName = normalizeReferenceSearchText(item.name);
+    return (
+      matchesAnySearchText(shotSearchTexts, item.name) ||
+      matchesAnySearchText(sceneSearchTexts, item.name) ||
+      (normalizedName ? matchedDialogueSpeakers.has(normalizedName) : false)
+    );
+  });
+
+  const scenes = referenceLibrary.scenes.filter(
+    (item) =>
+      matchesAnySearchText(shotSearchTexts, item.name) ||
+      matchesAnySearchText(sceneSearchTexts, item.name) ||
+      matchesAnySearchText(sceneSearchTexts, item.summary)
+  );
+
+  const objects = referenceLibrary.objects.filter((item) => matchesAnySearchText(shotSearchTexts, item.name));
+
+  return {
+    characters:
+      characters.length || referenceLibrary.characters.length !== 1 ? characters : referenceLibrary.characters.slice(0, 1),
+    scenes: scenes.length || referenceLibrary.scenes.length !== 1 ? scenes : referenceLibrary.scenes.slice(0, 1),
+    objects
+  };
+}
+
 export const STAGE_LABELS: Record<StageId, string> = {
   script: '剧本生成',
   assets: '资产生成',

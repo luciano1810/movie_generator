@@ -12,7 +12,14 @@ import type {
   RunStage,
   StageId
 } from '../shared/types';
-import { ASPECT_RATIOS, DEFAULT_SETTINGS, SCRIPT_MODES, STAGES, STAGE_LABELS } from '../shared/types';
+import {
+  ASPECT_RATIOS,
+  DEFAULT_SETTINGS,
+  filterReferenceLibraryForShot,
+  SCRIPT_MODES,
+  STAGES,
+  STAGE_LABELS
+} from '../shared/types';
 import { SettingsDialog } from './SettingsDialog';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
@@ -61,6 +68,7 @@ interface ShotAudioPromptDraft {
 }
 
 interface ShotTechnicalDraft {
+  durationSeconds: string;
   firstFramePrompt: string;
   lastFramePrompt: string;
   transitionHint: string;
@@ -207,6 +215,30 @@ function formatTime(iso: string | null | undefined): string {
 
 function formatShotTimeline(shot: Pick<Project['storyboard'][number], 'startTimecode' | 'endTimecode' | 'durationSeconds'>): string {
   return `${shot.startTimecode} - ${shot.endTimecode} · ${shot.durationSeconds}s`;
+}
+
+function parsePositiveIntegerDraft(value: string): number | null {
+  const trimmed = value.trim();
+
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function buildShotTechnicalDraft(
+  shot: Project['storyboard'][number],
+  existing: ShotTechnicalDraft | undefined,
+  patch: Partial<ShotTechnicalDraft>
+): ShotTechnicalDraft {
+  return {
+    durationSeconds: patch.durationSeconds ?? existing?.durationSeconds ?? String(shot.durationSeconds),
+    firstFramePrompt: patch.firstFramePrompt ?? existing?.firstFramePrompt ?? shot.firstFramePrompt,
+    lastFramePrompt: patch.lastFramePrompt ?? existing?.lastFramePrompt ?? shot.lastFramePrompt,
+    transitionHint: patch.transitionHint ?? existing?.transitionHint ?? shot.transitionHint
+  };
 }
 
 function statusLabel(status: Project['stages'][StageId]['status']): string {
@@ -635,6 +667,48 @@ function allReferenceItems(project: Project): ReferenceAssetItem[] {
 
 function countGeneratedReferenceAssets(project: Project): number {
   return allReferenceItems(project).filter((item) => item.asset).length;
+}
+
+function getShotReferencePreviewItems(
+  project: Project,
+  shot: Project['storyboard'][number]
+): Array<{
+  kind: ReferenceAssetKind;
+  itemId: string;
+  name: string;
+  summary: string;
+  asset: GeneratedAsset;
+}> {
+  const referenceLibrary = filterReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const previewItems: Array<{
+    kind: ReferenceAssetKind;
+    itemId: string;
+    name: string;
+    summary: string;
+    asset: GeneratedAsset;
+  }> = [];
+
+  for (const [kind, items] of [
+    ['scene', referenceLibrary.scenes],
+    ['character', referenceLibrary.characters],
+    ['object', referenceLibrary.objects]
+  ] as Array<[ReferenceAssetKind, ReferenceAssetItem[]]>) {
+    for (const item of items) {
+      if (!item.asset) {
+        continue;
+      }
+
+      previewItems.push({
+        kind,
+        itemId: item.id,
+        name: item.name,
+        summary: item.summary,
+        asset: item.asset
+      });
+    }
+  }
+
+  return previewItems;
 }
 
 function getReferenceAssetVersions(item: ReferenceAssetItem): GeneratedAsset[] {
@@ -1413,16 +1487,19 @@ export function App() {
         const next = { ...current };
         const nextLastFramePrompt = existing.lastFramePrompt ?? shot.lastFramePrompt;
         const nextTransitionHint = existing.transitionHint ?? shot.transitionHint;
+        const nextDurationSeconds = existing.durationSeconds ?? String(shot.durationSeconds);
 
         if (
           nextLastFramePrompt.trim() === shot.lastFramePrompt.trim() &&
-          nextTransitionHint.trim() === shot.transitionHint.trim()
+          nextTransitionHint.trim() === shot.transitionHint.trim() &&
+          nextDurationSeconds.trim() === String(shot.durationSeconds)
         ) {
           delete next[shotId];
           return next;
         }
 
         next[shotId] = {
+          durationSeconds: nextDurationSeconds,
           firstFramePrompt,
           lastFramePrompt: nextLastFramePrompt,
           transitionHint: nextTransitionHint
@@ -1663,9 +1740,16 @@ export function App() {
     }
 
     const draft = technicalPromptDrafts[shotId];
+    const durationSecondsInput = draft?.durationSeconds ?? String(shot.durationSeconds);
     const firstFramePrompt = (draft?.firstFramePrompt ?? shot.firstFramePrompt).trim();
     const lastFramePrompt = (draft?.lastFramePrompt ?? shot.lastFramePrompt).trim();
     const transitionHint = (draft?.transitionHint ?? shot.transitionHint).trim();
+    const durationSeconds = parsePositiveIntegerDraft(durationSecondsInput);
+
+    if (durationSeconds === null) {
+      setNotice('镜头时长必须为正整数秒');
+      return;
+    }
 
     if (!firstFramePrompt) {
       setNotice('首帧 Prompt 不能为空');
@@ -1687,6 +1771,7 @@ export function App() {
       const updated = await requestJson<Project>(`/api/projects/${selectedId}/storyboard/${shotId}/prompts`, {
         method: 'PUT',
         body: JSON.stringify({
+          durationSeconds,
           firstFramePrompt,
           lastFramePrompt,
           transitionHint
@@ -2503,6 +2588,7 @@ export function App() {
                       <div className="shots-grid">
                         {project.storyboard.map((shot) => {
                           const technicalPromptDraft = technicalPromptDrafts[shot.id];
+                          const shotReferencePreviewItems = getShotReferencePreviewItems(project, shot);
                           const firstFramePromptValue = technicalPromptDraft?.firstFramePrompt ?? shot.firstFramePrompt;
                           const imagePromptDirty = firstFramePromptValue.trim() !== shot.firstFramePrompt.trim();
                           const imagePromptPending = pending === `image-prompt:${shot.id}`;
@@ -2526,6 +2612,45 @@ export function App() {
                                 <span>{imageAsset ? '当前版本已就绪' : selectedImage ? '可从历史版本恢复' : '未生成'}</span>
                               </div>
                               <h4>{shot.title}</h4>
+                              {shotReferencePreviewItems.length ? (
+                                <div className="input-reference-strip">
+                                  <div className="input-reference-strip-head">
+                                    <span>输入参考图</span>
+                                    <small>
+                                      {shotReferencePreviewItems.length} 张，仅注入当前镜头出现的场景 / 角色 / 物品
+                                    </small>
+                                  </div>
+                                  <div className="input-reference-strip-track">
+                                    {shotReferencePreviewItems.map((reference) => (
+                                      <a
+                                        key={`${reference.kind}:${reference.itemId}`}
+                                        className="input-reference-chip"
+                                        href={assetUrl(reference.asset.relativePath)}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        title={
+                                          reference.summary
+                                            ? `${referenceKindLabel(reference.kind)} · ${reference.name}\n${reference.summary}`
+                                            : `${referenceKindLabel(reference.kind)} · ${reference.name}`
+                                        }
+                                      >
+                                        <img
+                                          src={assetUrl(reference.asset.relativePath)}
+                                          alt={`${referenceKindLabel(reference.kind)} ${reference.name}`}
+                                        />
+                                        <div className="input-reference-chip-copy">
+                                          <strong>{reference.name}</strong>
+                                          <small>{referenceKindLabel(reference.kind)}</small>
+                                        </div>
+                                      </a>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="input-reference-empty">
+                                  当前镜头没有匹配到可注入的参考图，首帧生成将只使用 Prompt。
+                                </div>
+                              )}
                               <div className="prompt-block">
                                 <div className="prompt-block-head">
                                   <h5>首帧生成 Prompt</h5>
@@ -2550,11 +2675,9 @@ export function App() {
                                   onChange={(event) =>
                                     setTechnicalPromptDrafts((current) => ({
                                       ...current,
-                                      [shot.id]: {
-                                        firstFramePrompt: event.target.value,
-                                        lastFramePrompt: current[shot.id]?.lastFramePrompt ?? shot.lastFramePrompt,
-                                        transitionHint: current[shot.id]?.transitionHint ?? shot.transitionHint
-                                      }
+                                      [shot.id]: buildShotTechnicalDraft(shot, current[shot.id], {
+                                        firstFramePrompt: event.target.value
+                                      })
                                     }))
                                   }
                                   placeholder="输入这个镜头的首帧生成 Prompt"
@@ -2672,7 +2795,10 @@ export function App() {
                             technicalPromptDraft?.firstFramePrompt ?? shot.firstFramePrompt;
                           const lastFramePromptValue = technicalPromptDraft?.lastFramePrompt ?? shot.lastFramePrompt;
                           const transitionHintValue = technicalPromptDraft?.transitionHint ?? shot.transitionHint;
+                          const durationSecondsValue = technicalPromptDraft?.durationSeconds ?? String(shot.durationSeconds);
+                          const durationSecondsValid = parsePositiveIntegerDraft(durationSecondsValue) !== null;
                           const technicalPromptDirty =
+                            durationSecondsValue.trim() !== String(shot.durationSeconds) ||
                             firstFramePromptValue.trim() !== shot.firstFramePrompt.trim() ||
                             lastFramePromptValue.trim() !== shot.lastFramePrompt.trim() ||
                             transitionHintValue.trim() !== shot.transitionHint.trim();
@@ -2754,6 +2880,7 @@ export function App() {
                                       Boolean(project.runState.isRunning) ||
                                       technicalPromptPending ||
                                       !technicalPromptDirty ||
+                                      !durationSecondsValid ||
                                       !firstFramePromptValue.trim() ||
                                       !lastFramePromptValue.trim() ||
                                       !transitionHintValue.trim()
@@ -2764,6 +2891,24 @@ export function App() {
                                   </button>
                                 </div>
                                 <label className="prompt-subfield">
+                                  <span>镜头时长（秒）</span>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    step={1}
+                                    value={durationSecondsValue}
+                                    onChange={(event) =>
+                                      setTechnicalPromptDrafts((current) => ({
+                                        ...current,
+                                        [shot.id]: buildShotTechnicalDraft(shot, current[shot.id], {
+                                          durationSeconds: event.target.value
+                                        })
+                                      }))
+                                    }
+                                    placeholder="输入镜头时长"
+                                  />
+                                </label>
+                                <label className="prompt-subfield">
                                   <span>首帧 Prompt</span>
                                   <textarea
                                     className="prompt-editor"
@@ -2772,11 +2917,9 @@ export function App() {
                                     onChange={(event) =>
                                       setTechnicalPromptDrafts((current) => ({
                                         ...current,
-                                        [shot.id]: {
-                                          firstFramePrompt: event.target.value,
-                                          lastFramePrompt: current[shot.id]?.lastFramePrompt ?? shot.lastFramePrompt,
-                                          transitionHint: current[shot.id]?.transitionHint ?? shot.transitionHint
-                                        }
+                                        [shot.id]: buildShotTechnicalDraft(shot, current[shot.id], {
+                                          firstFramePrompt: event.target.value
+                                        })
                                       }))
                                     }
                                     placeholder="输入这个镜头的首帧 Prompt"
@@ -2791,12 +2934,9 @@ export function App() {
                                     onChange={(event) =>
                                       setTechnicalPromptDrafts((current) => ({
                                         ...current,
-                                        [shot.id]: {
-                                          firstFramePrompt:
-                                            current[shot.id]?.firstFramePrompt ?? shot.firstFramePrompt,
-                                          lastFramePrompt: event.target.value,
-                                          transitionHint: current[shot.id]?.transitionHint ?? shot.transitionHint
-                                        }
+                                        [shot.id]: buildShotTechnicalDraft(shot, current[shot.id], {
+                                          lastFramePrompt: event.target.value
+                                        })
                                       }))
                                     }
                                     placeholder="输入这个镜头的尾帧 Prompt"
@@ -2809,12 +2949,9 @@ export function App() {
                                     onChange={(event) =>
                                       setTechnicalPromptDrafts((current) => ({
                                         ...current,
-                                        [shot.id]: {
-                                          firstFramePrompt:
-                                            current[shot.id]?.firstFramePrompt ?? shot.firstFramePrompt,
-                                          lastFramePrompt: current[shot.id]?.lastFramePrompt ?? shot.lastFramePrompt,
+                                        [shot.id]: buildShotTechnicalDraft(shot, current[shot.id], {
                                           transitionHint: event.target.value
-                                        }
+                                        })
                                       }))
                                     }
                                     placeholder="例如：cut / match cut / fade in"

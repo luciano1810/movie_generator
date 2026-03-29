@@ -566,6 +566,8 @@ async function main(): Promise<void> {
 
       response.json(
         await updateStoryboardShotPrompts(id, shotId, {
+          durationSeconds:
+            request.body?.durationSeconds === undefined ? undefined : Number(request.body.durationSeconds),
           firstFramePrompt:
             typeof request.body?.firstFramePrompt === 'string' ? String(request.body.firstFramePrompt) : undefined,
           lastFramePrompt:
