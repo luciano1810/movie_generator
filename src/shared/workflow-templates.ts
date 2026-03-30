@@ -13,7 +13,8 @@ export const DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS: Record<ComfyWorkflowType, st
   reference_image_to_image: 'config/workflows/image-workflow.template.json',
   image_edit: 'config/workflows/firered-image-edit-1.1_api.template.json',
   text_to_video: 'config/workflows/video-workflow.template.json',
-  image_to_video: 'config/workflows/ltx_2.3_i2v_first_last_api.template.json',
+  image_to_video_first_last: 'config/workflows/ltx_2.3_i2v_first_last_api.template.json',
+  image_to_video_first_frame: 'config/workflows/ltx_2.3_i2v_modular_api.template.json',
   tts: 'config/workflows/qwen3_tts_dialogue.template.json'
 };
 
@@ -85,16 +86,23 @@ export const WORKFLOW_TEMPLATE_OPTIONS: Record<ComfyWorkflowType, WorkflowTempla
       description: '旧版文生视频模板，保留用于兼容已有链路。'
     }
   ],
-  image_to_video: [
+  image_to_video_first_last: [
     {
       path: 'config/workflows/ltx_2.3_i2v_first_last_api.template.json',
       label: 'LTX 2.3 I2V First+Last API',
-      description: '当前图生视频默认模板，支持起始帧 + 结束参考帧收束。依赖 Reimgsize 节点。'
+      description: '首尾帧视频默认模板，支持起始帧 + 结束参考帧收束。依赖 Reimgsize 节点。'
     },
+    {
+      path: 'config/workflows/video-workflow.template.json',
+      label: 'Legacy Image-to-Video Workflow',
+      description: '旧版图生视频模板，保留用于兼容历史配置。'
+    }
+  ],
+  image_to_video_first_frame: [
     {
       path: 'config/workflows/ltx_2.3_i2v_modular_api.template.json',
       label: 'LTX 2.3 I2V Modular API',
-      description: '单参考帧回退模板，用于不生成结束参考帧的镜头。依赖 Reimgsize 节点。'
+      description: '首帧视频默认模板，用于只提供起始帧、不生成结束参考帧的镜头。依赖 Reimgsize 节点。'
     },
     {
       path: 'config/workflows/video-workflow.template.json',

@@ -228,7 +228,8 @@ async function main(): Promise<void> {
         reference_image_to_image: appSettings.comfyui.workflows.reference_image_to_image.workflowPath,
         image_edit: appSettings.comfyui.workflows.image_edit.workflowPath,
         text_to_video: appSettings.comfyui.workflows.text_to_video.workflowPath,
-        image_to_video: appSettings.comfyui.workflows.image_to_video.workflowPath,
+        image_to_video_first_last: appSettings.comfyui.workflows.image_to_video_first_last.workflowPath,
+        image_to_video_first_frame: appSettings.comfyui.workflows.image_to_video_first_frame.workflowPath,
         tts: appSettings.comfyui.workflows.tts.workflowPath
       }
     };

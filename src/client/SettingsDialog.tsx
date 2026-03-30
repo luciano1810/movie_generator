@@ -43,56 +43,215 @@ export function SettingsDialog(props: SettingsDialogProps) {
     reference_image_to_image: status?.referenceImageToImageWorkflowExists ?? false,
     image_edit: status?.imageEditWorkflowExists ?? false,
     text_to_video: status?.textToVideoWorkflowExists ?? false,
-    image_to_video: status?.imageToVideoWorkflowExists ?? false,
+    image_to_video_first_last: status?.imageToVideoFirstLastWorkflowExists ?? false,
+    image_to_video_first_frame: status?.imageToVideoFirstFrameWorkflowExists ?? false,
     tts: status?.ttsWorkflowExists ?? false
   } satisfies Record<ComfyWorkflowType, boolean>;
 
-  const workflowConfigs: Array<{
-    key: ComfyWorkflowType;
-    label: string;
+  const workflowConfigs: Record<
+    ComfyWorkflowType,
+    {
+      label: string;
+      description: string;
+      purpose: string;
+    }
+  > = {
+    character_asset: {
+      label: '人物资产',
+      description: '角色参考图 / 人物设定图',
+      purpose: '用于角色资产生成，服务角色一致性和后续镜头约束。'
+    },
+    storyboard_image: {
+      label: '参考帧生成',
+      description: '镜头起始/结束参考帧',
+      purpose: '主参考帧工作流；服务端会自动注入最多 3 张参考图，超过 3 张时分批多轮执行。'
+    },
+    text_to_image: {
+      label: '文生图',
+      description: '无参考图图片生成',
+      purpose: '用于场景、物品等纯文本生图，也作为参考帧阶段无参考图时的回退。'
+    },
+    reference_image_to_image: {
+      label: '参考图生图',
+      description: '参考图约束图片生成',
+      purpose: '用于场景、物品等有参考图的资产设定，也保留给旧链路兼容或特定参考图生图需求。'
+    },
+    image_edit: {
+      label: '图片编辑',
+      description: '重绘 / 修图 / 图片加工',
+      purpose: '用于局部重绘、修图和二次编辑，也可作为参考帧阶段的兼容回退。'
+    },
+    text_to_video: {
+      label: '文生视频',
+      description: '无参考帧视频生成',
+      purpose: '用于纯文本驱动的视频片段生成，适合没有参考帧约束的场景。'
+    },
+    image_to_video_first_last: {
+      label: '首尾帧视频',
+      description: '起始帧 + 结束帧约束视频生成',
+      purpose: '用于需要明确收束到目标结尾画面的镜头，服务端会在有结束参考帧时优先调用。'
+    },
+    image_to_video_first_frame: {
+      label: '首帧视频',
+      description: '仅起始帧约束视频生成',
+      purpose: '用于只提供首帧、不要求尾帧收束的镜头，服务端会在无结束参考帧时优先调用。'
+    },
+    tts: {
+      label: 'TTS 工作流',
+      description: '台词 / 旁白 / 配音',
+      purpose: '可选；用于对白、旁白或声音生成。不配置时会回退为把声音 prompt 合并到视频 prompt。'
+    }
+  };
+
+  const workflowGroups: Array<{
+    title: string;
     description: string;
+    sections: Array<{
+      title: string;
+      description: string;
+      items: ComfyWorkflowType[];
+    }>;
   }> = [
     {
-      key: 'character_asset',
-      label: '人物资产',
-      description: '用于角色参考图生成'
+      title: '资产设定',
+      description: '先区分有无参考图的素材生成链路，供后续分镜和视频复用。',
+      sections: [
+        {
+          title: '有参考设定',
+          description: '人物有参考图时走人物资产；场景和物品有参考图时走参考图生图。',
+          items: ['character_asset', 'reference_image_to_image']
+        },
+        {
+          title: '无参考设定',
+          description: '用于场景、物品等没有参考图的纯文本生图，也作为无参考回退。',
+          items: ['text_to_image']
+        }
+      ]
     },
     {
-      key: 'storyboard_image',
-      label: '参考帧生成',
-      description: '用于镜头参考帧生成；服务端会自动注入最多 3 张参考图，超过 3 张时分批多轮执行'
+      title: '参考帧与图片加工',
+      description: '围绕镜头静帧、参考图约束和图片二次加工配置主工作流与兼容回退。',
+      sections: [
+        {
+          title: '参考帧生成',
+          description: '用于镜头首帧、尾帧的主静帧生成流程。',
+          items: ['storyboard_image']
+        },
+        {
+          title: '参考图与图片加工',
+          description: '用于图片修补、局部重绘和其他二次加工处理。',
+          items: ['image_edit']
+        }
+      ]
     },
     {
-      key: 'text_to_image',
-      label: '文生图',
-      description: '用于纯文本驱动的图片生成，比如场景或物品资产'
+      title: '视频片段生成',
+      description: '按使用方式拆成独立子设定项，文生视频、首尾帧视频和首帧视频分别配置。',
+      sections: [
+        {
+          title: '文生视频设定',
+          description: '没有参考帧时直接走纯文本视频生成。',
+          items: ['text_to_video']
+        },
+        {
+          title: '首尾帧视频设定',
+          description: '镜头同时有起始帧和结束帧时使用，用于强化结尾画面收束。',
+          items: ['image_to_video_first_last']
+        },
+        {
+          title: '首帧视频设定',
+          description: '镜头只有首帧约束时使用，适合不生成尾帧的镜头。',
+          items: ['image_to_video_first_frame']
+        }
+      ]
     },
     {
-      key: 'reference_image_to_image',
-      label: '参考图生图',
-      description: '用于带参考资产约束的参考帧图片生成'
-    },
-    {
-      key: 'image_edit',
-      label: '图片编辑',
-      description: '用于局部重绘、修图或后续图片编辑流程'
-    },
-    {
-      key: 'text_to_video',
-      label: '文生视频',
-      description: '用于纯文本驱动的视频生成'
-    },
-    {
-      key: 'image_to_video',
-      label: '图生视频',
-      description: '用于基于参考帧或参考图生成视频片段'
-    },
-    {
-      key: 'tts',
-      label: 'TTS 工作流',
-      description: '可选；用于台词、旁白或声音生成。不配置时会回退为把声音 prompt 合并到视频 prompt'
+      title: '声音生成',
+      description: '单独管理对白、旁白和声音工作流。',
+      sections: [
+        {
+          title: '语音设定',
+          description: '管理对白、旁白和其他声音生成链路。',
+          items: ['tts']
+        }
+      ]
     }
   ];
+
+  const renderWorkflowCard = (workflowKey: ComfyWorkflowType) => {
+    const workflow = workflowConfigs[workflowKey];
+    const workflowDraft = draft.comfyui.workflows[workflowKey];
+    const exists = workflowStatusMap[workflowKey];
+    const templateOptions = WORKFLOW_TEMPLATE_OPTIONS[workflowKey];
+    const selectedTemplate =
+      templateOptions.find((option) => option.path === workflowDraft.workflowPath) ?? null;
+    const inputPlaceholder = DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS[workflowKey];
+
+    return (
+      <article key={workflowKey} className="workflow-config-card">
+        <div className="workflow-config-head">
+          <div>
+            <h4>{workflow.label}</h4>
+            <p>{workflow.description}</p>
+          </div>
+          <span className={`pill ${exists ? 'success' : 'error'}`}>{exists ? '已就绪' : '未就绪'}</span>
+        </div>
+        <p className="workflow-config-purpose">{workflow.purpose}</p>
+        <div className="form-grid">
+          <label className="field span-2">
+            <span>内置模板</span>
+            <select
+              value={selectedTemplate?.path ?? ''}
+              onChange={(event) =>
+                updateWorkflow(workflowKey, {
+                  workflowPath: event.target.value
+                })
+              }
+            >
+              <option value="">自定义路径 / 手动填写</option>
+              {templateOptions.map((option) => (
+                <option key={option.path} value={option.path}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <div className="inline-note">
+              {selectedTemplate
+                ? selectedTemplate.description
+                : '选择内置模板后会自动填入下方路径，也可以继续手动改成任意 JSON 文件。'}
+            </div>
+          </label>
+          <label className="field span-2">
+            <span>工作流 JSON 路径</span>
+            <input
+              list={`workflow-template-options-${workflowKey}`}
+              value={workflowDraft.workflowPath}
+              onChange={(event) =>
+                updateWorkflow(workflowKey, {
+                  workflowPath: event.target.value
+                })
+              }
+              placeholder={inputPlaceholder}
+            />
+            <datalist id={`workflow-template-options-${workflowKey}`}>
+              {templateOptions.map((option) => (
+                <option key={option.path} value={option.path}>
+                  {option.label}
+                </option>
+              ))}
+            </datalist>
+          </label>
+        </div>
+        <p className="settings-hint workflow-config-note">
+          {workflowDraft.workflowPath
+            ? exists
+              ? '工作流文件已通过基础检查。'
+              : '已填写路径，但当前文件不存在、无法访问，或仍是占位模板。'
+            : '尚未配置工作流文件。'}
+        </p>
+      </article>
+    );
+  };
 
   const updateWorkflow = (
     workflow: ComfyWorkflowType,
@@ -227,7 +386,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
         <section className="settings-section">
           <div className="section-head">
             <h3>ComfyUI API</h3>
-            <span>统一地址，七类任务分别绑定各自工作流；工作流内自行固定 checkpoint</span>
+            <span>统一地址，按主分类和子设定项分别绑定工作流；工作流内自行固定 checkpoint</span>
           </div>
           <div className="form-grid">
             <label className="field span-2">
@@ -296,79 +455,28 @@ export function SettingsDialog(props: SettingsDialogProps) {
               />
             </label>
           </div>
-          <div className="workflow-config-grid">
-            {workflowConfigs.map((workflow) => {
-              const workflowDraft = draft.comfyui.workflows[workflow.key];
-              const exists = workflowStatusMap[workflow.key];
-              const templateOptions = WORKFLOW_TEMPLATE_OPTIONS[workflow.key];
-              const selectedTemplate =
-                templateOptions.find((option) => option.path === workflowDraft.workflowPath) ?? null;
-              const inputPlaceholder = DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS[workflow.key];
-
-              return (
-                <article key={workflow.key} className="workflow-config-card">
-                  <div className="workflow-config-head">
-                    <div>
-                      <h4>{workflow.label}</h4>
-                      <p>{workflow.description}</p>
-                    </div>
-                    <span className={`pill ${exists ? 'success' : 'error'}`}>{exists ? '已就绪' : '未就绪'}</span>
-                  </div>
-                  <div className="form-grid">
-                    <label className="field span-2">
-                      <span>内置模板</span>
-                      <select
-                        value={selectedTemplate?.path ?? ''}
-                        onChange={(event) =>
-                          updateWorkflow(workflow.key, {
-                            workflowPath: event.target.value
-                          })
-                        }
-                      >
-                        <option value="">自定义路径 / 手动填写</option>
-                        {templateOptions.map((option) => (
-                          <option key={option.path} value={option.path}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="inline-note">
-                        {selectedTemplate
-                          ? selectedTemplate.description
-                          : '选择内置模板后会自动填入下方路径，也可以继续手动改成任意 JSON 文件。'}
+          <div className="workflow-group-list">
+            {workflowGroups.map((group) => (
+              <section key={group.title} className="workflow-group">
+                <div className="workflow-group-head">
+                  <h4>{group.title}</h4>
+                  <p>{group.description}</p>
+                </div>
+                <div className="workflow-subgroup-list">
+                  {group.sections.map((section) => (
+                    <section key={`${group.title}-${section.title}`} className="workflow-subgroup">
+                      <div className="workflow-subgroup-head">
+                        <h5>{section.title}</h5>
+                        <p>{section.description}</p>
                       </div>
-                    </label>
-                    <label className="field span-2">
-                      <span>工作流 JSON 路径</span>
-                      <input
-                        list={`workflow-template-options-${workflow.key}`}
-                        value={workflowDraft.workflowPath}
-                        onChange={(event) =>
-                          updateWorkflow(workflow.key, {
-                            workflowPath: event.target.value
-                          })
-                        }
-                        placeholder={inputPlaceholder}
-                      />
-                      <datalist id={`workflow-template-options-${workflow.key}`}>
-                        {templateOptions.map((option) => (
-                          <option key={option.path} value={option.path}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </datalist>
-                    </label>
-                  </div>
-                  <p className="settings-hint workflow-config-note">
-                    {workflowDraft.workflowPath
-                      ? exists
-                        ? '工作流文件已通过基础检查。'
-                        : '已填写路径，但当前文件不存在、无法访问，或仍是占位模板。'
-                      : '尚未配置工作流文件。'}
-                  </p>
-                </article>
-              );
-            })}
+                      <div className="workflow-config-grid">
+                        {section.items.map((workflowKey) => renderWorkflowCard(workflowKey))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              </section>
+            ))}
           </div>
         </section>
 

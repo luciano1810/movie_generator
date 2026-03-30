@@ -838,12 +838,16 @@ function shouldUseUploadedReferenceImage(referenceImageRelativePath: string, use
 function getReferenceWorkflowKind(
   kind: ReferenceAssetKind,
   useReferenceImage: boolean
-): 'character_asset' | 'text_to_image' {
-  if (kind === 'character' && useReferenceImage) {
+): 'character_asset' | 'reference_image_to_image' | 'text_to_image' {
+  if (!useReferenceImage) {
+    return 'text_to_image';
+  }
+
+  if (kind === 'character') {
     return 'character_asset';
   }
 
-  return 'text_to_image';
+  return 'reference_image_to_image';
 }
 
 function hasConfiguredTtsWorkflow(appSettings: AppSettings): boolean {
@@ -1689,18 +1693,32 @@ function resolveTtsWorkflowPath(appSettings: AppSettings, useReferenceAudio: boo
 }
 
 function resolveVideoWorkflowPath(appSettings: AppSettings, useLastFrameReference: boolean): string {
-  const configuredWorkflowPath = appSettings.comfyui.workflows.image_to_video.workflowPath;
+  const firstLastFrameWorkflowPath = appSettings.comfyui.workflows.image_to_video_first_last.workflowPath;
+  const firstFrameWorkflowPath = appSettings.comfyui.workflows.image_to_video_first_frame.workflowPath;
+  const sharedConfiguredWorkflowPath =
+    firstLastFrameWorkflowPath && firstLastFrameWorkflowPath === firstFrameWorkflowPath
+      ? firstLastFrameWorkflowPath
+      : '';
 
   if (
-    configuredWorkflowPath === DEFAULT_FIRST_LAST_FRAME_VIDEO_WORKFLOW_PATH ||
-    configuredWorkflowPath === DEFAULT_SINGLE_FRAME_VIDEO_WORKFLOW_PATH
+    sharedConfiguredWorkflowPath === DEFAULT_FIRST_LAST_FRAME_VIDEO_WORKFLOW_PATH ||
+    sharedConfiguredWorkflowPath === DEFAULT_SINGLE_FRAME_VIDEO_WORKFLOW_PATH
   ) {
     return useLastFrameReference
       ? DEFAULT_FIRST_LAST_FRAME_VIDEO_WORKFLOW_PATH
       : DEFAULT_SINGLE_FRAME_VIDEO_WORKFLOW_PATH;
   }
 
-  return configuredWorkflowPath;
+  return useLastFrameReference
+    ? firstLastFrameWorkflowPath || firstFrameWorkflowPath
+    : firstFrameWorkflowPath || firstLastFrameWorkflowPath;
+}
+
+function hasConfiguredImageToVideoWorkflow(appSettings: AppSettings): boolean {
+  return Boolean(
+    appSettings.comfyui.workflows.image_to_video_first_last.workflowPath ||
+      appSettings.comfyui.workflows.image_to_video_first_frame.workflowPath
+  );
 }
 
 function buildTtsVariables(
@@ -2407,8 +2425,8 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
       throw new Error('请先生成图片，再生成视频片段。');
     }
 
-    if (!appSettings.comfyui.workflows.image_to_video.workflowPath) {
-      throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
+    if (!hasConfiguredImageToVideoWorkflow(appSettings)) {
+      throw new Error('系统设置中未配置 ComfyUI 视频生成工作流路径，请至少配置首帧视频或首尾帧视频。');
     }
 
     if (!useTtsWorkflow && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
@@ -3257,7 +3275,7 @@ async function generateVideoAssetForShot(
   const workflowPath = resolveVideoWorkflowPath(appSettings, Boolean(lastImageAsset));
 
   if (!workflowPath) {
-    throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
+    throw new Error('系统设置中未配置当前镜头可用的视频工作流路径，请检查首帧视频和首尾帧视频设定。');
   }
 
   const preparedTtsAudio = await ensureShotTtsAudio(project, shot, appSettings, ttsUploadCache);
@@ -3478,9 +3496,8 @@ async function runVideoStage(project: Project): Promise<void> {
 
   const appSettings = getAppSettings();
   const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
-  const workflow = appSettings.comfyui.workflows.image_to_video;
-  if (!workflow.workflowPath) {
-    throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
+  if (!hasConfiguredImageToVideoWorkflow(appSettings)) {
+    throw new Error('系统设置中未配置 ComfyUI 视频生成工作流路径，请至少配置首帧视频或首尾帧视频。');
   }
 
   if (!project.settings.useTtsWorkflow) {
@@ -4083,8 +4100,8 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
 
   const appSettings = getAppSettings();
   const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
-  if (!appSettings.comfyui.workflows.image_to_video.workflowPath) {
-    throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
+  if (!hasConfiguredImageToVideoWorkflow(appSettings)) {
+    throw new Error('系统设置中未配置 ComfyUI 视频生成工作流路径，请至少配置首帧视频或首尾帧视频。');
   }
 
   if (!useTtsWorkflow && getShotVideoSegmentDurations(project, shot).length > 1 && !appSettings.ffmpeg.binaryPath) {
@@ -4515,6 +4532,14 @@ function assetKindLabel(kind: ReferenceAssetKind): string {
   return '物品';
 }
 
-function assetWorkflowLabel(workflowKind: 'character_asset' | 'text_to_image'): string {
-  return workflowKind === 'character_asset' ? '人物资产' : '文生图';
+function assetWorkflowLabel(workflowKind: 'character_asset' | 'reference_image_to_image' | 'text_to_image'): string {
+  if (workflowKind === 'character_asset') {
+    return '人物资产';
+  }
+
+  if (workflowKind === 'reference_image_to_image') {
+    return '参考图生图';
+  }
+
+  return '文生图';
 }

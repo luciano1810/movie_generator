@@ -78,10 +78,20 @@ export const envAppSettingsDefaults: AppSettings = {
           DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.text_to_video
         )
       },
-      image_to_video: {
+      image_to_video_first_last: {
         workflowPath: resolveMaybeRelative(
-          process.env.COMFYUI_IMAGE_TO_VIDEO_WORKFLOW ?? process.env.COMFYUI_VIDEO_WORKFLOW,
-          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.image_to_video
+          process.env.COMFYUI_IMAGE_TO_VIDEO_FIRST_LAST_WORKFLOW ??
+            process.env.COMFYUI_IMAGE_TO_VIDEO_WORKFLOW ??
+            process.env.COMFYUI_VIDEO_WORKFLOW,
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.image_to_video_first_last
+        )
+      },
+      image_to_video_first_frame: {
+        workflowPath: resolveMaybeRelative(
+          process.env.COMFYUI_IMAGE_TO_VIDEO_FIRST_FRAME_WORKFLOW ??
+            process.env.COMFYUI_IMAGE_TO_VIDEO_WORKFLOW ??
+            process.env.COMFYUI_VIDEO_WORKFLOW,
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.image_to_video_first_frame
         )
       },
       tts: {

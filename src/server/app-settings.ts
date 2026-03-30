@@ -106,7 +106,12 @@ export function getRuntimeStatus(settings = getAppSettings()): RuntimeStatus {
     ),
     imageEditWorkflowExists: workflowExists(settings.comfyui.workflows.image_edit.workflowPath),
     textToVideoWorkflowExists: workflowExists(settings.comfyui.workflows.text_to_video.workflowPath),
-    imageToVideoWorkflowExists: workflowExists(settings.comfyui.workflows.image_to_video.workflowPath),
+    imageToVideoFirstLastWorkflowExists: workflowExists(
+      settings.comfyui.workflows.image_to_video_first_last.workflowPath
+    ),
+    imageToVideoFirstFrameWorkflowExists: workflowExists(
+      settings.comfyui.workflows.image_to_video_first_frame.workflowPath
+    ),
     ttsWorkflowExists: workflowExists(settings.comfyui.workflows.tts.workflowPath),
     ffmpegReady: Boolean(settings.ffmpeg.binaryPath && existsSync(settings.ffmpeg.binaryPath))
   };

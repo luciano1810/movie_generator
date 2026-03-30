@@ -2094,15 +2094,20 @@ export function App() {
   const selectedLibraryReference =
     currentReferenceAssets.find((asset) => asset.id === selectedLibraryReferenceId) ?? currentReferenceAssets[0] ?? null;
   const referenceWorkflowReadyCount = meta
-    ? [meta.envStatus.characterAssetWorkflowExists, meta.envStatus.textToImageWorkflowExists].filter(Boolean).length
+    ? [
+        meta.envStatus.characterAssetWorkflowExists,
+        meta.envStatus.referenceImageToImageWorkflowExists,
+        meta.envStatus.textToImageWorkflowExists
+      ].filter(Boolean).length
     : 0;
   const storyboardImageWorkflowReady =
     (meta?.envStatus.storyboardImageWorkflowExists ?? false) || (meta?.envStatus.imageEditWorkflowExists ?? false);
   const productionWorkflowReadyCount = meta
     ? [
         storyboardImageWorkflowReady,
-        meta.envStatus.referenceImageToImageWorkflowExists,
-        meta.envStatus.imageToVideoWorkflowExists
+        meta.envStatus.textToVideoWorkflowExists,
+        meta.envStatus.imageToVideoFirstLastWorkflowExists,
+        meta.envStatus.imageToVideoFirstFrameWorkflowExists
       ].filter(Boolean).length
     : 0;
   const ttsWorkflowReady = meta?.envStatus.ttsWorkflowExists ?? false;
@@ -3395,11 +3400,11 @@ export function App() {
                     <>
                       <div className="status-item">
                         <span>参考资产工作流</span>
-                        <strong>{referenceWorkflowReadyCount}/2 已就绪</strong>
+                        <strong>{referenceWorkflowReadyCount}/3 已就绪</strong>
                       </div>
                       <div className="status-item">
                         <span>分镜/视频工作流</span>
-                        <strong>{productionWorkflowReadyCount}/2 已就绪</strong>
+                        <strong>{productionWorkflowReadyCount}/4 已就绪</strong>
                       </div>
                       <div className="status-item">
                         <span>TTS 工作流</span>
@@ -3598,7 +3603,7 @@ export function App() {
                       </div>
                       <div className="status-item">
                         <span>工作流就绪</span>
-                        <strong>{referenceWorkflowReadyCount}/2</strong>
+                        <strong>{referenceWorkflowReadyCount}/3</strong>
                       </div>
                     </div>
                     {referenceEntries.length ? (

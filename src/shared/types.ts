@@ -6,7 +6,8 @@ export const COMFYUI_WORKFLOW_TYPES = [
   'reference_image_to_image',
   'image_edit',
   'text_to_video',
-  'image_to_video',
+  'image_to_video_first_last',
+  'image_to_video_first_frame',
   'tts'
 ] as const;
 export const ASPECT_RATIOS = ['21:9', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4', '9:16'] as const;
@@ -54,7 +55,8 @@ export interface RuntimeStatus {
   referenceImageToImageWorkflowExists: boolean;
   imageEditWorkflowExists: boolean;
   textToVideoWorkflowExists: boolean;
-  imageToVideoWorkflowExists: boolean;
+  imageToVideoFirstLastWorkflowExists: boolean;
+  imageToVideoFirstFrameWorkflowExists: boolean;
   ttsWorkflowExists: boolean;
   ffmpegReady: boolean;
 }
@@ -525,7 +527,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
       text_to_video: {
         workflowPath: ''
       },
-      image_to_video: {
+      image_to_video_first_last: {
+        workflowPath: ''
+      },
+      image_to_video_first_frame: {
         workflowPath: ''
       },
       tts: {
@@ -556,6 +561,16 @@ function normalizeEditableString(value: unknown, fallback: string): string {
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function matchesWorkflowTemplatePath(value: string, templatePath: string): boolean {
+  if (!value || !templatePath) {
+    return false;
+  }
+
+  const normalizedValue = value.replace(/\\/g, '/');
+  const normalizedTemplatePath = templatePath.replace(/\\/g, '/');
+  return normalizedValue === normalizedTemplatePath || normalizedValue.endsWith(`/${normalizedTemplatePath}`);
 }
 
 function parseStoryLength(value: unknown): StoryLength | null {
@@ -679,6 +694,8 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
   const legacyVideoWorkflowPath = normalizeEditableString(rawComfyui.videoWorkflowPath, '');
   const legacyCharacterWorkflowPath = normalizeEditableString(rawComfyui.characterWorkflowPath, '');
   const legacyTtsWorkflowPath = normalizeEditableString(rawComfyui.ttsWorkflowPath, '');
+  const legacySingleFrameVideoWorkflowTemplatePath = 'config/workflows/ltx_2.3_i2v_modular_api.template.json';
+  const legacyFirstLastVideoWorkflowTemplatePath = 'config/workflows/ltx_2.3_i2v_first_last_api.template.json';
 
   const pickWorkflowPath = (...candidates: Array<string | undefined>): string => {
     for (const candidate of candidates) {
@@ -689,6 +706,24 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
 
     return '';
   };
+
+  const legacyImageToVideoWorkflowPath = pickWorkflowPath(
+    rawWorkflows.image_to_video?.workflowPath,
+    rawWorkflows.video?.workflowPath,
+    legacyVideoWorkflowPath
+  );
+  const inferredLegacyFirstFrameVideoWorkflowPath = matchesWorkflowTemplatePath(
+    legacyImageToVideoWorkflowPath,
+    legacyFirstLastVideoWorkflowTemplatePath
+  )
+    ? legacySingleFrameVideoWorkflowTemplatePath
+    : legacyImageToVideoWorkflowPath;
+  const inferredLegacyFirstLastVideoWorkflowPath = matchesWorkflowTemplatePath(
+    legacyImageToVideoWorkflowPath,
+    legacySingleFrameVideoWorkflowTemplatePath
+  )
+    ? legacyFirstLastVideoWorkflowTemplatePath
+    : legacyImageToVideoWorkflowPath;
 
   return {
     llm: {
@@ -737,10 +772,15 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
           fallback.comfyui.workflows.text_to_video,
           pickWorkflowPath(rawWorkflows.video?.workflowPath, legacyVideoWorkflowPath)
         ),
-        image_to_video: normalizeComfyWorkflowSettings(
-          rawWorkflows.image_to_video,
-          fallback.comfyui.workflows.image_to_video,
-          pickWorkflowPath(rawWorkflows.video?.workflowPath, legacyVideoWorkflowPath)
+        image_to_video_first_last: normalizeComfyWorkflowSettings(
+          rawWorkflows.image_to_video_first_last,
+          fallback.comfyui.workflows.image_to_video_first_last,
+          pickWorkflowPath(inferredLegacyFirstLastVideoWorkflowPath)
+        ),
+        image_to_video_first_frame: normalizeComfyWorkflowSettings(
+          rawWorkflows.image_to_video_first_frame,
+          fallback.comfyui.workflows.image_to_video_first_frame,
+          pickWorkflowPath(inferredLegacyFirstFrameVideoWorkflowPath)
         ),
         tts: normalizeComfyWorkflowSettings(
           rawWorkflows.tts,
