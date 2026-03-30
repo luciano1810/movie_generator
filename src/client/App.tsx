@@ -1433,10 +1433,10 @@ export function App() {
       setNotice(
         kind === 'character'
           ? shouldUseReferenceImage
-            ? `已提交角色“${item.name}”的三视图生成任务，将按参考图、角色名、人种/族裔提示和固定三视图模板生成；人物特点 Prompt 会并入后续视频生成提示词`
+            ? `已提交角色“${item.name}”的参考图生成任务，将按用户上传参考图、角色名、人种/族裔提示和人物外貌特点生成；人物特点 Prompt 会并入后续视频生成提示词`
             : item.asset
-              ? `已提交角色“${item.name}”的三视图重新生成任务，将使用角色名、人种/族裔提示、默认三视图姿态参考和人物外貌特点`
-              : `已提交角色“${item.name}”的三视图生成任务，将使用角色名、人种/族裔提示、默认三视图姿态参考和人物外貌特点`
+              ? `已提交角色“${item.name}”的参考图重新生成任务，将使用角色名、人种/族裔提示和人物外貌特点生成`
+              : `已提交角色“${item.name}”的参考图生成任务，将使用角色名、人种/族裔提示和人物外貌特点生成`
           : shouldUseReferenceImage
             ? `已提交${referenceKindLabel(kind)}“${item.name}”的“参考图 + Prompt”生成任务，成功后会自动清除临时参考图`
             : item.asset
@@ -1482,7 +1482,7 @@ export function App() {
       }));
       setNotice(
         kind === 'character'
-          ? `角色“${item.name}”的参考图已上传；下次生成会按参考图和固定三视图模板处理，成功后会自动清除这张临时参考图`
+          ? `角色“${item.name}”的参考图已上传；下次生成会按用户上传参考图处理，成功后会自动清除这张临时参考图`
           : `${referenceKindLabel(kind)}“${item.name}”的参考图已上传；生成按钮会自动按“参考图 + Prompt”处理，成功后会自动清除这张临时参考图`
       );
       await loadProjects(selectedId);
@@ -2181,7 +2181,7 @@ export function App() {
           />
           {kind === 'character' ? (
             <small className="inline-note">
-              无参考图时，角色三视图会自动把角色名、人种/族裔提示和人物外貌特点拼进实际 Prompt；这里的人物特点 Prompt 也会并入后续视频生成提示词。
+              无参考图时，角色参考图会自动把角色名、人种/族裔提示和人物外貌特点拼进实际 Prompt；这里的人物特点 Prompt 也会并入后续视频生成提示词。
             </small>
           ) : null}
         </label>
@@ -2322,12 +2322,12 @@ export function App() {
         {item.referenceImage ? (
           <p className="settings-hint">
             {kind === 'character'
-              ? '已上传参考图；角色三视图会按参考图和固定三视图模板生成，成功后会自动清除这张临时参考图。继续上传即可更换。'
+              ? '已上传参考图；角色参考图会按用户上传参考图生成，成功后会自动清除这张临时参考图。继续上传即可更换。'
               : '已上传参考图；生成按钮会自动按“参考图 + Prompt”处理，成功后会自动清除这张临时参考图。继续上传即可更换。'}
           </p>
         ) : kind === 'character' ? (
           <p className="settings-hint">
-            未上传人物参考图时，角色三视图会自动把“角色名 + 人种/族裔提示 + 人物特点”拼进实际生成 Prompt；这里的人物特点 Prompt 也会并入后续视频生成提示词。
+            未上传人物参考图时，角色参考图会自动把“角色名 + 人种/族裔提示 + 人物特点”拼进实际生成 Prompt；这里的人物特点 Prompt 也会并入后续视频生成提示词。
           </p>
         ) : null}
         {kind === 'character' && item.referenceAudio ? (
@@ -2417,11 +2417,11 @@ export function App() {
             : kind === 'character'
               ? item.referenceImage
                 ? item.asset
-                  ? '按参考图重新生成三视图'
-                  : '按参考图生成三视图'
+                  ? '按参考图重新生成'
+                  : '按参考图生成'
                 : item.asset
-                  ? '重新生成三视图'
-                  : '生成三视图'
+                  ? '重新生成参考图'
+                  : '生成参考图'
               : item.referenceImage
                 ? item.asset
                   ? '按参考图 + Prompt 重新生成'

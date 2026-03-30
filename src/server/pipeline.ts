@@ -176,10 +176,10 @@ function buildCharacterAssetWorkflowPrompt(
   const detailSentence = detail ? `角色设定：${detail}。` : '';
 
   if (hasReferenceImage) {
-    return `${prefix}${detailSentence}根据参考三视图生成该角色的人物三视图，保持角色姓名、人种/族裔提示与人物外貌设定一致。`;
+    return `${prefix}${detailSentence}基于用户上传参考图生成该角色的人物参考图，保持角色姓名、人种/族裔提示与人物外貌设定一致。`;
   }
 
-  return `${prefix}${detailSentence}根据参考三视图生成该角色的三视图。`;
+  return `${prefix}${detailSentence}生成该角色的人物参考图，清晰呈现脸型五官、发型发色、体型、服装主色和关键配饰，可作为后续镜头与视频生成的人物一致性参考。`;
 }
 
 function now(): string {
@@ -758,8 +758,19 @@ function updateReferenceItem(
   return nextItem;
 }
 
-function getReferenceWorkflowKind(kind: ReferenceAssetKind): 'character_asset' | 'text_to_image' {
-  if (kind === 'character') {
+function shouldUseUploadedReferenceImage(referenceImageRelativePath: string, useReferenceImage?: boolean): boolean {
+  if (typeof useReferenceImage === 'boolean') {
+    return Boolean(useReferenceImage && referenceImageRelativePath);
+  }
+
+  return Boolean(referenceImageRelativePath);
+}
+
+function getReferenceWorkflowKind(
+  kind: ReferenceAssetKind,
+  useReferenceImage: boolean
+): 'character_asset' | 'text_to_image' {
+  if (kind === 'character' && useReferenceImage) {
     return 'character_asset';
   }
 
@@ -2164,12 +2175,6 @@ async function generateReferenceAssetForProject(
 ): Promise<void> {
   const appSettings = getAppSettings();
   const signal = getProjectAbortSignal(project.id);
-  const workflowKind = getReferenceWorkflowKind(kind);
-  const workflow = appSettings.comfyui.workflows[workflowKind];
-
-  if (!workflow.workflowPath) {
-    throw new Error(`系统设置中未配置 ComfyUI ${assetWorkflowLabel(kind)}工作流路径。`);
-  }
 
   let generationPrompt = '';
   let itemName = '';
@@ -2198,20 +2203,24 @@ async function generateReferenceAssetForProject(
   await saveProject(project);
 
   try {
-    const shouldUseReferenceImage =
-      typeof options.useReferenceImage === 'boolean'
-        ? Boolean(options.useReferenceImage && referenceImageRelativePath)
-        : Boolean(referenceImageRelativePath);
+    const shouldUseReferenceImage = shouldUseUploadedReferenceImage(referenceImageRelativePath, options.useReferenceImage);
+    const workflowKind = getReferenceWorkflowKind(kind, shouldUseReferenceImage);
+    const workflow = appSettings.comfyui.workflows[workflowKind];
+
+    if (!workflow.workflowPath) {
+      throw new Error(`系统设置中未配置 ComfyUI ${assetWorkflowLabel(workflowKind)}工作流路径。`);
+    }
+
     const uploadedReferenceImage = shouldUseReferenceImage
       ? await uploadImageToComfy(fromStorageRelative(referenceImageRelativePath), { signal })
       : '';
     const uploadedCharacterPoseImage =
-      kind === 'character' && existsSync(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
+      kind === 'character' && shouldUseReferenceImage && existsSync(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
         ? await uploadImageToComfy(DEFAULT_CHARACTER_POSE_REFERENCE_PATH, { signal })
         : '';
-    const editImage1 = uploadedReferenceImage || uploadedCharacterPoseImage;
-    const editImage2 = uploadedCharacterPoseImage;
-    const editImage3 = uploadedCharacterPoseImage;
+    const editImage1 = uploadedReferenceImage;
+    const editImage2 = uploadedCharacterPoseImage || uploadedReferenceImage;
+    const editImage3 = uploadedCharacterPoseImage || uploadedReferenceImage;
     const workflowPrompt =
       kind === 'character'
         ? buildCharacterAssetWorkflowPrompt(itemName, generationPrompt, ethnicityHint, shouldUseReferenceImage)
@@ -2271,11 +2280,11 @@ async function generateReferenceAssetForProject(
       kind === 'character'
         ? shouldUseReferenceImage
           ? hadGeneratedMedia
-            ? `${itemName}${assetKindLabel(kind)}已按参考图和固定三视图模板生成完成，临时参考图已清除；图片与视频产物已失效，请重新生成。`
-            : `${itemName}${assetKindLabel(kind)}已按参考图和固定三视图模板生成完成，临时参考图已清除。`
+            ? `${itemName}${assetKindLabel(kind)}已按用户参考图生成完成，临时参考图已清除；图片与视频产物已失效，请重新生成。`
+            : `${itemName}${assetKindLabel(kind)}已按用户参考图生成完成，临时参考图已清除。`
           : hadGeneratedMedia
-            ? `${itemName}${assetKindLabel(kind)}已按默认三视图姿态参考和固定三视图模板生成完成，图片与视频产物已失效，请重新生成。`
-            : `${itemName}${assetKindLabel(kind)}已按默认三视图姿态参考和固定三视图模板生成完成。`
+            ? `${itemName}${assetKindLabel(kind)}已按 Prompt 生成完成，图片与视频产物已失效，请重新生成。`
+            : `${itemName}${assetKindLabel(kind)}已按 Prompt 生成完成。`
         : shouldUseReferenceImage
           ? hadGeneratedMedia
             ? `${itemName}${assetKindLabel(kind)}已按“参考图 + Prompt”生成并保存到资产库，临时参考图已清除；图片与视频产物已失效，请重新生成。`
@@ -2435,7 +2444,7 @@ export async function uploadReferenceImageForAsset(
   appendLog(
     project,
     kind === 'character'
-      ? `${item.name}${assetKindLabel(kind)}参考图已上传。下次会按参考图和固定三视图模板生成；生成成功后不会保留这张参考图。`
+      ? `${item.name}${assetKindLabel(kind)}参考图已上传。下次会按用户上传参考图生成；生成成功后不会保留这张参考图。`
       : `${item.name}${assetKindLabel(kind)}参考图已上传。你可以继续只用 Prompt 生成，也可以在下次生成时使用“参考图 + Prompt”；生成成功后不会保留这张参考图。`
   );
   await persistReferenceLibrary(project);
@@ -2676,19 +2685,22 @@ async function runAssetStage(project: Project): Promise<void> {
       continue;
     }
 
-    const workflow = appSettings.comfyui.workflows[getReferenceWorkflowKind(kind)];
-    if (!workflow.workflowPath) {
-      skippedCount += items.length;
-      appendLog(
-        project,
-        `未配置 ${assetWorkflowLabel(kind)} 工作流，跳过 ${items.length} 个${assetKindLabel(kind)}候选。`,
-        'warn'
-      );
-      continue;
-    }
-
     for (const item of items) {
       await throwIfRunInterrupted(project.id, 'assets');
+
+      const shouldUseReferenceImage = shouldUseUploadedReferenceImage(item.referenceImage?.relativePath ?? '');
+      const workflowKind = getReferenceWorkflowKind(kind, shouldUseReferenceImage);
+      const workflow = appSettings.comfyui.workflows[workflowKind];
+
+      if (!workflow.workflowPath) {
+        skippedCount += 1;
+        appendLog(
+          project,
+          `未配置 ${assetWorkflowLabel(workflowKind)} 工作流，跳过 ${item.name}${assetKindLabel(kind)}候选。`,
+          'warn'
+        );
+        continue;
+      }
 
       try {
         await generateReferenceAssetForProject(project, kind, item.id);
@@ -4175,6 +4187,6 @@ function assetKindLabel(kind: ReferenceAssetKind): string {
   return '物品';
 }
 
-function assetWorkflowLabel(kind: ReferenceAssetKind): string {
-  return kind === 'character' ? '人物资产' : '文生图';
+function assetWorkflowLabel(workflowKind: 'character_asset' | 'text_to_image'): string {
+  return workflowKind === 'character_asset' ? '人物资产' : '文生图';
 }

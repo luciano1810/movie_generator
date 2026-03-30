@@ -2,6 +2,7 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 import ffmpegStatic from 'ffmpeg-static';
 import { DEFAULT_SETTINGS, type AppSettings } from '../shared/types.js';
+import { DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS } from '../shared/workflow-templates.js';
 
 dotenv.config();
 
@@ -36,7 +37,7 @@ export const envAppSettingsDefaults: AppSettings = {
           process.env.COMFYUI_CHARACTER_ASSET_WORKFLOW ??
             process.env.COMFYUI_CHARACTER_WORKFLOW ??
             process.env.COMFYUI_IMAGE_WORKFLOW,
-          'config/workflows/firered-image-edit-1.1_api.template.json'
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.character_asset
         )
       },
       storyboard_image: {
@@ -45,7 +46,7 @@ export const envAppSettingsDefaults: AppSettings = {
             process.env.COMFYUI_IMAGE_EDIT_WORKFLOW ??
             process.env.COMFYUI_STORYBOARD_WORKFLOW ??
             process.env.COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW,
-          'config/workflows/storyboard-image-edit-3ref.template.json'
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.storyboard_image
         )
       },
       text_to_image: {
@@ -54,7 +55,7 @@ export const envAppSettingsDefaults: AppSettings = {
             process.env.COMFYUI_SCENE_WORKFLOW ??
             process.env.COMFYUI_OBJECT_WORKFLOW ??
             process.env.COMFYUI_IMAGE_WORKFLOW,
-          'config/workflows/zimage_text_to_image.template.json'
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.text_to_image
         )
       },
       reference_image_to_image: {
@@ -62,31 +63,31 @@ export const envAppSettingsDefaults: AppSettings = {
           process.env.COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW ??
             process.env.COMFYUI_STORYBOARD_WORKFLOW ??
             process.env.COMFYUI_IMAGE_WORKFLOW,
-          'config/workflows/image-workflow.template.json'
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.reference_image_to_image
         )
       },
       image_edit: {
         workflowPath: resolveMaybeRelative(
           process.env.COMFYUI_IMAGE_EDIT_WORKFLOW ?? process.env.COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW,
-          'config/workflows/firered-image-edit-1.1_api.template.json'
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.image_edit
         )
       },
       text_to_video: {
         workflowPath: resolveMaybeRelative(
           process.env.COMFYUI_TEXT_TO_VIDEO_WORKFLOW ?? process.env.COMFYUI_VIDEO_WORKFLOW,
-          'config/workflows/video-workflow.template.json'
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.text_to_video
         )
       },
       image_to_video: {
         workflowPath: resolveMaybeRelative(
           process.env.COMFYUI_IMAGE_TO_VIDEO_WORKFLOW ?? process.env.COMFYUI_VIDEO_WORKFLOW,
-          'config/workflows/ltx_2.3_i2v_first_last_api.template.json'
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.image_to_video
         )
       },
       tts: {
         workflowPath: resolveMaybeRelative(
           process.env.COMFYUI_TTS_WORKFLOW,
-          'config/workflows/qwen3_tts_dialogue.template.json'
+          DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS.tts
         )
       }
     },

@@ -1,3 +1,4 @@
+import { DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS, WORKFLOW_TEMPLATE_OPTIONS } from '../shared/workflow-templates';
 import type { AppMeta, AppSettings, ComfyWorkflowType } from '../shared/types';
 
 interface SettingsDialogProps {
@@ -50,55 +51,46 @@ export function SettingsDialog(props: SettingsDialogProps) {
     key: ComfyWorkflowType;
     label: string;
     description: string;
-    workflowPlaceholder: string;
   }> = [
     {
       key: 'character_asset',
       label: '人物资产',
-      description: '用于角色参考图生成',
-      workflowPlaceholder: '/absolute/path/to/character-asset-workflow.json'
+      description: '用于角色参考图生成'
     },
     {
       key: 'storyboard_image',
       label: '参考帧生成',
-      description: '用于镜头参考帧生成；服务端会自动注入最多 3 张参考图，超过 3 张时分批多轮执行',
-      workflowPlaceholder: '/absolute/path/to/storyboard-image-workflow.json'
+      description: '用于镜头参考帧生成；服务端会自动注入最多 3 张参考图，超过 3 张时分批多轮执行'
     },
     {
       key: 'text_to_image',
       label: '文生图',
-      description: '用于纯文本驱动的图片生成，比如场景或物品资产',
-      workflowPlaceholder: '/absolute/path/to/text-to-image-workflow.json'
+      description: '用于纯文本驱动的图片生成，比如场景或物品资产'
     },
     {
       key: 'reference_image_to_image',
       label: '参考图生图',
-      description: '用于带参考资产约束的参考帧图片生成',
-      workflowPlaceholder: '/absolute/path/to/reference-image-to-image-workflow.json'
+      description: '用于带参考资产约束的参考帧图片生成'
     },
     {
       key: 'image_edit',
       label: '图片编辑',
-      description: '用于局部重绘、修图或后续图片编辑流程',
-      workflowPlaceholder: '/absolute/path/to/image-edit-workflow.json'
+      description: '用于局部重绘、修图或后续图片编辑流程'
     },
     {
       key: 'text_to_video',
       label: '文生视频',
-      description: '用于纯文本驱动的视频生成',
-      workflowPlaceholder: '/absolute/path/to/text-to-video-workflow.json'
+      description: '用于纯文本驱动的视频生成'
     },
     {
       key: 'image_to_video',
       label: '图生视频',
-      description: '用于基于参考帧或参考图生成视频片段',
-      workflowPlaceholder: '/absolute/path/to/image-to-video-workflow.json'
+      description: '用于基于参考帧或参考图生成视频片段'
     },
     {
       key: 'tts',
       label: 'TTS 工作流',
-      description: '可选；用于台词、旁白或声音生成。不配置时会回退为把声音 prompt 合并到视频 prompt',
-      workflowPlaceholder: '/absolute/path/to/tts-workflow.json'
+      description: '可选；用于台词、旁白或声音生成。不配置时会回退为把声音 prompt 合并到视频 prompt'
     }
   ];
 
@@ -308,6 +300,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
             {workflowConfigs.map((workflow) => {
               const workflowDraft = draft.comfyui.workflows[workflow.key];
               const exists = workflowStatusMap[workflow.key];
+              const templateOptions = WORKFLOW_TEMPLATE_OPTIONS[workflow.key];
+              const selectedTemplate =
+                templateOptions.find((option) => option.path === workflowDraft.workflowPath) ?? null;
+              const inputPlaceholder = DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS[workflow.key];
 
               return (
                 <article key={workflow.key} className="workflow-config-card">
@@ -320,16 +316,47 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   </div>
                   <div className="form-grid">
                     <label className="field span-2">
+                      <span>内置模板</span>
+                      <select
+                        value={selectedTemplate?.path ?? ''}
+                        onChange={(event) =>
+                          updateWorkflow(workflow.key, {
+                            workflowPath: event.target.value
+                          })
+                        }
+                      >
+                        <option value="">自定义路径 / 手动填写</option>
+                        {templateOptions.map((option) => (
+                          <option key={option.path} value={option.path}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="inline-note">
+                        {selectedTemplate
+                          ? selectedTemplate.description
+                          : '选择内置模板后会自动填入下方路径，也可以继续手动改成任意 JSON 文件。'}
+                      </div>
+                    </label>
+                    <label className="field span-2">
                       <span>工作流 JSON 路径</span>
                       <input
+                        list={`workflow-template-options-${workflow.key}`}
                         value={workflowDraft.workflowPath}
                         onChange={(event) =>
                           updateWorkflow(workflow.key, {
                             workflowPath: event.target.value
                           })
                         }
-                        placeholder={workflow.workflowPlaceholder}
+                        placeholder={inputPlaceholder}
                       />
+                      <datalist id={`workflow-template-options-${workflow.key}`}>
+                        {templateOptions.map((option) => (
+                          <option key={option.path} value={option.path}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </datalist>
                     </label>
                   </div>
                   <p className="settings-hint workflow-config-note">
