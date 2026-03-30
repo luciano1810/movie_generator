@@ -477,6 +477,20 @@ function referenceCollectionLabel(section: AssetLibrarySection): string {
   return '流程产物';
 }
 
+function libraryAssetLocationLabel(asset: Pick<LibraryAssetItem, 'sceneNumber' | 'shotId'>): string {
+  const parts: string[] = [];
+
+  if (asset.sceneNumber != null) {
+    parts.push(`场景 ${asset.sceneNumber}`);
+  }
+
+  if (asset.shotId) {
+    parts.push(asset.shotId);
+  }
+
+  return parts.length ? parts.join(' · ') : '完整项目输出';
+}
+
 function buildLibraryAssets(projects: Project[]): LibraryAssetItem[] {
   return projects
     .flatMap((project) => [
@@ -872,6 +886,8 @@ export function App() {
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [assetLibrarySection, setAssetLibrarySection] = useState<AssetLibrarySection>('outputs');
   const [assetFilter, setAssetFilter] = useState<'all' | AssetLibraryKind>('all');
+  const [selectedLibraryOutputId, setSelectedLibraryOutputId] = useState('');
+  const [selectedLibraryReferenceId, setSelectedLibraryReferenceId] = useState('');
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -2070,7 +2086,13 @@ export function App() {
       ? characterLibraryAssets
       : assetLibrarySection === 'scenes'
         ? sceneLibraryAssets
-        : objectLibraryAssets;
+        : assetLibrarySection === 'objects'
+          ? objectLibraryAssets
+          : [];
+  const selectedLibraryOutput =
+    filteredLibraryAssets.find((asset) => asset.id === selectedLibraryOutputId) ?? filteredLibraryAssets[0] ?? null;
+  const selectedLibraryReference =
+    currentReferenceAssets.find((asset) => asset.id === selectedLibraryReferenceId) ?? currentReferenceAssets[0] ?? null;
   const referenceWorkflowReadyCount = meta
     ? [meta.envStatus.characterAssetWorkflowExists, meta.envStatus.textToImageWorkflowExists].filter(Boolean).length
     : 0;
@@ -3079,6 +3101,139 @@ export function App() {
     );
   }
 
+  function renderLibraryOutputDetail() {
+    if (!selectedLibraryOutput) {
+      return <div className="empty-card stage-detail-empty">当前筛选下还没有流程产物。先去项目页生成图片、视频或成片。</div>;
+    }
+
+    const asset = selectedLibraryOutput;
+
+    return (
+      <article className="shot-card stage-detail-card library-detail-card">
+        <div className="stage-detail-head">
+          <div>
+            <span className="eyebrow">{assetKindLabel(asset.kind)}</span>
+            <h4>{asset.projectTitle}</h4>
+            <p>{libraryAssetLocationLabel(asset)}</p>
+          </div>
+          <div className="library-detail-status">
+            <span className={`pill ${asset.kind === 'final' ? 'success' : 'running'}`}>{assetKindLabel(asset.kind)}</span>
+            <small>{formatTime(asset.createdAt)}</small>
+          </div>
+        </div>
+        {asset.kind === 'image' ? (
+          <img className="library-detail-preview media-preview" src={assetUrl(asset.relativePath)} alt={asset.projectTitle} />
+        ) : (
+          <video
+            className="library-detail-preview media-preview"
+            src={assetUrl(asset.relativePath)}
+            controls
+            playsInline
+            preload="metadata"
+          />
+        )}
+        <dl className="shot-meta library-detail-meta">
+          <div>
+            <dt>来源项目</dt>
+            <dd>{asset.projectTitle}</dd>
+          </div>
+          <div>
+            <dt>定位</dt>
+            <dd>{libraryAssetLocationLabel(asset)}</dd>
+          </div>
+          <div>
+            <dt>资产类型</dt>
+            <dd>{assetKindLabel(asset.kind)}</dd>
+          </div>
+          <div>
+            <dt>生成时间</dt>
+            <dd>{formatTime(asset.createdAt)}</dd>
+          </div>
+        </dl>
+        <div className="prompt-block">
+          <h5>生成 Prompt</h5>
+          <p className="multiline-text">{asset.prompt || '无提示词'}</p>
+        </div>
+        <div className="library-detail-actions">
+          <button className="button ghost" onClick={() => handleOpenProject(asset.projectId)} type="button">
+            打开项目
+          </button>
+          <a className="button button-link ghost" href={assetUrl(asset.relativePath)} target="_blank" rel="noreferrer">
+            打开资源
+          </a>
+          {asset.kind === 'final' ? (
+            <a className="button button-link secondary" href={finalVideoDownloadUrl(asset.projectId)}>
+              下载成片
+            </a>
+          ) : null}
+        </div>
+      </article>
+    );
+  }
+
+  function renderLibraryReferenceDetail() {
+    if (!selectedLibraryReference) {
+      return (
+        <div className="empty-card stage-detail-empty">
+          当前还没有已生成的{referenceCollectionLabel(assetLibrarySection)}资产。先去项目页的“资产提取”里生成。
+        </div>
+      );
+    }
+
+    const asset = selectedLibraryReference;
+
+    return (
+      <article className="reference-card stage-detail-card library-detail-card">
+        <div className="stage-detail-head">
+          <div>
+            <span className="eyebrow">{referenceKindLabel(asset.kind)}</span>
+            <h4>{asset.name}</h4>
+            <p>{asset.summary || '暂无描述'}</p>
+          </div>
+          <div className="library-detail-status">
+            <span className="pill success">{referenceKindLabel(asset.kind)}</span>
+            <small>{formatTime(asset.createdAt)}</small>
+          </div>
+        </div>
+        <img className="library-detail-preview media-preview" src={assetUrl(asset.relativePath)} alt={asset.name} />
+        <dl className="shot-meta library-detail-meta">
+          <div>
+            <dt>来源项目</dt>
+            <dd>{asset.projectTitle}</dd>
+          </div>
+          <div>
+            <dt>资产类型</dt>
+            <dd>{referenceKindLabel(asset.kind)}</dd>
+          </div>
+          <div>
+            <dt>资源名称</dt>
+            <dd>{asset.name}</dd>
+          </div>
+          <div>
+            <dt>生成时间</dt>
+            <dd>{formatTime(asset.createdAt)}</dd>
+          </div>
+        </dl>
+        <div className="prompt-block">
+          <h5>资产摘要</h5>
+          <p className="multiline-text">{asset.summary || '暂无描述'}</p>
+        </div>
+        <div className="prompt-block">
+          <h5>生成 Prompt</h5>
+          <p className="multiline-text">{asset.prompt || '无提示词'}</p>
+        </div>
+        <div className="library-detail-actions">
+          <button className="button ghost" onClick={() => handleOpenProject(asset.projectId)} type="button">
+            打开项目
+          </button>
+          <a className="button button-link ghost" href={assetUrl(asset.relativePath)} target="_blank" rel="noreferrer">
+            打开资源
+          </a>
+        </div>
+      </article>
+    );
+  }
+
   return (
     <div className="shell">
       <header className="hero panel">
@@ -3925,50 +4080,51 @@ export function App() {
                       </button>
                     </div>
                     {filteredLibraryAssets.length ? (
-                      <div className="library-grid">
-                        {filteredLibraryAssets.map((asset) => (
-                          <article key={asset.id} className="library-card">
-                            <div className="library-card-top">
-                              <span className={`pill ${asset.kind === 'final' ? 'success' : 'running'}`}>
-                                {assetKindLabel(asset.kind)}
-                              </span>
-                              <small>{formatTime(asset.createdAt)}</small>
+                      <div className="stage-browser library-browser">
+                        <aside className="stage-browser-sidebar">
+                          <div className="section-head stage-browser-sidebar-head">
+                            <div>
+                              <h4>流程产物列表</h4>
+                              <span>按当前筛选显示最新图片、视频和成片</span>
                             </div>
-                            {asset.kind === 'image' ? (
-                              <img
-                                className="library-preview media-preview"
-                                src={assetUrl(asset.relativePath)}
-                                alt={asset.projectTitle}
-                              />
-                            ) : (
-                              <video
-                                className="library-preview media-preview"
-                                src={assetUrl(asset.relativePath)}
-                                controls
-                                playsInline
-                              />
-                            )}
-                            <div className="library-card-body">
-                              <strong>{asset.projectTitle}</strong>
-                              <span>
-                                {asset.sceneNumber ? `场景 ${asset.sceneNumber}` : '完整项目输出'}
-                                {asset.shotId ? ` · ${asset.shotId}` : ''}
-                              </span>
-                              <p>{asset.prompt || '无提示词'}</p>
-                            </div>
-                            <div className="library-card-actions">
-                              <button
-                                className="button ghost mini-button"
-                                onClick={() => handleOpenProject(asset.projectId)}
-                              >
-                                打开项目
-                              </button>
-                              <a href={assetUrl(asset.relativePath)} target="_blank" rel="noreferrer">
-                                打开资源
-                              </a>
-                            </div>
-                          </article>
-                        ))}
+                            <span>{filteredLibraryAssets.length} 项</span>
+                          </div>
+                          <div className="stage-browser-list">
+                            {filteredLibraryAssets.map((asset) => {
+                              const isActive = selectedLibraryOutput?.id === asset.id;
+
+                              return (
+                                <button
+                                  key={asset.id}
+                                  className={`stage-browser-item ${isActive ? 'active' : ''}`}
+                                  onClick={() => setSelectedLibraryOutputId(asset.id)}
+                                  type="button"
+                                >
+                                  <div className="stage-browser-thumb">
+                                    {asset.kind === 'image' ? (
+                                      <img src={assetUrl(asset.relativePath)} alt={asset.projectTitle} />
+                                    ) : (
+                                      <video src={assetUrl(asset.relativePath)} muted playsInline preload="metadata" />
+                                    )}
+                                  </div>
+                                  <div className="stage-browser-copy">
+                                    <div className="stage-browser-copy-top">
+                                      <strong>{asset.projectTitle}</strong>
+                                      <span className={`pill ${asset.kind === 'final' ? 'success' : 'running'}`}>
+                                        {assetKindLabel(asset.kind)}
+                                      </span>
+                                    </div>
+                                    <small>
+                                      {libraryAssetLocationLabel(asset)} · {formatTime(asset.createdAt)}
+                                    </small>
+                                    <p>{truncateText(asset.prompt || '无提示词', 78)}</p>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </aside>
+                        <div className="stage-browser-detail">{renderLibraryOutputDetail()}</div>
                       </div>
                     ) : (
                       <div className="empty-card">当前筛选下还没有流程产物。先去项目页生成图片、视频或成片。</div>
@@ -3981,36 +4137,45 @@ export function App() {
                       <strong>{currentReferenceAssets.length} 个已生成资产</strong>
                     </div>
                     {currentReferenceAssets.length ? (
-                      <div className="library-grid">
-                        {currentReferenceAssets.map((asset) => (
-                          <article key={asset.id} className="library-card">
-                            <div className="library-card-top">
-                              <span className="pill success">{referenceKindLabel(asset.kind)}</span>
-                              <small>{formatTime(asset.createdAt)}</small>
+                      <div className="stage-browser library-browser">
+                        <aside className="stage-browser-sidebar">
+                          <div className="section-head stage-browser-sidebar-head">
+                            <div>
+                              <h4>{referenceCollectionLabel(assetLibrarySection)}列表</h4>
+                              <span>按生成时间倒序浏览已生成资产</span>
                             </div>
-                            <img
-                              className="library-preview media-preview"
-                              src={assetUrl(asset.relativePath)}
-                              alt={asset.name}
-                            />
-                            <div className="library-card-body">
-                              <strong>{asset.name}</strong>
-                              <span>{asset.projectTitle}</span>
-                              <p>{asset.summary}</p>
-                            </div>
-                            <div className="library-card-actions">
-                              <button
-                                className="button ghost mini-button"
-                                onClick={() => handleOpenProject(asset.projectId)}
-                              >
-                                打开项目
-                              </button>
-                              <a href={assetUrl(asset.relativePath)} target="_blank" rel="noreferrer">
-                                打开资源
-                              </a>
-                            </div>
-                          </article>
-                        ))}
+                            <span>{currentReferenceAssets.length} 项</span>
+                          </div>
+                          <div className="stage-browser-list">
+                            {currentReferenceAssets.map((asset) => {
+                              const isActive = selectedLibraryReference?.id === asset.id;
+
+                              return (
+                                <button
+                                  key={asset.id}
+                                  className={`stage-browser-item ${isActive ? 'active' : ''}`}
+                                  onClick={() => setSelectedLibraryReferenceId(asset.id)}
+                                  type="button"
+                                >
+                                  <div className="stage-browser-thumb">
+                                    <img src={assetUrl(asset.relativePath)} alt={asset.name} />
+                                  </div>
+                                  <div className="stage-browser-copy">
+                                    <div className="stage-browser-copy-top">
+                                      <strong>{asset.name}</strong>
+                                      <span className="pill success">{referenceKindLabel(asset.kind)}</span>
+                                    </div>
+                                    <small>
+                                      {asset.projectTitle} · {formatTime(asset.createdAt)}
+                                    </small>
+                                    <p>{truncateText(asset.summary || asset.prompt, 78)}</p>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </aside>
+                        <div className="stage-browser-detail">{renderLibraryReferenceDetail()}</div>
                       </div>
                     ) : (
                       <div className="empty-card">
@@ -4452,7 +4617,7 @@ export function App() {
                 </label>
               </div>
               <p className="settings-hint">
-                项目篇幅用于表达整体体量偏好。剧本阶段不会再按固定场次数限制 LLM 展开剧情；镜头数量和拆镜颗粒度也仍由 LLM 在分镜阶段自行决定。这里显示的是当前系统允许的单个镜头视频硬上限；镜头时长超过该值时，需要在分镜阶段主动拆成多个镜头。
+                项目篇幅会直接约束剧本阶段的目标场景数和总时长，并继续影响后续拆镜颗粒度。修改篇幅后，需要重新执行“剧本生成”，后续阶段才会基于新篇幅生效。这里显示的是当前系统允许的单个镜头视频硬上限；镜头时长超过该值时，需要在分镜阶段主动拆成多个镜头。
               </p>
               <p className="settings-hint">
                 当前项目的 TTS 状态：{ttsWorkflowStatusLabel}。

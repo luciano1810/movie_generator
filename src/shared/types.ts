@@ -11,7 +11,7 @@ export const COMFYUI_WORKFLOW_TYPES = [
 ] as const;
 export const ASPECT_RATIOS = ['21:9', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4', '9:16'] as const;
 export const SCRIPT_MODES = ['generate', 'optimize'] as const;
-export const STORY_LENGTHS = ['short', 'medium', 'long'] as const;
+export const STORY_LENGTHS = ['test', 'short', 'medium', 'long'] as const;
 
 export type StageId = (typeof STAGES)[number];
 export type ComfyWorkflowType = (typeof COMFYUI_WORKFLOW_TYPES)[number];
@@ -172,6 +172,8 @@ export interface ReferenceAssetItem {
   kind: ReferenceAssetKind;
   name: string;
   summary: string;
+  genderHint: string;
+  ageHint: string;
   ethnicityHint: string;
   generationPrompt: string;
   status: StageStatus;
@@ -422,27 +424,34 @@ export const STAGE_LABELS: Record<StageId, string> = {
 };
 
 export const STORY_LENGTH_LABELS: Record<StoryLength, string> = {
+  test: '测试',
   short: '短篇',
   medium: '中篇',
   long: '长篇'
 };
 
 const STORY_LENGTH_REFERENCE = {
+  test: {
+    defaultShotDurationSeconds: 3,
+    defaultSceneDurationSeconds: 8,
+    storyboardSplitReferenceSeconds: 4,
+    preferredLongShotDurationSeconds: 3
+  },
   short: {
     defaultShotDurationSeconds: 4,
-    defaultSceneDurationSeconds: 8,
+    defaultSceneDurationSeconds: 15,
     storyboardSplitReferenceSeconds: 6,
     preferredLongShotDurationSeconds: 5
   },
   medium: {
     defaultShotDurationSeconds: 5,
-    defaultSceneDurationSeconds: 10,
+    defaultSceneDurationSeconds: 45,
     storyboardSplitReferenceSeconds: 8,
     preferredLongShotDurationSeconds: 6
   },
   long: {
     defaultShotDurationSeconds: 6,
-    defaultSceneDurationSeconds: 12,
+    defaultSceneDurationSeconds: 90,
     storyboardSplitReferenceSeconds: 10,
     preferredLongShotDurationSeconds: 7
   }
@@ -570,11 +579,15 @@ function inferStoryLength(
       return 'long';
     }
 
-    if (legacyTargetSceneCount >= 6) {
+    if (legacyTargetSceneCount >= 5) {
       return 'medium';
     }
 
-    return 'short';
+    if (legacyTargetSceneCount >= 3) {
+      return 'short';
+    }
+
+    return 'test';
   }
 
   const legacyShotDurationSeconds = Number(input.defaultShotDurationSeconds);
@@ -583,11 +596,15 @@ function inferStoryLength(
       return 'long';
     }
 
-    if (legacyShotDurationSeconds >= 4) {
+    if (legacyShotDurationSeconds >= 5) {
       return 'medium';
     }
 
-    return 'short';
+    if (legacyShotDurationSeconds >= 4) {
+      return 'short';
+    }
+
+    return 'test';
   }
 
   return DEFAULT_SETTINGS.storyLength;

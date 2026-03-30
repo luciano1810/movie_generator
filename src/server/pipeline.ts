@@ -147,50 +147,116 @@ const NO_REFERENCE_TTS_VOICE_PRESETS = [
   }
 ] as const;
 
+function inferCharacterGenderHint(
+  item: Pick<ReferenceAssetItem, 'genderHint' | 'summary' | 'generationPrompt'>
+): string {
+  const explicit = item.genderHint.trim();
+
+  if (explicit) {
+    return explicit;
+  }
+
+  const text = `${item.summary} ${item.generationPrompt}`;
+
+  if (/女性|女人|女生|女孩|少女|女童|母亲|妈妈|妻子|太太|姐姐|妹妹|女儿|女士/.test(text)) {
+    return '女性';
+  }
+
+  if (/男性|男人|男生|男孩|少年|男童|父亲|爸爸|丈夫|先生|哥哥|弟弟|儿子/.test(text)) {
+    return '男性';
+  }
+
+  return '';
+}
+
+function inferCharacterAgeHint(
+  item: Pick<ReferenceAssetItem, 'name' | 'ageHint' | 'summary' | 'generationPrompt'>
+): string {
+  const explicit = item.ageHint.trim();
+
+  if (explicit) {
+    return explicit;
+  }
+
+  const text = `${item.name} ${item.summary} ${item.generationPrompt}`;
+  const explicitAgeMatch = text.match(/([0-9]{1,2}\s*岁(?:左右)?(?:[^\s，。,；;]*)?)/);
+
+  if (explicitAgeMatch?.[1]) {
+    return explicitAgeMatch[1].replace(/\s+/g, '');
+  }
+
+  if (/婴儿|宝宝/.test(text)) {
+    return '婴儿';
+  }
+
+  if (/儿童|小孩|童年|孩童|男孩|女孩|小学生/.test(text)) {
+    return '儿童';
+  }
+
+  if (/少年|少女|中学生/.test(text)) {
+    return '少年';
+  }
+
+  if (/青年|年轻|大学生|二十多/.test(text)) {
+    return '青年';
+  }
+
+  if (/成年|三十多|30岁|三十岁/.test(text)) {
+    return '成年';
+  }
+
+  if (/中年|四十|五十/.test(text)) {
+    return '中年';
+  }
+
+  if (/老年|老人|银发|六十|七十|八十/.test(text)) {
+    return '老年';
+  }
+
+  return '';
+}
+
 function buildCharacterReferenceDetail(
-  item: Pick<ReferenceAssetItem, 'generationPrompt' | 'summary' | 'ethnicityHint'>
+  item: Pick<ReferenceAssetItem, 'name' | 'generationPrompt' | 'summary' | 'ethnicityHint' | 'genderHint' | 'ageHint'>
 ): string {
   const baseDetail = item.generationPrompt.trim() || item.summary.trim();
-  const trimmedEthnicityHint = item.ethnicityHint.trim();
+  const genderHint = inferCharacterGenderHint(item);
+  const ageHint = inferCharacterAgeHint(item);
+  const parts = [
+    genderHint ? `性别：${genderHint}` : '',
+    ageHint ? `年龄：${ageHint}` : '',
+    item.ethnicityHint.trim() ? `人种/族裔提示：${item.ethnicityHint.trim()}` : '',
+    baseDetail
+  ].filter(Boolean);
 
-  if (trimmedEthnicityHint && baseDetail) {
-    return `人种/族裔提示：${trimmedEthnicityHint}；${baseDetail}`;
-  }
-
-  if (trimmedEthnicityHint) {
-    return `人种/族裔提示：${trimmedEthnicityHint}`;
-  }
-
-  return baseDetail;
+  return parts.join('；');
 }
 
 function buildCharacterAssetWorkflowPrompt(
   characterName: string,
   prompt: string,
   ethnicityHint: string,
+  genderHint: string,
+  ageHint: string,
   hasReferenceImage: boolean
 ): string {
   const trimmedPrompt = prompt.trim();
-  const trimmedName = characterName.trim();
-  const detail = buildCharacterReferenceDetail({
-    generationPrompt: prompt,
-    summary: '',
-    ethnicityHint
-  });
-  const prefix = trimmedName ? `角色名：${trimmedName}。` : '';
-  const detailSentence = detail ? `角色设定：${detail}。` : '';
+  const trimmedName = characterName.trim() || '角色';
+  const resolvedGender =
+    inferCharacterGenderHint({ genderHint, summary: '', generationPrompt: trimmedPrompt }) || '性别未说明';
+  const resolvedAge =
+    inferCharacterAgeHint({ name: trimmedName, ageHint, summary: '', generationPrompt: trimmedPrompt }) || '年龄未说明';
+  const resolvedEthnicity = ethnicityHint.trim() || '人种未说明';
+  const resolvedDescription = trimmedPrompt || '人物描述未说明';
+  const basePrompt = `${trimmedName}的全身照，${resolvedGender}，${resolvedAge}，${resolvedEthnicity}，${resolvedDescription}`;
   const fullBodyRequirement =
     '画面要求：生成单人完整全身照片，人物从头到脚完整入镜，清楚露出头顶与双脚，不要半身像、特写、多人同框、拼贴图或局部裁切。';
 
   if (hasReferenceImage) {
-    return `${prefix}${detailSentence}基于用户上传参考图生成该角色的人物参考图，保持角色姓名、人种/族裔提示与人物外貌设定一致。${fullBodyRequirement}`;
+    return `${basePrompt}。基于用户上传参考图生成，保持角色身份、年龄感、人种和外貌设定一致。${fullBodyRequirement}`;
   }
 
-  if (trimmedPrompt || trimmedName || ethnicityHint.trim()) {
-    return `${prefix}${detailSentence}基于上述角色姓名、人种/族裔提示与人物外貌设定生成该角色的人物参考图，确保角色身份稳定、外观一致，可作为后续镜头与视频生成的人物一致性参考。${fullBodyRequirement}`;
-  }
-
-  return `生成该角色的人物参考图，清晰呈现脸型五官、发型发色、体型、服装主色和关键配饰，可作为后续镜头与视频生成的人物一致性参考。${fullBodyRequirement}`;
+  return `${basePrompt}。确保角色身份稳定、外观一致，可作为后续镜头与视频生成的人物一致性参考。${fullBodyRequirement}`;
 }
 
 function now(): string {
@@ -2424,6 +2490,8 @@ async function generateReferenceAssetForProject(
   let generationPrompt = '';
   let itemName = '';
   let ethnicityHint = '';
+  let genderHint = '';
+  let ageHint = '';
   let referenceImageRelativePath = '';
   let temporaryReferenceImage: GeneratedAsset | null = null;
 
@@ -2431,6 +2499,8 @@ async function generateReferenceAssetForProject(
     generationPrompt = prompt?.trim() || item.generationPrompt;
     itemName = item.name;
     ethnicityHint = kind === 'character' ? (options.ethnicityHint?.trim() ?? item.ethnicityHint.trim()) : item.ethnicityHint;
+    genderHint = item.genderHint.trim();
+    ageHint = item.ageHint.trim();
     referenceImageRelativePath = item.referenceImage?.relativePath ?? '';
     temporaryReferenceImage = item.referenceImage;
 
@@ -2468,7 +2538,14 @@ async function generateReferenceAssetForProject(
     const editImage3 = uploadedCharacterPoseImage || uploadedReferenceImage;
     const workflowPrompt =
       kind === 'character'
-        ? buildCharacterAssetWorkflowPrompt(itemName, generationPrompt, ethnicityHint, shouldUseReferenceImage)
+        ? buildCharacterAssetWorkflowPrompt(
+            itemName,
+            generationPrompt,
+            ethnicityHint,
+            genderHint,
+            ageHint,
+            shouldUseReferenceImage
+          )
         : generationPrompt;
 
     const outputFiles = await runProjectComfyWorkflow(

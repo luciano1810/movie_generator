@@ -482,13 +482,17 @@ function createReferenceItem(
   summary: string,
   generationPrompt: string,
   index: number,
-  ethnicityHint = ''
+  ethnicityHint = '',
+  genderHint = '',
+  ageHint = ''
 ): ReferenceAssetItem {
   return {
     id: makeReferenceId(kind, name, index),
     kind,
     name,
     summary,
+    genderHint,
+    ageHint,
     ethnicityHint,
     generationPrompt,
     status: 'idle',
@@ -669,6 +673,8 @@ export async function extractReferenceLibraryFromScript(
     characters?: Array<{
       name?: string;
       summary?: string;
+      genderHint?: string;
+      ageHint?: string;
       ethnicityHint?: string;
       generationPrompt?: string;
     }>;
@@ -700,20 +706,24 @@ export async function extractReferenceLibraryFromScript(
 要求：
 1. characters.generationPrompt 由你在这个阶段直接生成人物外貌特点，供“无参考图角色三视图生成”与后续首帧/视频生成功能共用；只写稳定的人物外观与身份特征，重点描述年龄感、脸型五官、发型、体型、服装、气质、常态表情，不要写三视图、镜头运动或具体剧情动作
 2. 如果同一个人在剧本中以明显不同年龄段出场，例如童年、少年、成年、中年、老年，characters 必须拆成多个独立资产，不能合并成一个；每个资产只对应一个年龄段，并且 name 必须直接带上年龄段标记，例如“林晚（少年）”“林晚（成年）”
-3. characters.summary、characters.ethnicityHint、characters.generationPrompt 都必须严格对应各自年龄段，不要把多个年龄感混在一个人物资产里
-4. characters.ethnicityHint 需要额外给出一个简短的人种/族裔提示，用于稳定角色的人群观感、面部特征和肤色倾向；优先依据剧本明确线索，若剧本没有明确写出，可根据角色姓名、时代、地域和语境给出最稳妥的默认提示，使用简短短语即可
-5. scenes.generationPrompt 和 objects.generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一，并体现视觉风格：${settings.visualStyle}
-6. scenes 这里只提取“基础场景母版”，也就是同一空间在同一时间与氛围设定下可复用的环境本体；不要为它直接写剧情瞬间、人物动作或某个镜头事件
-7. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
-8. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版；后续系统会基于同一个场景母版自动扩成两个不同角度的场景资产，所以这里要先把空间描述写稳定、写完整
-9. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
-10. 物品 prompt 要强调材质、状态、摆放方式、特写形式
-11. 只输出 JSON，结构如下：
+3. characters.summary、characters.genderHint、characters.ageHint、characters.ethnicityHint、characters.generationPrompt 都必须严格对应各自年龄段，不要把多个年龄感混在一个人物资产里
+4. characters.genderHint 需要给出一个简短稳定的性别提示，例如“女性”“男性”“少女”“男孩”，不要写成长句
+5. characters.ageHint 需要给出一个简短稳定的年龄阶段提示，例如“8岁儿童”“16岁少女”“30岁成年女性”“50岁中年男性”，必须和该人物资产对应的年龄段完全一致
+6. characters.ethnicityHint 需要额外给出一个简短的人种/族裔提示，用于稳定角色的人群观感、面部特征和肤色倾向；优先依据剧本明确线索，若剧本没有明确写出，可根据角色姓名、时代、地域和语境给出最稳妥的默认提示，使用简短短语即可
+7. scenes.generationPrompt 和 objects.generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一，并体现视觉风格：${settings.visualStyle}
+8. scenes 这里只提取“基础场景母版”，也就是同一空间在同一时间与氛围设定下可复用的环境本体；不要为它直接写剧情瞬间、人物动作或某个镜头事件
+9. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
+10. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版；后续系统会基于同一个场景母版自动扩成两个不同角度的场景资产，所以这里要先把空间描述写稳定、写完整
+11. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
+12. 物品 prompt 要强调材质、状态、摆放方式、特写形式
+13. 只输出 JSON，结构如下：
 {
   "characters": [
     {
       "name": "角色名（年龄段）",
       "summary": "该年龄段角色作用和外观摘要",
+      "genderHint": "简短的性别提示",
+      "ageHint": "简短的年龄阶段提示",
       "ethnicityHint": "简短的人种/族裔提示",
       "generationPrompt": "该年龄段的人物外貌特点提示词，用于无参考图角色三视图生成和后续首帧/视频约束"
     }
@@ -751,7 +761,9 @@ ${JSON.stringify(script, null, 2)}`
       normalizeString(item.summary, '核心角色设定'),
       normalizeString(item.generationPrompt, normalizeString(item.summary, `${settings.visualStyle}，人物外观与服装特征稳定设定`)),
       index,
-      normalizeOptionalString(item.ethnicityHint)
+      normalizeOptionalString(item.ethnicityHint),
+      normalizeOptionalString(item.genderHint),
+      normalizeOptionalString(item.ageHint)
     )
   );
 
@@ -884,27 +896,49 @@ function buildStoryboardShotDurationGuideline(
   return `durationSeconds 由你根据剧情节奏、动作复杂度、表演长度自行决定；${defaultShotDurationSeconds} 秒只是常规参考，但单个镜头必须控制在 ${maxVideoSegmentDurationSeconds} 秒以内，并在这个上限内尽量给足动作、表演、停顿和走位，不要无谓压缩成过短镜头。`;
 }
 
-function getStoryLengthScriptStructureRequirement(settings: ProjectSettings): {
-  minimumActs: number;
-  minimumShotsPerAct: number;
+function getStoryLengthScriptGenerationTarget(settings: ProjectSettings): {
+  minimumScenes: number;
+  maximumScenes: number;
+  minimumTotalDurationSeconds: number;
+  maximumTotalDurationSeconds: number;
+  pacingInstruction: string;
 } {
+  if (settings.storyLength === 'test') {
+    return {
+      minimumScenes: 2,
+      maximumScenes: 2,
+      minimumTotalDurationSeconds: 12,
+      maximumTotalDurationSeconds: 18,
+      pacingInstruction: '这是测试档位，只保留最核心的起因和结果，快速验证整条流程，不要扩写支线或补充额外桥段。'
+    };
+  }
+
   if (settings.storyLength === 'long') {
     return {
-      minimumActs: 7,
-      minimumShotsPerAct: 20
+      minimumScenes: 8,
+      maximumScenes: 12,
+      minimumTotalDurationSeconds: 600,
+      maximumTotalDurationSeconds: 1200,
+      pacingInstruction: '允许做多轮升级和更完整的铺垫，但仍然要保持短剧节奏，不要写成传统长剧慢热结构。'
     };
   }
 
   if (settings.storyLength === 'medium') {
     return {
-      minimumActs: 5,
-      minimumShotsPerAct: 15
+      minimumScenes: 5,
+      maximumScenes: 8,
+      minimumTotalDurationSeconds: 240,
+      maximumTotalDurationSeconds: 360,
+      pacingInstruction: '需要有完整起承转合，但要持续推进主线，不要为了拉长体量硬塞重复桥段。'
     };
   }
 
   return {
-    minimumActs: 3,
-    minimumShotsPerAct: 10
+    minimumScenes: 3,
+    maximumScenes: 5,
+    minimumTotalDurationSeconds: 45,
+    maximumTotalDurationSeconds: 75,
+    pacingInstruction: '必须直奔主冲突，聚焦单一主线和关键反转，不要扩写支线，不要把短篇写成长篇。'
   };
 }
 
@@ -912,23 +946,30 @@ function getStoryboardStructureRequirement(settings: ProjectSettings): {
   minimumScenes: number;
   minimumShotsPerScene: number;
 } {
+  if (settings.storyLength === 'test') {
+    return {
+      minimumScenes: 2,
+      minimumShotsPerScene: 2
+    };
+  }
+
   if (settings.storyLength === 'long') {
     return {
-      minimumScenes: 7,
-      minimumShotsPerScene: 20
+      minimumScenes: 8,
+      minimumShotsPerScene: 8
     };
   }
 
   if (settings.storyLength === 'medium') {
     return {
       minimumScenes: 5,
-      minimumShotsPerScene: 15
+      minimumShotsPerScene: 5
     };
   }
 
   return {
     minimumScenes: 3,
-    minimumShotsPerScene: 10
+    minimumShotsPerScene: 3
   };
 }
 
@@ -988,11 +1029,16 @@ function buildStoryboardReferenceSelectionId(kind: ReferenceAssetKind, itemId: s
 }
 
 function buildStoryboardReferenceItemDetail(
-  item: Pick<ReferenceAssetItem, 'summary' | 'generationPrompt' | 'ethnicityHint'>,
+  item: Pick<ReferenceAssetItem, 'summary' | 'generationPrompt' | 'ethnicityHint' | 'genderHint' | 'ageHint'>,
   kind: ReferenceAssetKind
 ): string {
   if (kind === 'character') {
-    return [item.ethnicityHint.trim() ? `人种/族裔提示：${item.ethnicityHint.trim()}` : '', item.generationPrompt.trim() || item.summary.trim()]
+    return [
+      item.genderHint.trim() ? `性别：${item.genderHint.trim()}` : '',
+      item.ageHint.trim() ? `年龄：${item.ageHint.trim()}` : '',
+      item.ethnicityHint.trim() ? `人种/族裔提示：${item.ethnicityHint.trim()}` : '',
+      item.generationPrompt.trim() || item.summary.trim()
+    ]
       .filter(Boolean)
       .join('；');
   }
@@ -2012,23 +2058,31 @@ function buildScriptOutputSchema(settings: ProjectSettings): string {
 }
 
 function buildScriptPromptContext(settings: ProjectSettings): string {
-  const structureRequirement = getStoryLengthScriptStructureRequirement(settings);
+  const target = getStoryLengthScriptGenerationTarget(settings);
 
   return `创作参考：
 1. 目标受众：${settings.audience}
 2. 语气风格：${settings.tone}
 3. 视觉调性：${settings.visualStyle}
 4. 输出语言：${settings.language}
-5. 项目篇幅为${STORY_LENGTH_LABELS[settings.storyLength]}；结构下限必须达到至少 ${structureRequirement.minimumActs} 幕，每一幕至少具备可支撑 ${structureRequirement.minimumShotsPerAct} 个镜头的剧情、动作、表演和情绪变化。JSON 不需要单独输出“幕”字段，但 scenes 的整体推进必须能清晰分成至少 ${structureRequirement.minimumActs} 幕，而且每一幕都要有足够事件量支撑后续拆镜
+5. 项目篇幅为${STORY_LENGTH_LABELS[settings.storyLength]}；这是强约束，不是参考值。整体控制在 ${target.minimumScenes} 到 ${target.maximumScenes} 场、总时长约 ${target.minimumTotalDurationSeconds} 到 ${target.maximumTotalDurationSeconds} 秒。${target.pacingInstruction}
 6. 每场应具备明确冲突、推进、情绪变化和可分镜化动作
-7. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定
+7. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定；所有场次相加后的总时长必须落在上面的篇幅区间内
 8. 人物外观和身份要稳定，便于后续持续生成画面
-9. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
+9. 如果输入素材很多，优先压缩、合并和聚焦主线，不要为了“写全”而突破当前篇幅上限
+10. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
 }
 
-function buildScriptMessages(sourceText: string, settings: ProjectSettings): ChatCompletionMessageParam[] {
+function buildScriptMessages(
+  sourceText: string,
+  settings: ProjectSettings,
+  retryFeedback = ''
+): ChatCompletionMessageParam[] {
   const outputSchema = buildScriptOutputSchema(settings);
   const sharedContext = buildScriptPromptContext(settings);
+  const retryNotice = retryFeedback
+    ? `\n\n上一次输出存在以下问题，这次必须全部修正后再返回完整 JSON：\n${retryFeedback}`
+    : '';
 
   if (settings.scriptMode === 'optimize') {
     return [
@@ -2042,6 +2096,7 @@ function buildScriptMessages(sourceText: string, settings: ProjectSettings): Cha
         content: `请优化下面的短剧文本，使其更适合短视频连载和 AI 分镜生产。
 
 ${sharedContext}
+${retryNotice}
 
 优化目标：
 1. 保留原文中可成立的核心设定、人物关系、主要事件和情绪走向，不要无故推翻故事根基
@@ -2052,7 +2107,7 @@ ${sharedContext}
 6. 画外音只在必要时使用，避免重复解释画面已经表达的信息
 7. 如果原文结构混乱，可以重组场次顺序，但不要丢失关键剧情信息
 8. 如果原文缺少必要细节，可以补足角色动机、场景信息和情绪推进，使其成为完整可拍的短剧
-9. 场景数量由你根据原文素材自然决定，但整体结构不得低于上面给出的篇幅对应幕数与每幕镜头量级下限
+9. 必须严格遵守上面的篇幅范围，宁可压缩和合并，也不要生成超出当前篇幅约束的长剧本
 10. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
@@ -2073,6 +2128,7 @@ ${sourceText}`
       content: `请根据下面的素材生成一版完整的短剧剧本。
 
 ${sharedContext}
+${retryNotice}
 
 生成目标：
 1. 将输入素材扩写为完整短剧，而不是复述原文
@@ -2082,7 +2138,7 @@ ${sharedContext}
 5. 角色数量控制在必要范围内，每个核心角色都要有鲜明身份、稳定外观和清晰动机
 6. 场景信息要具体到地点、时间和动作状态，方便后续直接拆分镜
 7. 对白要短、准、狠，符合短剧节奏，尽量避免大段说明性台词
-8. 场景数量由你根据输入素材自然决定，但整体结构不得低于上面给出的篇幅对应幕数与每幕镜头量级下限
+8. 必须严格遵守上面的篇幅范围，宁可压缩和合并情节，也不要生成超出当前篇幅约束的长剧本
 9. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
@@ -2092,6 +2148,44 @@ ${sourceText}`
   ];
 }
 
+function validateGeneratedScriptAgainstLength(
+  script: Pick<ScriptPackage, 'scenes'>,
+  settings: ProjectSettings
+): {
+  ok: boolean;
+  feedback: string;
+} {
+  const target = getStoryLengthScriptGenerationTarget(settings);
+  const sceneCount = script.scenes.length;
+  const totalDurationSeconds = script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0);
+  const issues: string[] = [];
+
+  if (!sceneCount) {
+    issues.push('必须至少生成 1 场戏。');
+  }
+
+  if (sceneCount < target.minimumScenes) {
+    issues.push(`场景数过少：当前 ${sceneCount} 场，至少需要 ${target.minimumScenes} 场。`);
+  }
+
+  if (sceneCount > target.maximumScenes) {
+    issues.push(`场景数过多：当前 ${sceneCount} 场，最多只能 ${target.maximumScenes} 场。`);
+  }
+
+  if (totalDurationSeconds < target.minimumTotalDurationSeconds) {
+    issues.push(`总时长过短：当前约 ${totalDurationSeconds} 秒，至少需要 ${target.minimumTotalDurationSeconds} 秒。`);
+  }
+
+  if (totalDurationSeconds > target.maximumTotalDurationSeconds) {
+    issues.push(`总时长过长：当前约 ${totalDurationSeconds} 秒，最多只能 ${target.maximumTotalDurationSeconds} 秒。`);
+  }
+
+  return {
+    ok: issues.length === 0,
+    feedback: issues.join('；')
+  };
+}
+
 export async function generateScriptFromText(
   sourceText: string,
   settings: ProjectSettings,
@@ -2099,69 +2193,87 @@ export async function generateScriptFromText(
     signal?: AbortSignal;
   }
 ): Promise<ScriptPackage> {
-  const payload = await requestJson<{
-    title?: string;
-    tagline?: string;
-    synopsis?: string;
-    styleNotes?: string;
-    characters?: Array<{
-      name?: string;
-      identity?: string;
-      visualTraits?: string;
-      motivation?: string;
-    }>;
-    scenes?: Array<{
-      sceneNumber?: number;
-      location?: string;
-      timeOfDay?: string;
-      summary?: string;
-      emotionalBeat?: string;
-      voiceover?: string;
-      durationSeconds?: number;
-      dialogue?: Array<{
-        character?: string;
-        line?: string;
-        performanceNote?: string;
+  let retryFeedback = '';
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const payload = await requestJson<{
+      title?: string;
+      tagline?: string;
+      synopsis?: string;
+      styleNotes?: string;
+      characters?: Array<{
+        name?: string;
+        identity?: string;
+        visualTraits?: string;
+        motivation?: string;
       }>;
-    }>;
-  }>(buildScriptMessages(sourceText, settings), {
-    temperature: settings.scriptMode === 'generate' ? 0.8 : 0.7,
-    signal: options?.signal
-  });
+      scenes?: Array<{
+        sceneNumber?: number;
+        location?: string;
+        timeOfDay?: string;
+        summary?: string;
+        emotionalBeat?: string;
+        voiceover?: string;
+        durationSeconds?: number;
+        dialogue?: Array<{
+          character?: string;
+          line?: string;
+          performanceNote?: string;
+        }>;
+      }>;
+    }>(buildScriptMessages(sourceText, settings, retryFeedback), {
+      temperature:
+        attempt === 0
+          ? settings.scriptMode === 'generate'
+            ? 0.8
+            : 0.7
+          : settings.scriptMode === 'generate'
+            ? 0.6
+            : 0.55,
+      signal: options?.signal
+    });
 
-  const scenes: ScriptScene[] = (payload.scenes ?? []).map((scene, index) => ({
-    sceneNumber: index + 1,
-    location: normalizeString(scene.location, `场景 ${index + 1}`),
-    timeOfDay: normalizeString(scene.timeOfDay, '未说明'),
-    summary: normalizeString(scene.summary, '暂无剧情描述'),
-    emotionalBeat: normalizeString(scene.emotionalBeat, '情绪持续推进'),
-    voiceover: normalizeString(scene.voiceover, ''),
-    durationSeconds: normalizeDuration(scene.durationSeconds, defaultSceneDurationExample(settings)),
-    dialogue: (scene.dialogue ?? []).map((line) => ({
-      character: normalizeString(line.character, '旁白'),
-      line: normalizeString(line.line, ''),
-      performanceNote: normalizeString(line.performanceNote, '')
-    }))
-  }));
+    const scenes: ScriptScene[] = (payload.scenes ?? []).map((scene, index) => ({
+      sceneNumber: index + 1,
+      location: normalizeString(scene.location, `场景 ${index + 1}`),
+      timeOfDay: normalizeString(scene.timeOfDay, '未说明'),
+      summary: normalizeString(scene.summary, '暂无剧情描述'),
+      emotionalBeat: normalizeString(scene.emotionalBeat, '情绪持续推进'),
+      voiceover: normalizeString(scene.voiceover, ''),
+      durationSeconds: normalizeDuration(scene.durationSeconds, defaultSceneDurationExample(settings)),
+      dialogue: (scene.dialogue ?? []).map((line) => ({
+        character: normalizeString(line.character, '旁白'),
+        line: normalizeString(line.line, ''),
+        performanceNote: normalizeString(line.performanceNote, '')
+      }))
+    }));
 
-  const scriptCore = {
-    title: normalizeString(payload.title, '未命名短剧'),
-    tagline: normalizeString(payload.tagline, '高钩子短剧'),
-    synopsis: normalizeString(payload.synopsis, '暂无梗概'),
-    styleNotes: normalizeString(payload.styleNotes, settings.visualStyle),
-    characters: (payload.characters ?? []).map((character, index) => ({
-      name: normalizeString(character.name, `角色${index + 1}`),
-      identity: normalizeString(character.identity, '身份未说明'),
-      visualTraits: normalizeString(character.visualTraits, '外观统一、利于连续生成'),
-      motivation: normalizeString(character.motivation, '推动剧情发展')
-    })),
-    scenes
-  };
+    const scriptCore = {
+      title: normalizeString(payload.title, '未命名短剧'),
+      tagline: normalizeString(payload.tagline, '高钩子短剧'),
+      synopsis: normalizeString(payload.synopsis, '暂无梗概'),
+      styleNotes: normalizeString(payload.styleNotes, settings.visualStyle),
+      characters: (payload.characters ?? []).map((character, index) => ({
+        name: normalizeString(character.name, `角色${index + 1}`),
+        identity: normalizeString(character.identity, '身份未说明'),
+        visualTraits: normalizeString(character.visualTraits, '外观统一、利于连续生成'),
+        motivation: normalizeString(character.motivation, '推动剧情发展')
+      })),
+      scenes
+    };
+    const validation = validateGeneratedScriptAgainstLength(scriptCore, settings);
 
-  return {
-    ...scriptCore,
-    markdown: formatScriptMarkdown(scriptCore)
-  };
+    if (validation.ok) {
+      return {
+        ...scriptCore,
+        markdown: formatScriptMarkdown(scriptCore)
+      };
+    }
+
+    retryFeedback = validation.feedback;
+  }
+
+  throw new Error(`剧本生成失败：连续多次输出仍不符合${STORY_LENGTH_LABELS[settings.storyLength]}篇幅约束。${retryFeedback}`);
 }
 
 export async function generateStoryboardFromScript(
