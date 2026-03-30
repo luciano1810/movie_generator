@@ -50,7 +50,7 @@ OPENAI_MODEL=gpt-4o-mini
 COMFYUI_BASE_URL=http://100.100.8.2:8188
 COMFYUI_CHARACTER_ASSET_WORKFLOW=./config/workflows/firered-image-edit-1.1_api.template.json
 COMFYUI_STORYBOARD_IMAGE_WORKFLOW=./config/workflows/storyboard-image-edit-3ref.template.json
-COMFYUI_TEXT_TO_IMAGE_WORKFLOW=./config/workflows/image-workflow.template.json
+COMFYUI_TEXT_TO_IMAGE_WORKFLOW=./config/workflows/zimage_text_to_image.template.json
 COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW=./config/workflows/image-workflow.template.json
 COMFYUI_IMAGE_EDIT_WORKFLOW=./config/workflows/firered-image-edit-1.1_api.template.json
 COMFYUI_TEXT_TO_VIDEO_WORKFLOW=
@@ -170,7 +170,9 @@ npm start
 
 ### 生图模板
 
-`config/workflows/image-workflow.template.json` 提供了一个基础示例，适合常见 `CheckpointLoaderSimple + KSampler + SaveImage` 结构。当前默认填的是 `z-image-turbo-fp8-aio.safetensors`；如果你的 ComfyUI 环境模型名不同，需要改成实际存在的 checkpoint 文件名。
+`config/workflows/zimage_text_to_image.template.json` 是当前默认的文生图模板，对应仓库里的 ZImage API 工作流。它默认映射 `{{prompt}}`、`{{output_prefix}}`、`{{image_width}}`、`{{image_height}}` 和 `{{seed}}`；如果你的 ComfyUI 环境里的 CLIP、VAE、UNet、LoRA 或放大模型文件名不同，需要改成实际存在的模型文件名。
+
+`config/workflows/image-workflow.template.json` 仍保留为一个更通用的旧版基础示例，适合常见 `CheckpointLoaderSimple + KSampler + SaveImage` 结构；如果你希望切回更简单的文生图链路，也可以在系统设置里把 `text_to_image` 工作流手动切到这份模板。
 
 ### 图片编辑模板
 

@@ -166,6 +166,7 @@ function buildCharacterAssetWorkflowPrompt(
   ethnicityHint: string,
   hasReferenceImage: boolean
 ): string {
+  const trimmedPrompt = prompt.trim();
   const trimmedName = characterName.trim();
   const detail = buildCharacterReferenceDetail({
     generationPrompt: prompt,
@@ -177,6 +178,10 @@ function buildCharacterAssetWorkflowPrompt(
 
   if (hasReferenceImage) {
     return `${prefix}${detailSentence}基于用户上传参考图生成该角色的人物参考图，保持角色姓名、人种/族裔提示与人物外貌设定一致。`;
+  }
+
+  if (trimmedPrompt) {
+    return trimmedPrompt;
   }
 
   return `${prefix}${detailSentence}生成该角色的人物参考图，清晰呈现脸型五官、发型发色、体型、服装主色和关键配饰，可作为后续镜头与视频生成的人物一致性参考。`;
@@ -1098,6 +1103,11 @@ function buildReferenceFrameWorkflowPrompt(
   frameKind: ReferenceFrameKind
 ): string {
   const basePrompt = (frameKind === 'start' ? shot.firstFramePrompt : shot.lastFramePrompt).trim();
+
+  if (workflow === 'text_to_image') {
+    return basePrompt;
+  }
+
   const characterPrompt = buildFirstFrameCharacterReferencePrompt(project, shot);
   const parts = [
     buildReferenceFrameShotDirectivePrompt(shot, frameKind),
@@ -1149,6 +1159,8 @@ function buildMergedVideoPrompt(
   }
 
   if (hasSpeechContent) {
+    parts.push(buildSpeechLanguageInstruction(project.settings.language, options.includeSpeechPrompt));
+
     if (backgroundSoundPrompt) {
       parts.push(
         options.includeSpeechPrompt
@@ -1243,7 +1255,9 @@ function buildImageNegativePrompt(baseNegativePrompt: string): string {
 }
 
 function isSpeechPromptDisabled(speechPrompt: string): boolean {
-  return /无语音内容|不生成语音|无需语音|无台词|无旁白/.test(speechPrompt.trim());
+  return /无语音内容|不生成语音|无需语音|无台词|无旁白|no spoken content|no speech|no dialogue|no voiceover|no narration|none\b/i.test(
+    speechPrompt.trim()
+  );
 }
 
 function normalizeTtsSpeechText(value: string): string {
@@ -1258,6 +1272,91 @@ function sanitizeTtsInstructionText(value: string): string {
     .replace(/\s+/g, ' ')
     .replace(/[“”"'`]/g, '')
     .trim();
+}
+
+function describeProjectLanguage(language: string): string {
+  const trimmed = language.trim() || 'zh-CN';
+  const normalized = trimmed.toLowerCase();
+
+  if (normalized.startsWith('zh')) {
+    return `中文（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('en')) {
+    return `英语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('ja')) {
+    return `日语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('ko')) {
+    return `韩语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('fr')) {
+    return `法语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('de')) {
+    return `德语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('es')) {
+    return `西班牙语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('ru')) {
+    return `俄语（${trimmed}）`;
+  }
+
+  return trimmed;
+}
+
+function buildSpeechLanguageInstruction(language: string, includeSpeechPrompt: boolean): string {
+  const languageLabel = describeProjectLanguage(language);
+
+  return includeSpeechPrompt
+    ? `语音语言要求：镜头中所有可听见的对白和旁白必须使用${languageLabel}；除非输入文本本身明确要求，不要自行切换成其他语言、方言或口音。`
+    : `口型语言要求：如镜头中有人开口，口型、停连和面部发声节奏必须与${languageLabel}对白一致；不要表现成其他语言的说话节奏。`;
+}
+
+function getTtsRoleLabels(language: string): {
+  primary: string;
+  secondary: string;
+  tertiary: string;
+} {
+  const normalized = language.trim().toLowerCase();
+
+  if (normalized.startsWith('zh')) {
+    return {
+      primary: '说话人',
+      secondary: '备用说话人一',
+      tertiary: '备用说话人二'
+    };
+  }
+
+  if (normalized.startsWith('ja')) {
+    return {
+      primary: '話者',
+      secondary: '予備話者一',
+      tertiary: '予備話者二'
+    };
+  }
+
+  if (normalized.startsWith('ko')) {
+    return {
+      primary: '화자',
+      secondary: '보조 화자 1',
+      tertiary: '보조 화자 2'
+    };
+  }
+
+  return {
+    primary: 'Speaker',
+    secondary: 'Backup Speaker 1',
+    tertiary: 'Backup Speaker 2'
+  };
 }
 
 function buildDialogueSpeakerDescription(
@@ -1357,7 +1456,8 @@ function buildTtsSpeakerKey(
 
 function buildNoReferenceTtsPrompt(
   speakerKey: string,
-  referenceCharacter: ReferenceAssetItem | null
+  referenceCharacter: ReferenceAssetItem | null,
+  projectLanguage: string
 ): { prompt: string; defaultSpeaker: string } {
   const preset = NO_REFERENCE_TTS_VOICE_PRESETS[hashSpeakerKey(speakerKey) % NO_REFERENCE_TTS_VOICE_PRESETS.length];
   const characterHint = referenceCharacter
@@ -1368,7 +1468,8 @@ function buildNoReferenceTtsPrompt(
 
   return {
     prompt: [
-      '只朗读输入文本中的中文对白，不要添加说话人名称、角色标签、括号说明、动作描述、旁白或额外补充。',
+      '只朗读输入文本中的对白正文，不要添加说话人名称、角色标签、括号说明、动作描述、旁白或额外补充。',
+      `发音语言严格使用${describeProjectLanguage(projectLanguage)}；除非输入文本本身明确包含其他语言，不要自行切换语言、方言或口音。`,
       '情绪、停连和轻重音贴合当前这句对白，但整体保持自然口语，不要做成夸张播音腔。',
       `音色设定：${preset.instruction}`,
       characterHint ? `人物气质参考：${characterHint}。` : ''
@@ -1399,7 +1500,7 @@ function buildTtsPlan(project: Project, shot: Project['storyboard'][number]): Tt
   const segments = dialogueSegments.map((segment, index) => {
     const referenceCharacter = findReferenceCharacterForDialogueSegment(referenceLibrary.characters, segment.speaker);
     const speakerKey = buildTtsSpeakerKey(segment.speaker, referenceCharacter);
-    const noReferencePrompt = buildNoReferenceTtsPrompt(speakerKey, referenceCharacter);
+    const noReferencePrompt = buildNoReferenceTtsPrompt(speakerKey, referenceCharacter, project.settings.language);
 
     return {
       speakerKey,
@@ -1537,7 +1638,8 @@ function buildTtsVariables(
   segment: TtsSegmentPlan,
   referenceAudioPlan: TtsReferenceAudioPlan
 ) {
-  const ttsScript = `说话人: ${segment.text}`;
+  const roleLabels = getTtsRoleLabels(project.settings.language);
+  const ttsScript = `${roleLabels.primary}: ${segment.text}`;
 
   return {
     prompt: segment.prompt,
@@ -1546,9 +1648,10 @@ function buildTtsVariables(
     voiceover: '',
     tts_script: ttsScript,
     tts_plain_text: segment.text,
-    tts_role_1_name: '说话人',
-    tts_role_2_name: '备用说话人一',
-    tts_role_3_name: '备用说话人二',
+    tts_role_1_name: roleLabels.primary,
+    tts_role_2_name: roleLabels.secondary,
+    tts_role_3_name: roleLabels.tertiary,
+    tts_language: project.settings.language,
     narrator_reference_audio: referenceAudioPlan.narratorReferenceAudio,
     speaker_1_reference_audio: referenceAudioPlan.speaker1ReferenceAudio,
     speaker_2_reference_audio: referenceAudioPlan.speaker2ReferenceAudio,
@@ -4018,11 +4121,6 @@ export async function updateStoryboardShotPrompts(
     }
 
     const nextDuration = Math.round(parsedDuration);
-    const maxDurationSeconds = getMaxVideoSegmentDurationSeconds(project);
-
-    if (nextDuration > maxDurationSeconds) {
-      throw new Error(`镜头时长不能超过系统设置中的 ${maxDurationSeconds} 秒。`);
-    }
 
     if (shot.durationSeconds !== nextDuration) {
       shot.durationSeconds = nextDuration;

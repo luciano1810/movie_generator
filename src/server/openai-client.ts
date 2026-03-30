@@ -11,6 +11,7 @@ import type {
   ScriptScene
 } from '../shared/types.js';
 import {
+  DEFAULT_SETTINGS,
   STORY_LENGTH_LABELS,
   getStoryLengthReference,
   normalizeStoryboardShot,
@@ -931,17 +932,47 @@ function getStoryboardStructureRequirement(settings: ProjectSettings): {
   };
 }
 
-function assertStoryboardSourceScriptMeetsStructureRequirement(
-  script: ScriptPackage,
-  settings: ProjectSettings
-): void {
-  const requirement = getStoryboardStructureRequirement(settings);
+function describeProjectLanguage(language: string): string {
+  const trimmed = language.trim() || DEFAULT_SETTINGS.language;
+  const normalized = trimmed.toLowerCase();
 
-  if (script.scenes.length < requirement.minimumScenes) {
-    throw new Error(
-      `当前${STORY_LENGTH_LABELS[settings.storyLength]}分镜至少需要 ${requirement.minimumScenes} 个 scene，但剧本只有 ${script.scenes.length} 个 scene。请先重新生成或优化剧本，再执行分镜生成。`
-    );
+  if (normalized.startsWith('zh')) {
+    return `中文（${trimmed}）`;
   }
+
+  if (normalized.startsWith('en')) {
+    return `英语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('ja')) {
+    return `日语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('ko')) {
+    return `韩语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('fr')) {
+    return `法语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('de')) {
+    return `德语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('es')) {
+    return `西班牙语（${trimmed}）`;
+  }
+
+  if (normalized.startsWith('ru')) {
+    return `俄语（${trimmed}）`;
+  }
+
+  return trimmed;
+}
+
+function buildStoryboardSpokenLanguageRequirement(language: string): string {
+  return `dialogue、voiceover 和 speechPrompt 里的语音内容都必须使用项目输出语言 ${describeProjectLanguage(language)}；不要默认写成中文，也不要无故混用其他语言。`;
 }
 
 function getStoryboardPlanGenerationMaxTokens(minimumShots: number): number {
@@ -1186,26 +1217,11 @@ function validateStoryboardAgainstScript(
   const expectedSceneNumbers = script.scenes.map((scene) => scene.sceneNumber);
   const generatedSceneNumbers = new Set(shots.map((shot) => shot.sceneNumber));
   const missingScenes = expectedSceneNumbers.filter((sceneNumber) => !generatedSceneNumbers.has(sceneNumber));
-  const minimumShotCount = getMinimumStoryboardShotCount(script, settings);
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
-  const coverageIssues = getStoryboardSceneCoverageIssues(script, shots, settings);
   const issues: string[] = [];
 
   if (missingScenes.length) {
     issues.push(`必须覆盖全部场景，当前缺少 sceneNumber: ${missingScenes.join(', ')}`);
-  }
-
-  const underCoveredScenes = coverageIssues.filter((issue) => issue.currentShots > 0);
-  if (underCoveredScenes.length) {
-    issues.push(
-      `以下场景镜头数不足：${underCoveredScenes
-        .map((issue) => `scene ${issue.sceneNumber} 当前 ${issue.currentShots} 个，至少需要 ${issue.minimumShots} 个`)
-        .join('；')}`
-    );
-  }
-
-  if (shots.length < minimumShotCount) {
-    issues.push(`镜头数量过少，当前只有 ${shots.length} 个，至少需要 ${minimumShotCount} 个`);
   }
 
   const overlongShots = shots
@@ -1407,26 +1423,11 @@ function validateStoryboardPlanAgainstScript(
   const expectedSceneNumbers = script.scenes.map((scene) => scene.sceneNumber);
   const generatedSceneNumbers = new Set(shots.map((shot) => shot.sceneNumber));
   const missingScenes = expectedSceneNumbers.filter((sceneNumber) => !generatedSceneNumbers.has(sceneNumber));
-  const minimumShotCount = getMinimumStoryboardShotCount(script, settings);
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
-  const coverageIssues = getStoryboardSceneCoverageIssues(script, shots, settings);
   const issues: string[] = [];
 
   if (missingScenes.length) {
     issues.push(`必须覆盖全部场景，当前缺少 sceneNumber: ${missingScenes.join(', ')}`);
-  }
-
-  const underCoveredScenes = coverageIssues.filter((issue) => issue.currentShots > 0);
-  if (underCoveredScenes.length) {
-    issues.push(
-      `以下场景镜头数不足：${underCoveredScenes
-        .map((issue) => `scene ${issue.sceneNumber} 当前 ${issue.currentShots} 个，至少需要 ${issue.minimumShots} 个`)
-        .join('；')}`
-    );
-  }
-
-  if (shots.length < minimumShotCount) {
-    issues.push(`镜头数量过少，当前只有 ${shots.length} 个，至少需要 ${minimumShotCount} 个`);
   }
 
   if (typeof declaredTotalShots === 'number' && declaredTotalShots !== shots.length) {
@@ -1499,6 +1500,7 @@ function buildStoryboardConversationPrelude(
   referenceLibrary?: ProjectReferenceLibrary
 ): ChatCompletionMessageParam[] {
   const structureRequirement = getStoryboardStructureRequirement(settings);
+  const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
   const splitReferenceSeconds = getStoryboardShotSplitReferenceSeconds(settings);
   const recommendedMinimumShotCount = getRecommendedMinimumStoryboardShotCount(script, settings);
@@ -1512,7 +1514,7 @@ function buildStoryboardConversationPrelude(
   const sceneRules = script.scenes
     .map(
       (scene) =>
-        `- 场景 ${scene.sceneNumber}（${scene.durationSeconds}s）：至少 ${getMinimumShotsForScene(scene, settings)} 个镜头`
+        `- 场景 ${scene.sceneNumber}（${scene.durationSeconds}s）：推荐不少于 ${getMinimumShotsForScene(scene, settings)} 个镜头`
     )
     .join('\n');
 
@@ -1529,11 +1531,11 @@ function buildStoryboardConversationPrelude(
 全局要求：
 1. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
 2. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
-3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写“无语音内容”
+3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写“无语音内容”。${spokenLanguageRequirement}
 4. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
-5. 项目篇幅为 ${STORY_LENGTH_LABELS[settings.storyLength]}，全剧至少需要 ${structureRequirement.minimumScenes} 个 scene，且每个 scene 至少 ${structureRequirement.minimumShotsPerScene} 个镜头；当前剧本共有 ${script.scenes.length} 个场景，你必须在多轮对话结束后完整覆盖全部场景，不得跳场，也不得把任何一场压缩到低于这个镜头下限
-6. 镜头数量不要预设上限，由你根据戏剧节奏、信息密度、动作复杂度、对白来回和情绪变化自行决定；但镜头颗粒度不能过粗。当前剧本总时长约 ${script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0)} 秒，全剧至少需要 ${recommendedMinimumShotCount} 个镜头，避免把多个戏剧节拍硬塞进一个镜头，也不要把本可在一个连续镜头内完成的动作、反应和情绪停顿机械切碎
-7. 分场最低镜头数要求如下：
+5. 项目篇幅为 ${STORY_LENGTH_LABELS[settings.storyLength]}；当前剧本共有 ${script.scenes.length} 个场景，你必须在多轮对话结束后完整覆盖全部现有场景，不得跳场，也不要臆造新的 scene。如果当前剧本场景数低于该篇幅的推荐值，也继续基于现有场景完成拆镜
+6. 镜头数量不要预设上限，由你根据戏剧节奏、信息密度、动作复杂度、对白来回和情绪变化自行决定；但镜头颗粒度不能过粗。当前剧本总时长约 ${script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0)} 秒，全剧推荐至少 ${recommendedMinimumShotCount} 个镜头，避免把多个戏剧节拍硬塞进一个镜头，也不要把本可在一个连续镜头内完成的动作、反应和情绪停顿机械切碎；如果实际略少于这个参考值，也不要为了凑数重复镜头或硬塞空镜
+7. 分场镜头密度参考如下：
 ${sceneRules}
 8. ${splitReferenceSeconds} 秒左右只是判断是否该继续拆镜的参考尺度，不是硬性时长限制；包含对话来回、动作升级、信息反转、人物进出场的场景要继续拆开，不要把多个戏剧节拍塞进一个镜头；但同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切
 9. ${shotDurationGuideline}
@@ -1607,6 +1609,7 @@ ${contextScenes || '无相邻场景'}`;
 
 function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectSettings, retryFeedback = ''): string {
   const structureRequirement = getStoryboardStructureRequirement(settings);
+  const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
   const splitReferenceSeconds = getStoryboardShotSplitReferenceSeconds(settings);
   const minimumShotCount = getMinimumStoryboardShotCount(script, settings);
@@ -1624,7 +1627,7 @@ function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectS
   const sceneRules = script.scenes
     .map(
       (scene) =>
-        `- 场景 ${scene.sceneNumber}（${scene.durationSeconds}s）：至少 ${getMinimumShotsForScene(scene, settings)} 个镜头`
+        `- 场景 ${scene.sceneNumber}（${scene.durationSeconds}s）：推荐不少于 ${getMinimumShotsForScene(scene, settings)} 个镜头`
     )
     .join('\n');
 
@@ -1632,19 +1635,20 @@ function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectS
 
 要求：
 1. 这一轮只能输出整部剧的分镜规划 JSON，必须先明确 totalShots，并给出全部镜头的概况；不要输出 firstFramePrompt、lastFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt、camera、composition、transitionHint 等完整镜头字段
-2. 项目篇幅为 ${STORY_LENGTH_LABELS[settings.storyLength]}，全剧至少需要 ${structureRequirement.minimumScenes} 个 scene，且每个 scene 至少 ${structureRequirement.minimumShotsPerScene} 个镜头；当前剧本共有 ${script.scenes.length} 个场景，你必须完整覆盖全部场景，不得跳场
-3. 全剧至少需要 ${recommendedMinimumShotCount} 个镜头，且不能低于按场景下限累积出的 ${minimumShotCount} 个镜头
-4. 分场最低镜头数要求如下：
+2. 项目篇幅为 ${STORY_LENGTH_LABELS[settings.storyLength]}；当前剧本共有 ${script.scenes.length} 个场景，你必须完整覆盖全部现有场景，不得跳场，也不要臆造新的 scene。如果当前剧本场景数低于该篇幅的推荐值，也继续基于现有场景完成规划
+3. 全剧推荐至少 ${recommendedMinimumShotCount} 个镜头，按场景下限累积出的参考值约为 ${minimumShotCount} 个镜头；如果实际略少于这个参考值，也不要为了凑数重复镜头或硬塞空镜
+4. 分场镜头密度参考如下：
 ${sceneRules}
 5. ${splitReferenceSeconds} 秒左右只是判断是否该继续拆镜的参考尺度，不是硬性时长限制；包含对话来回、动作升级、信息反转、人物进出场的场景要继续拆开，不要把多个戏剧节拍塞进一个镜头；但同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切
 6. ${shotDurationGuideline}
 7. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；这是硬上限，不是建议值。任何一个规划镜头的 durationSeconds 都不能超过它
 8. 每个规划镜头都要给出 1 句 overview，说明这个镜头的画面焦点、动作/对白推进和情绪/转场作用，概况要具体但紧凑
 9. title、purpose、overview 各写 1 句；overview 必须足够支持后续单镜头展开
-10. totalShots、sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-11. totalShots 必须严格等于 shots.length
-12. shotNumber 必须在每个 scene 内从 1 开始连续递增
-13. 输出结构：
+10. ${spokenLanguageRequirement}
+11. totalShots、sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
+12. totalShots 必须严格等于 shots.length
+13. shotNumber 必须在每个 scene 内从 1 开始连续递增
+14. 输出结构：
 {
   "totalShots": ${recommendedMinimumShotCount},
   "shots": [
@@ -1736,6 +1740,8 @@ function buildStoryboardShotTurnPrompt(
 
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
   const splitReferenceSeconds = getStoryboardShotSplitReferenceSeconds(settings);
+  const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
+  const spokenLanguageLabel = describeProjectLanguage(settings.language);
   const retryNotice = retryFeedback
     ? `\n上一次结果不合格，必须修正以下问题：\n${retryFeedback}\n本次输出必须一次性给出修正后的完整镜头 JSON。\n`
     : '';
@@ -1773,7 +1779,7 @@ ${buildCompletedStoryboardContext(storyboard, shotPlan)}
 3. 必须把当前规划里的 overview 展开成完整可执行分镜，但不能偏离该镜头承担的戏剧功能
 4. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
 5. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
-6. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容
+6. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
 7. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
 8. ${splitReferenceSeconds} 秒左右只是判断是否该继续拆镜的参考尺度，不是硬性时长限制；当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
 9. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
@@ -1798,17 +1804,17 @@ ${buildCompletedStoryboardContext(storyboard, shotPlan)}
     "title": ${JSON.stringify(shotPlan.title)},
     "purpose": ${JSON.stringify(shotPlan.purpose)},
     "durationSeconds": ${shotPlan.durationSeconds},
-    "dialogue": "本镜头核心台词，没有可留空",
-    "voiceover": "本镜头画外音，没有可留空",
+    "dialogue": "本镜头核心台词，必须使用${spokenLanguageLabel}，没有可留空",
+    "voiceover": "本镜头画外音，必须使用${spokenLanguageLabel}，没有可留空",
     "camera": "镜头语言",
     "composition": "构图说明",
     "transitionHint": "转场方式，优先自然承接、动作延续或情绪延续，避免突兀硬切",
     "useLastFrameReference": true,
-    "firstFramePrompt": "用于起始参考帧静态图生成的详细中文提示词，必须是可直接生图的单张电影级静帧说明，不要只写剧情提示，也不要写成海报、拼贴、多联画、设定板或概念草图",
-    "lastFramePrompt": "当 useLastFrameReference 为 true 时，用于结束参考帧静态图生成的详细中文提示词；当 useLastFrameReference 为 false 时，必须输出空字符串",
-    "videoPrompt": "用于视频生成的详细中文提示词；先写景别、机位、运镜和镜头节奏，再写人物动作、表演、环境、光线和氛围，不要用引号包裹台词文本",
-    "backgroundSoundPrompt": "用于背景声音生成的详细中文提示词；无对白时也要写自然环境声、动作声和空间氛围声，不含人物对白",
-    "speechPrompt": "用于台词或旁白配音的详细中文提示词；有语音内容时通过人物特征明确说话者，没有语音内容时明确写无语音，不要用引号包裹台词文本",
+    "firstFramePrompt": "用于起始参考帧静态图生成的详细提示词，必须是可直接生图的单张电影级静帧说明，不要只写剧情提示，也不要写成海报、拼贴、多联画、设定板或概念草图",
+    "lastFramePrompt": "当 useLastFrameReference 为 true 时，用于结束参考帧静态图生成的详细提示词；当 useLastFrameReference 为 false 时，必须输出空字符串",
+    "videoPrompt": "用于视频生成的详细提示词；先写景别、机位、运镜和镜头节奏，再写人物动作、表演、环境、光线和氛围，不要用引号包裹台词文本",
+    "backgroundSoundPrompt": "用于背景声音生成的详细提示词；无对白时也要写自然环境声、动作声和空间氛围声，不含人物对白",
+    "speechPrompt": "用于台词或旁白配音的详细提示词；有语音内容时通过人物特征明确说话者，并确保实际语音内容使用${spokenLanguageLabel}；没有语音内容时明确写无语音，不要用引号包裹台词文本",
     "referenceAssetIds": ["scene:场景资产ID", "character:角色资产ID", "object:物品资产ID"]
   }
 }
@@ -2163,7 +2169,6 @@ export async function generateStoryboardFromScript(
   settings: ProjectSettings,
   options?: StoryboardGenerationOptions
 ): Promise<StoryboardShot[]> {
-  assertStoryboardSourceScriptMeetsStructureRequirement(script, settings);
   const expectedSceneNumbers = script.scenes.map((scene) => scene.sceneNumber);
   const totalScenes = script.scenes.length;
   const availableReferenceAssetIds = getStoryboardAvailableReferenceAssetIdSet(options?.referenceLibrary);
