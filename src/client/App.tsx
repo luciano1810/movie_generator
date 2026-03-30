@@ -104,7 +104,7 @@ const TAB_LABELS: Record<ProjectPanelTab, string> = {
   script: '剧本生成',
   assets: '资产生成',
   storyboard: '分镜生成',
-  images: '首帧生成',
+  images: '参考帧生成',
   videos: '视频生成',
   edit: '视频剪辑',
   logs: '执行日志'
@@ -113,8 +113,8 @@ const TAB_LABELS: Record<ProjectPanelTab, string> = {
 const TAB_DESCRIPTIONS: Record<ProjectPanelTab, string> = {
   script: '根据输入文案生成或优化完整短剧剧本。',
   assets: '提取角色、场景、物品候选，并批量生成参考资产。',
-  storyboard: '基于剧本拆分镜头，输出镜头信息和首帧描述。',
-  images: '按分镜批量生成镜头首帧。',
+  storyboard: '基于剧本拆分镜头，输出镜头信息和参考帧描述。',
+  images: '按分镜批量生成镜头参考帧。',
   videos: '基于图片和镜头 Prompt 生成视频片段。',
   edit: '拼接视频片段，输出最终成片。',
   logs: '查看整个项目流水线的实时执行日志和错误信息。'
@@ -1647,7 +1647,7 @@ export function App() {
         }
       );
       setProject(updated);
-      setNotice(`已为当前镜头加入${referenceKindLabel(kind)}参考图“${itemName}”，请重新生成首帧或视频`);
+      setNotice(`已为当前镜头加入${referenceKindLabel(kind)}参考图“${itemName}”，请重新生成参考帧或视频`);
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '添加镜头参考图失败');
@@ -1699,7 +1699,7 @@ export function App() {
     const firstFramePrompt = (draft?.firstFramePrompt ?? shot.firstFramePrompt).trim();
 
     if (!firstFramePrompt) {
-      setNotice('首帧生成 Prompt 不能为空');
+      setNotice('起始参考帧 Prompt 不能为空');
       return;
     }
 
@@ -1747,10 +1747,10 @@ export function App() {
         ...current,
         [shotId]: 0
       }));
-      setNotice('首帧生成 Prompt 已保存；当前图片、视频和最终成片需要按提示重新生成或重新选择版本');
+      setNotice('起始参考帧 Prompt 已保存；当前参考帧、视频和最终成片需要按提示重新生成或重新选择版本');
       await loadProjects(selectedId);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : '保存首帧生成 Prompt 失败');
+      setNotice(error instanceof Error ? error.message : '保存起始参考帧 Prompt 失败');
     } finally {
       setPending('');
     }
@@ -1774,11 +1774,11 @@ export function App() {
       await requestJson<{ ok: true }>(`/api/projects/${selectedId}/storyboard/${shotId}/image/generate`, {
         method: 'POST'
       });
-      setNotice('已提交当前镜头的首帧生成任务，完成后可在版本列表中切换');
+      setNotice('已提交当前镜头的参考帧生成任务，完成后可在版本列表中切换');
       await loadProject(selectedId, true, true);
       await loadProjects(selectedId);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : '提交首帧生成任务失败');
+      setNotice(error instanceof Error ? error.message : '提交参考帧生成任务失败');
     } finally {
       setPending('');
     }
@@ -1804,10 +1804,10 @@ export function App() {
         ...current,
         [shotId]: 0
       }));
-      setNotice('已切换当前镜头的首帧版本；如需保持匹配，请重新生成或重新选择对应视频版本');
+      setNotice('已切换当前镜头的起始参考帧版本；如需保持匹配，请重新生成或重新选择对应视频版本');
       await loadProjects(selectedId);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : '切换首帧版本失败');
+      setNotice(error instanceof Error ? error.message : '切换起始参考帧版本失败');
     } finally {
       setPending('');
     }
@@ -1985,12 +1985,12 @@ export function App() {
     }
 
     if (!firstFramePrompt) {
-      setNotice('首帧 Prompt 不能为空');
+      setNotice('起始参考帧 Prompt 不能为空');
       return;
     }
 
-    if (!lastFramePrompt) {
-      setNotice('尾帧 Prompt 不能为空');
+    if (shot.useLastFrameReference && !lastFramePrompt) {
+      setNotice('结束参考帧 Prompt 不能为空');
       return;
     }
 
@@ -2006,7 +2006,7 @@ export function App() {
         body: JSON.stringify({
           durationSeconds,
           firstFramePrompt,
-          lastFramePrompt,
+          lastFramePrompt: shot.useLastFrameReference ? lastFramePrompt : undefined,
           transitionHint
         })
       });
@@ -2470,12 +2470,12 @@ export function App() {
           </div>
         </dl>
         <div className="prompt-block">
-          <h5>首帧描述</h5>
+          <h5>起始参考帧描述</h5>
           <p>{shot.firstFramePrompt}</p>
         </div>
         <div className="prompt-block">
-          <h5>尾帧描述</h5>
-          <p>{shot.lastFramePrompt}</p>
+          <h5>结束参考帧描述</h5>
+          <p>{shot.useLastFrameReference ? shot.lastFramePrompt : '当前镜头不需要结束参考帧约束'}</p>
         </div>
         <div className="prompt-block">
           <h5>视频描述</h5>
@@ -2487,7 +2487,7 @@ export function App() {
 
   function renderImageDetail() {
     if (!project || !selectedImageShot) {
-      return <div className="empty-card stage-detail-empty">执行第 3 阶段生成分镜后，才能批量生成并查看首帧图片。</div>;
+      return <div className="empty-card stage-detail-empty">执行第 3 阶段生成分镜后，才能批量生成并查看参考帧图片。</div>;
     }
 
     const shot = selectedImageShot;
@@ -2532,7 +2532,7 @@ export function App() {
         <div className="input-reference-strip">
           <div className="input-reference-strip-head">
             <span>从当前资产库添加参考图</span>
-            <small>可手动补充未自动匹配到的角色、场景或物品参考图，首帧和后续视频生成都会使用这些参考图。</small>
+            <small>可手动补充未自动匹配到的角色、场景或物品参考图，参考帧和后续视频生成都会使用这些参考图。</small>
           </div>
           {availableShotReferenceAssets.length ? (
             <>
@@ -2621,11 +2621,11 @@ export function App() {
             </div>
           </div>
         ) : (
-          <div className="input-reference-empty">当前镜头没有匹配到可注入的参考图，首帧生成将只使用 Prompt。</div>
+          <div className="input-reference-empty">当前镜头没有匹配到可注入的参考图，参考帧生成将只使用 Prompt。</div>
         )}
         <div className="prompt-block">
           <div className="prompt-block-head">
-            <h5>首帧生成 Prompt</h5>
+            <h5>起始参考帧 Prompt</h5>
             <button
               className="button ghost mini-button"
               disabled={
@@ -2634,7 +2634,7 @@ export function App() {
               onClick={() => void handleSaveImagePrompt(shot.id)}
               type="button"
             >
-              {imagePromptPending ? '保存中...' : '保存首帧 Prompt'}
+              {imagePromptPending ? '保存中...' : '保存起始参考帧 Prompt'}
             </button>
           </div>
           <textarea
@@ -2649,11 +2649,15 @@ export function App() {
                 })
               }))
             }
-            placeholder="输入这个镜头的首帧生成 Prompt"
+            placeholder="输入这个镜头的起始参考帧 Prompt"
           />
         </div>
+        <div className="prompt-block">
+          <h5>结束参考帧策略</h5>
+          <p>{shot.useLastFrameReference ? '该镜头会额外生成结束参考帧，并自动注入后续视频工作流。' : '该镜头仅生成起始参考帧，结束画面由视频工作流自然收束。'}</p>
+        </div>
         <div className="asset-box">
-          <span>首帧版本</span>
+          <span>起始参考帧版本</span>
           {selectedImage ? (
             <>
               <img src={assetUrl(selectedImage.relativePath)} alt={shot.title} />
@@ -2705,7 +2709,7 @@ export function App() {
               ) : null}
             </>
           ) : (
-            <small>当前镜头还没有首帧图片。</small>
+            <small>当前镜头还没有起始参考帧图片。</small>
           )}
         </div>
         <button
@@ -2748,12 +2752,13 @@ export function App() {
     const firstFramePromptValue = technicalPromptDraft?.firstFramePrompt ?? shot.firstFramePrompt;
     const lastFramePromptValue = technicalPromptDraft?.lastFramePrompt ?? shot.lastFramePrompt;
     const transitionHintValue = technicalPromptDraft?.transitionHint ?? shot.transitionHint;
+    const requiresLastFrameReference = shot.useLastFrameReference;
     const durationSecondsValue = technicalPromptDraft?.durationSeconds ?? String(shot.durationSeconds);
     const durationSecondsValid = parsePositiveIntegerDraft(durationSecondsValue) !== null;
     const technicalPromptDirty =
       durationSecondsValue.trim() !== String(shot.durationSeconds) ||
       firstFramePromptValue.trim() !== shot.firstFramePrompt.trim() ||
-      lastFramePromptValue.trim() !== shot.lastFramePrompt.trim() ||
+      (requiresLastFrameReference && lastFramePromptValue.trim() !== shot.lastFramePrompt.trim()) ||
       transitionHintValue.trim() !== shot.transitionHint.trim();
     const technicalPromptPending = pending === `technical-prompts:${shot.id}`;
     const backgroundSoundPromptValue = audioPromptDraft?.backgroundSoundPrompt ?? shot.backgroundSoundPrompt;
@@ -2830,7 +2835,7 @@ export function App() {
                 !technicalPromptDirty ||
                 !durationSecondsValid ||
                 !firstFramePromptValue.trim() ||
-                !lastFramePromptValue.trim() ||
+                (requiresLastFrameReference && !lastFramePromptValue.trim()) ||
                 !transitionHintValue.trim()
               }
               onClick={() => void handleSaveTechnicalPrompts(shot.id)}
@@ -2858,7 +2863,7 @@ export function App() {
             />
           </label>
           <label className="prompt-subfield">
-            <span>首帧 Prompt</span>
+            <span>起始参考帧 Prompt</span>
             <textarea
               className="prompt-editor"
               rows={5}
@@ -2871,26 +2876,33 @@ export function App() {
                   })
                 }))
               }
-              placeholder="输入这个镜头的首帧 Prompt"
+              placeholder="输入这个镜头的起始参考帧 Prompt"
             />
           </label>
-          <label className="prompt-subfield">
-            <span>尾帧 Prompt</span>
-            <textarea
-              className="prompt-editor"
-              rows={5}
-              value={lastFramePromptValue}
-              onChange={(event) =>
-                setTechnicalPromptDrafts((current) => ({
-                  ...current,
-                  [shot.id]: buildShotTechnicalDraft(shot, current[shot.id], {
-                    lastFramePrompt: event.target.value
-                  })
-                }))
-              }
-              placeholder="输入这个镜头的尾帧 Prompt"
-            />
-          </label>
+          {requiresLastFrameReference ? (
+            <label className="prompt-subfield">
+              <span>结束参考帧 Prompt</span>
+              <textarea
+                className="prompt-editor"
+                rows={5}
+                value={lastFramePromptValue}
+                onChange={(event) =>
+                  setTechnicalPromptDrafts((current) => ({
+                    ...current,
+                    [shot.id]: buildShotTechnicalDraft(shot, current[shot.id], {
+                      lastFramePrompt: event.target.value
+                    })
+                  }))
+                }
+                placeholder="输入这个镜头的结束参考帧 Prompt"
+              />
+            </label>
+          ) : (
+            <div className="prompt-subfield">
+              <span>结束参考帧</span>
+              <small>当前镜头不要求结束参考帧；是否生成结束参考帧由分镜规划决定。</small>
+            </div>
+          )}
           <label className="prompt-subfield">
             <span>转场提示</span>
             <input
@@ -3566,7 +3578,7 @@ export function App() {
                 {projectStageTab === 'images' ? (
                   <section className="panel inset">
                     <div className="section-head">
-                      <h3>首帧图片</h3>
+                      <h3>参考帧图片</h3>
                       <span>{project.storyboard.length ? `${readyImageCount}/${project.storyboard.length} 已生成` : '等待分镜生成'}</span>
                     </div>
                     <div className="status-strip">
@@ -3579,7 +3591,7 @@ export function App() {
                         <strong>{project.storyboard.length}</strong>
                       </div>
                       <div className="status-item">
-                          <span>首帧工作流</span>
+                        <span>参考帧工作流</span>
                         <strong>{storyboardImageWorkflowReady ? '已就绪' : '未配置'}</strong>
                       </div>
                     </div>
@@ -3634,7 +3646,7 @@ export function App() {
                         <div className="stage-browser-detail">{renderImageDetail()}</div>
                       </div>
                     ) : (
-                      <div className="empty-card">执行第 3 阶段生成分镜后，才能批量生成并查看首帧图片。</div>
+                      <div className="empty-card">执行第 3 阶段生成分镜后，才能批量生成并查看参考帧图片。</div>
                     )}
                   </section>
                 ) : null}
@@ -3897,7 +3909,7 @@ export function App() {
                         className={`tab-button ${assetFilter === 'image' ? 'active' : ''}`}
                         onClick={() => setAssetFilter('image')}
                       >
-                        首帧图
+                        参考帧图
                       </button>
                       <button
                         className={`tab-button ${assetFilter === 'video' ? 'active' : ''}`}

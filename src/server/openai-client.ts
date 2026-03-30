@@ -472,7 +472,7 @@ function makeReferenceId(prefix: string, value: string, index: number): string {
     .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 48);
-  return `${prefix}-${slug || index + 1}`;
+  return `${prefix}-${slug || 'item'}-${index + 1}`;
 }
 
 function createReferenceItem(
@@ -498,6 +498,44 @@ function createReferenceItem(
     asset: null,
     assetHistory: []
   };
+}
+
+const SCENE_REFERENCE_ANGLE_VARIANTS = [
+  {
+    label: '主视角',
+    promptInstruction:
+      '作为同一场景的第 1 个参考角度，以更完整的 establishing 视角呈现空间全貌、主结构和主要纵深关系，保持空镜环境，不要出现人物或剧情瞬间。'
+  },
+  {
+    label: '第二视角',
+    promptInstruction:
+      '作为同一场景的第 2 个参考角度，从同一空间的另一侧或斜对角重新观察，必须与第 1 个角度明显不同，但保持同一时间、光线、材质与氛围设定；仍然保持空镜环境，不要出现人物或剧情瞬间。'
+  }
+] as const;
+
+function expandSceneReferenceItems(
+  items: Array<{
+    name: string;
+    summary: string;
+    generationPrompt: string;
+  }>,
+  settings: ProjectSettings
+): ReferenceAssetItem[] {
+  return items.flatMap((item, index) =>
+    SCENE_REFERENCE_ANGLE_VARIANTS.map((variant, variantIndex) =>
+      createReferenceItem(
+        'scene',
+        `${item.name}（${variant.label}）`,
+        `${variant.label}：${item.summary}`,
+        normalizeSceneReferencePrompt(
+          `${item.generationPrompt}。${variant.promptInstruction}`,
+          settings,
+          item.name
+        ),
+        index * SCENE_REFERENCE_ANGLE_VARIANTS.length + variantIndex
+      )
+    )
+  );
 }
 
 function normalizeSceneReferencePrompt(
@@ -660,20 +698,23 @@ export async function extractReferenceLibraryFromScript(
 
 要求：
 1. characters.generationPrompt 由你在这个阶段直接生成人物外貌特点，供“无参考图角色三视图生成”与后续首帧/视频生成功能共用；只写稳定的人物外观与身份特征，重点描述年龄感、脸型五官、发型、体型、服装、气质、常态表情，不要写三视图、镜头运动或具体剧情动作
-2. characters.ethnicityHint 需要额外给出一个简短的人种/族裔提示，用于稳定角色的人群观感、面部特征和肤色倾向；优先依据剧本明确线索，若剧本没有明确写出，可根据角色姓名、时代、地域和语境给出最稳妥的默认提示，使用简短短语即可
-3. scenes.generationPrompt 和 objects.generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一，并体现视觉风格：${settings.visualStyle}
-4. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
-5. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版
-6. 物品 prompt 要强调材质、状态、摆放方式、特写形式
-7. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
-8. 只输出 JSON，结构如下：
+2. 如果同一个人在剧本中以明显不同年龄段出场，例如童年、少年、成年、中年、老年，characters 必须拆成多个独立资产，不能合并成一个；每个资产只对应一个年龄段，并且 name 必须直接带上年龄段标记，例如“林晚（少年）”“林晚（成年）”
+3. characters.summary、characters.ethnicityHint、characters.generationPrompt 都必须严格对应各自年龄段，不要把多个年龄感混在一个人物资产里
+4. characters.ethnicityHint 需要额外给出一个简短的人种/族裔提示，用于稳定角色的人群观感、面部特征和肤色倾向；优先依据剧本明确线索，若剧本没有明确写出，可根据角色姓名、时代、地域和语境给出最稳妥的默认提示，使用简短短语即可
+5. scenes.generationPrompt 和 objects.generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一，并体现视觉风格：${settings.visualStyle}
+6. scenes 这里只提取“基础场景母版”，也就是同一空间在同一时间与氛围设定下可复用的环境本体；不要为它直接写剧情瞬间、人物动作或某个镜头事件
+7. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
+8. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版；后续系统会基于同一个场景母版自动扩成两个不同角度的场景资产，所以这里要先把空间描述写稳定、写完整
+9. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
+10. 物品 prompt 要强调材质、状态、摆放方式、特写形式
+11. 只输出 JSON，结构如下：
 {
   "characters": [
     {
-      "name": "角色名",
-      "summary": "角色作用和外观摘要",
+      "name": "角色名（年龄段）",
+      "summary": "该年龄段角色作用和外观摘要",
       "ethnicityHint": "简短的人种/族裔提示",
-      "generationPrompt": "人物外貌特点提示词，用于无参考图角色三视图生成和后续首帧/视频约束"
+      "generationPrompt": "该年龄段的人物外貌特点提示词，用于无参考图角色三视图生成和后续首帧/视频约束"
     }
   ],
   "scenes": [
@@ -713,18 +754,17 @@ ${JSON.stringify(script, null, 2)}`
     )
   );
 
-  const scenes = (payload.scenes ?? []).map((item, index) =>
-    createReferenceItem(
-      'scene',
-      normalizeString(item.name, `场景${index + 1}`),
-      normalizeString(item.summary, '核心场景设定'),
-      normalizeSceneReferencePrompt(
+  const scenes = expandSceneReferenceItems(
+    (payload.scenes ?? []).map((item, index) => ({
+      name: normalizeString(item.name, `场景${index + 1}`),
+      summary: normalizeString(item.summary, '核心场景设定'),
+      generationPrompt: normalizeSceneReferencePrompt(
         item.generationPrompt,
         settings,
         normalizeString(item.name, `场景${index + 1}`)
-      ),
-      index
-    )
+      )
+    })),
+    settings
   );
 
   const objects = (payload.objects ?? []).map((item, index) =>
@@ -1027,6 +1067,7 @@ interface StoryboardShotPayload {
   camera?: string;
   composition?: string;
   transitionHint?: string;
+  useLastFrameReference?: boolean;
   firstFramePrompt?: string;
   lastFramePrompt?: string;
   videoPrompt?: string;
@@ -1209,6 +1250,14 @@ function validateStoryboardAgainstScript(
     if (invalidReferenceIds.length) {
       issues.push(`referenceAssetIds 只能使用可用资产列表中的 ID，当前存在无效值：${invalidReferenceIds.join(', ')}`);
     }
+  }
+
+  const missingLastFrameShots = shots
+    .filter((shot) => shot.useLastFrameReference && !shot.lastFramePrompt.trim())
+    .map((shot) => `scene ${shot.sceneNumber} shot ${shot.shotNumber}`);
+
+  if (missingLastFrameShots.length) {
+    issues.push(`useLastFrameReference 为 true 时必须提供 lastFramePrompt，当前缺失：${missingLastFrameShots.join('；')}`);
   }
 
   return {
@@ -1434,6 +1483,10 @@ function validateStoryboardShotAgainstPlan(
     }
   }
 
+  if (shot.useLastFrameReference && !shot.lastFramePrompt.trim()) {
+    issues.push('useLastFrameReference 为 true 时必须提供 lastFramePrompt');
+  }
+
   return {
     ok: issues.length === 0,
     feedback: issues.join('；')
@@ -1474,7 +1527,7 @@ function buildStoryboardConversationPrelude(
       content: `我们将通过多轮对话完成整部短剧分镜。第 1 轮先输出整部剧的分镜规划，必须给出总镜头数和每个镜头的概况；从第 2 轮开始，我会按规划顺序逐轮向你索取单个完整镜头，你必须在连续多轮中保持人物外观、服装、道具、空间关系和情绪推进一致。
 
 全局要求：
-1. 每个镜头必须包含首帧生图描述 firstFramePrompt、尾帧生图描述 lastFramePrompt，以及视频片段描述 videoPrompt
+1. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
 2. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
 3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写“无语音内容”
 4. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
@@ -1486,15 +1539,19 @@ ${sceneRules}
 9. ${shotDurationGuideline}
 10. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；这是硬上限，不是建议值。任何一个镜头的 durationSeconds 都不能超过它；如果一段动作、对白或情绪变化超出这个上限，你必须主动拆成多个镜头，不要依赖系统自动拼接兜底
 11. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
-12. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的首帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
-13. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
-14. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
-15. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-16. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、lastFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句，但 firstFramePrompt 和 lastFramePrompt 必须优先保证画面信息完整，不要偷懒简写成剧情提示
-17. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头在首帧/视频生成时要加载哪些参考资产。你必须结合下方“可用参考资产列表”中的名称、类别、摘要和细节判断该镜头实际要用哪些资产，不能只看 ID 猜测
-18. referenceAssetIds 只能使用“可用参考资产列表”里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
-19. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-20. 第 1 轮只输出总镜头数和所有镜头概况，不要提前输出完整镜头字段；后续每一轮只输出当前指定的单个镜头 JSON，不能提前生成其他镜头，也不要重复已完成镜头
+12. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
+13. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
+14. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
+15. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
+16. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
+17. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
+18. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
+19. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头在参考帧/视频生成时要加载哪些参考资产。你必须结合下方“可用参考资产列表”中的名称、类别、摘要和细节判断该镜头实际要用哪些资产，不能只看 ID 猜测
+20. referenceAssetIds 只能使用“可用参考资产列表”里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
+21. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
+22. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
+23. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
+24. 第 1 轮只输出总镜头数和所有镜头概况，不要提前输出完整镜头字段；后续每一轮只输出当前指定的单个完整镜头 JSON，不能提前生成其他镜头，也不要重复已完成镜头
 
 剧本 JSON：
 ${JSON.stringify(script, null, 2)}
@@ -1640,7 +1697,7 @@ function formatGeneratedStoryboardShotContext(shot: StoryboardShot): string {
   return [
     `- scene ${shot.sceneNumber} shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s`,
     `  对白：${shot.dialogue || '无'}｜画外音：${shot.voiceover || '无'}`,
-    `  收尾状态：${truncateStoryboardPromptText(shot.lastFramePrompt, 140)}`,
+    `  结束参考帧：${shot.useLastFrameReference ? truncateStoryboardPromptText(shot.lastFramePrompt, 140) : '无'}`,
     `  转场：${shot.transitionHint}`
   ].join('\n');
 }
@@ -1714,21 +1771,25 @@ ${buildCompletedStoryboardContext(storyboard, shotPlan)}
 1. 只能输出这一个镜头的完整 JSON，不能输出其他镜头
 2. sceneNumber 必须是 ${shotPlan.sceneNumber}，shotNumber 必须是 ${shotPlan.shotNumber}，title 必须保持为 ${JSON.stringify(shotPlan.title)}，purpose 必须保持为 ${JSON.stringify(shotPlan.purpose)}，durationSeconds 必须保持为 ${shotPlan.durationSeconds}
 3. 必须把当前规划里的 overview 展开成完整可执行分镜，但不能偏离该镜头承担的戏剧功能
-4. 每个镜头必须包含首帧生图描述 firstFramePrompt、尾帧生图描述 lastFramePrompt，以及视频片段描述 videoPrompt
+4. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
 5. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
 6. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容
 7. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
 8. ${splitReferenceSeconds} 秒左右只是判断是否该继续拆镜的参考尺度，不是硬性时长限制；当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
 9. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
 10. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
-11. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的首帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
-12. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
-13. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
-14. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-15. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、lastFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句，但 firstFramePrompt 和 lastFramePrompt 必须优先保证画面信息完整，不要偷懒简写成剧情提示
-16. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-17. 你必须结合上文“可用参考资产列表”里的名称、摘要和细节判断这个镜头该用哪些资产，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义
-18. 输出结构：
+11. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
+12. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
+13. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
+14. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
+15. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
+16. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
+17. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
+18. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
+19. 你必须结合上文“可用参考资产列表”里的名称、摘要和细节判断这个镜头该用哪些资产，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义
+20. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
+21. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
+22. 输出结构：
 {
   "shot": {
     "id": "scene-${shotPlan.sceneNumber}-shot-${shotPlan.shotNumber}",
@@ -1742,8 +1803,9 @@ ${buildCompletedStoryboardContext(storyboard, shotPlan)}
     "camera": "镜头语言",
     "composition": "构图说明",
     "transitionHint": "转场方式，优先自然承接、动作延续或情绪延续，避免突兀硬切",
-    "firstFramePrompt": "用于首帧静态图生成的详细中文提示词，必须是可直接生图的单张电影级静帧说明，不要只写剧情提示，也不要写成海报、拼贴、多联画、设定板或概念草图",
-    "lastFramePrompt": "用于尾帧静态图生成的详细中文提示词，明确镜头结束时的构图、人物状态和环境状态",
+    "useLastFrameReference": true,
+    "firstFramePrompt": "用于起始参考帧静态图生成的详细中文提示词，必须是可直接生图的单张电影级静帧说明，不要只写剧情提示，也不要写成海报、拼贴、多联画、设定板或概念草图",
+    "lastFramePrompt": "当 useLastFrameReference 为 true 时，用于结束参考帧静态图生成的详细中文提示词；当 useLastFrameReference 为 false 时，必须输出空字符串",
     "videoPrompt": "用于视频生成的详细中文提示词；先写景别、机位、运镜和镜头节奏，再写人物动作、表演、环境、光线和氛围，不要用引号包裹台词文本",
     "backgroundSoundPrompt": "用于背景声音生成的详细中文提示词；无对白时也要写自然环境声、动作声和空间氛围声，不含人物对白",
     "speechPrompt": "用于台词或旁白配音的详细中文提示词；有语音内容时通过人物特征明确说话者，没有语音内容时明确写无语音，不要用引号包裹台词文本",

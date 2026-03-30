@@ -105,10 +105,16 @@ const DEFAULT_REFERENCE_AUDIO_TTS_WORKFLOW_PATH = path.resolve(
   process.cwd(),
   'config/workflows/qwen3_tts_dialogue.template.json'
 );
+const DEFAULT_SINGLE_FRAME_VIDEO_WORKFLOW_PATH = path.resolve(
+  process.cwd(),
+  'config/workflows/ltx_2.3_i2v_modular_api.template.json'
+);
+const DEFAULT_FIRST_LAST_FRAME_VIDEO_WORKFLOW_PATH = path.resolve(
+  process.cwd(),
+  'config/workflows/ltx_2.3_i2v_first_last_api.template.json'
+);
 const MAX_STORYBOARD_REFERENCE_IMAGES_PER_RUN = 3;
 const MAX_STORYBOARD_REFERENCE_IMAGES_PER_CHAIN_RUN = 2;
-const LTX_TARGET_LONG_SIDE = 720;
-const LTX_DIMENSION_MULTIPLE = 16;
 const AUDIO_DRIVEN_VIDEO_PADDING_SECONDS = 0.25;
 const NO_REFERENCE_TTS_VOICE_PRESETS = [
   {
@@ -326,7 +332,12 @@ async function persistStoryboard(project: Project, planShots: StoryboardPlanShot
 }
 
 function hasGeneratedMediaOutputs(project: Project): boolean {
-  return Boolean(project.assets.images.length || project.assets.videos.length || project.assets.finalVideo);
+  return Boolean(
+    project.assets.images.length ||
+      project.assets.lastImages.length ||
+      project.assets.videos.length ||
+      project.assets.finalVideo
+  );
 }
 
 async function deleteStoredAsset(asset: GeneratedAsset | null): Promise<void> {
@@ -341,11 +352,15 @@ async function deleteStoredAsset(asset: GeneratedAsset | null): Promise<void> {
   }
 }
 
-type ShotAssetStage = 'images' | 'audios' | 'videos';
+type ShotAssetStage = 'images' | 'lastImages' | 'audios' | 'videos';
 
 function getShotAssetHistoryMap(project: Project, stage: ShotAssetStage) {
   if (stage === 'images') {
     return project.assets.imageHistory;
+  }
+
+  if (stage === 'lastImages') {
+    return project.assets.lastImageHistory;
   }
 
   if (stage === 'audios') {
@@ -365,6 +380,11 @@ function setShotAssetHistoryMap(
     return;
   }
 
+  if (stage === 'lastImages') {
+    project.assets.lastImageHistory = history;
+    return;
+  }
+
   if (stage === 'audios') {
     project.assets.audioHistory = history;
     return;
@@ -378,6 +398,10 @@ function getShotAssetCollection(project: Project, stage: ShotAssetStage): Genera
     return project.assets.images;
   }
 
+  if (stage === 'lastImages') {
+    return project.assets.lastImages;
+  }
+
   if (stage === 'audios') {
     return project.assets.audios;
   }
@@ -388,6 +412,11 @@ function getShotAssetCollection(project: Project, stage: ShotAssetStage): Genera
 function setShotAssetCollection(project: Project, stage: ShotAssetStage, assets: GeneratedAsset[]): void {
   if (stage === 'images') {
     project.assets.images = assets;
+    return;
+  }
+
+  if (stage === 'lastImages') {
+    project.assets.lastImages = assets;
     return;
   }
 
@@ -511,8 +540,18 @@ function clearAllShotAssetHistory(project: Project, stage: ShotAssetStage): void
   setShotAssetHistoryMap(project, stage, {});
 }
 
-function invalidateGeneratedMediaFromReferenceLibrary(project: Project): void {
+function clearAllReferenceFrameAssetHistory(project: Project): void {
   clearAllShotAssetHistory(project, 'images');
+  clearAllShotAssetHistory(project, 'lastImages');
+}
+
+function archiveAllActiveReferenceFrameAssets(project: Project): void {
+  archiveAllActiveShotAssets(project, 'images');
+  archiveAllActiveShotAssets(project, 'lastImages');
+}
+
+function invalidateGeneratedMediaFromReferenceLibrary(project: Project): void {
+  clearAllReferenceFrameAssetHistory(project);
   clearAllShotAssetHistory(project, 'audios');
   clearAllShotAssetHistory(project, 'videos');
   project.assets.finalVideo = null;
@@ -525,7 +564,7 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
   if (stage === 'script') {
     project.script = null;
     project.storyboard = [];
-    clearAllShotAssetHistory(project, 'images');
+    clearAllReferenceFrameAssetHistory(project);
     clearAllShotAssetHistory(project, 'audios');
     clearAllShotAssetHistory(project, 'videos');
     project.assets.finalVideo = null;
@@ -551,7 +590,7 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
 
   if (stage === 'storyboard') {
     project.storyboard = [];
-    clearAllShotAssetHistory(project, 'images');
+    clearAllReferenceFrameAssetHistory(project);
     clearAllShotAssetHistory(project, 'audios');
     clearAllShotAssetHistory(project, 'videos');
     project.assets.finalVideo = null;
@@ -563,7 +602,7 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
   }
 
   if (stage === 'images') {
-    archiveAllActiveShotAssets(project, 'images');
+    archiveAllActiveReferenceFrameAssets(project);
     archiveAllActiveShotAssets(project, 'videos');
     project.assets.finalVideo = null;
     resetStage(project, 'videos');
@@ -660,14 +699,17 @@ function invalidateGeneratedMediaFromStoryboardShotReferenceChange(
   shotId: string
 ): {
   hadImageOutput: boolean;
+  hadLastImageOutput: boolean;
   hadVideoOutput: boolean;
   hadFinalVideo: boolean;
 } {
   const hadImageOutput = Boolean(getActiveShotAsset(project, 'images', shotId));
+  const hadLastImageOutput = Boolean(getActiveShotAsset(project, 'lastImages', shotId));
   const hadVideoOutput = Boolean(getActiveShotAsset(project, 'videos', shotId));
   const hadFinalVideo = Boolean(project.assets.finalVideo);
 
   clearActiveShotAsset(project, 'images', shotId);
+  clearActiveShotAsset(project, 'lastImages', shotId);
   clearActiveShotAsset(project, 'videos', shotId);
   project.assets.finalVideo = null;
   resetStage(project, 'images');
@@ -676,6 +718,7 @@ function invalidateGeneratedMediaFromStoryboardShotReferenceChange(
 
   return {
     hadImageOutput,
+    hadLastImageOutput,
     hadVideoOutput,
     hadFinalVideo
   };
@@ -985,13 +1028,23 @@ function appendReferenceContext(prompt: string, referenceContext: string): strin
   return `${prompt}\n\n参考资产约束：\n${referenceContext}`;
 }
 
-function buildFirstFrameShotDirectivePrompt(shot: Project['storyboard'][number]): string {
+type ReferenceFrameKind = 'start' | 'end';
+
+function buildReferenceFrameShotDirectivePrompt(
+  shot: Project['storyboard'][number],
+  frameKind: ReferenceFrameKind
+): string {
+  const frameLabel = frameKind === 'start' ? '起始参考帧' : '结束参考帧';
   const detailLines = [
     `- 镜头标题与作用：${shot.title.trim()}，${shot.purpose.trim()}`,
     `- 景别与机位：${shot.camera.trim()}`,
     `- 构图与主体：${shot.composition.trim()}`,
-    '- 定格要求：这是镜头开始瞬间的静态画面，要明确主体位置、朝向、视线、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次。',
-    '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物起始动作，不要只写剧情概述，不要只写某人正在做某事这种过于简略的提示。'
+    frameKind === 'start'
+      ? '- 定格要求：这是镜头开始瞬间的静态画面，要明确主体位置、朝向、视线、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次。'
+      : '- 定格要求：这是镜头结束瞬间的静态画面，要明确主体最终位置、朝向、视线、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次。',
+    frameKind === 'start'
+      ? '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物起始动作，不要只写剧情概述，不要只写某人正在做某事这种过于简略的提示。'
+      : '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物收束后的最终状态，不要只写剧情概述，不要只写某人做完某事这种过于简略的提示。'
   ];
 
   if (shot.dialogue.trim()) {
@@ -1002,14 +1055,16 @@ function buildFirstFrameShotDirectivePrompt(shot: Project['storyboard'][number])
     detailLines.push(`- 旁白语境：镜头相关画外音为${shot.voiceover.trim()}。仅用于帮助理解情绪和信息，不要直接生成字幕文字。`);
   }
 
-  return ['首帧画面要求：', ...detailLines].join('\n');
+  return [`${frameLabel}画面要求：`, ...detailLines].join('\n');
 }
 
-function buildFirstFrameQualityPrompt(
-  workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video'
+function buildReferenceFrameQualityPrompt(
+  workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video',
+  frameKind: ReferenceFrameKind
 ): string {
+  const frameLabel = frameKind === 'start' ? '起始参考帧' : '结束参考帧';
   const parts = [
-    '首帧质量要求：',
+    `${frameLabel}质量要求：`,
     '- 输出必须是一张电影级写实静帧，不是概念草图、分镜示意图、海报、拼贴图、多联画、人物设定板或 UI 截图。',
     '- 主体边缘清晰，人物五官稳定，双眼对称，手部结构正确，道具形体完整；避免糊脸、崩手、重复人物、额外肢体、奇怪透视和背景漂移。',
     '- 画面要同时具备明确主体、可读动作定格、前中后景层次、可信光线方向、材质细节和空间深度，优先选择最能代表镜头开场信息的决定性瞬间。',
@@ -1025,24 +1080,27 @@ function buildFirstFrameQualityPrompt(
   return parts.join('\n');
 }
 
-function buildFirstFrameWorkflowPrompt(
+function buildReferenceFrameWorkflowPrompt(
   project: Project,
   shot: Project['storyboard'][number],
-  workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video'
+  workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video',
+  frameKind: ReferenceFrameKind
 ): string {
-  const basePrompt = shot.firstFramePrompt.trim();
+  const basePrompt = (frameKind === 'start' ? shot.firstFramePrompt : shot.lastFramePrompt).trim();
   const characterPrompt = buildFirstFrameCharacterReferencePrompt(project, shot);
   const parts = [
-    buildFirstFrameShotDirectivePrompt(shot),
+    buildReferenceFrameShotDirectivePrompt(shot, frameKind),
     basePrompt,
     characterPrompt,
-    buildFirstFrameQualityPrompt(workflow),
-    '补充要求：把镜头开场一瞬间写实地冻结成一张完整画面，优先具体化角色状态、空间关系和环境信息。'
+    buildReferenceFrameQualityPrompt(workflow, frameKind),
+    frameKind === 'start'
+      ? '补充要求：把镜头开场一瞬间写实地冻结成一张完整画面，优先具体化角色状态、空间关系和环境信息。'
+      : '补充要求：把镜头结束一瞬间写实地冻结成一张完整画面，优先具体化角色收束状态、空间关系和环境信息。'
   ];
 
   if (workflow === 'storyboard_image' || workflow === 'image_edit') {
     parts.push(
-      '生成要求：基于参考输入重新生成一张全新的镜头首帧。',
+      `生成要求：基于参考输入重新生成一张全新的镜头${frameKind === 'start' ? '起始' : '结束'}参考帧。`,
       '参考输入只用于提取人物身份、造型、服装、场景、物品和整体风格约束，不要把它当作待修补、待微调或待局部重绘的底图。',
       '最终结果必须是一张新的完整画面，可以重新组织机位、景别、构图、动作、光线和背景，但要保持参考信息中的关键设定一致。'
     );
@@ -1447,6 +1505,21 @@ function resolveTtsWorkflowPath(appSettings: AppSettings, useReferenceAudio: boo
   return configuredWorkflowPath;
 }
 
+function resolveVideoWorkflowPath(appSettings: AppSettings, useLastFrameReference: boolean): string {
+  const configuredWorkflowPath = appSettings.comfyui.workflows.image_to_video.workflowPath;
+
+  if (
+    configuredWorkflowPath === DEFAULT_FIRST_LAST_FRAME_VIDEO_WORKFLOW_PATH ||
+    configuredWorkflowPath === DEFAULT_SINGLE_FRAME_VIDEO_WORKFLOW_PATH
+  ) {
+    return useLastFrameReference
+      ? DEFAULT_FIRST_LAST_FRAME_VIDEO_WORKFLOW_PATH
+      : DEFAULT_SINGLE_FRAME_VIDEO_WORKFLOW_PATH;
+  }
+
+  return configuredWorkflowPath;
+}
+
 function buildTtsVariables(
   project: Project,
   shot: Project['storyboard'][number],
@@ -1636,15 +1709,16 @@ function buildVideoWorkflowDerivedVariables(
   const safeWidth = Math.max(1, Math.round(width));
   const safeHeight = Math.max(1, Math.round(height));
   const safeFps = Math.max(1, Math.round(fps));
-  const longSide = Math.min(LTX_TARGET_LONG_SIDE, Math.max(safeWidth, safeHeight));
-  const shortSideRaw = (longSide * Math.min(safeWidth, safeHeight)) / Math.max(safeWidth, safeHeight);
-  const shortSide = roundDownToMultiple(shortSideRaw, LTX_DIMENSION_MULTIPLE);
-  const isLandscape = safeWidth >= safeHeight;
+  const longSide = Math.max(safeWidth, safeHeight);
+  const shortSide = Math.min(safeWidth, safeHeight);
 
   return {
     frame_count: Math.max(2, Math.round(durationSeconds * safeFps) + 1),
-    latent_video_width: isLandscape ? longSide : shortSide,
-    latent_video_height: isLandscape ? shortSide : longSide
+    latent_video_width: roundDownToMultiple(safeWidth, 16),
+    latent_video_height: roundDownToMultiple(safeHeight, 16),
+    video_long_side: longSide,
+    video_short_side: shortSide,
+    video_conditioning_long_side: Math.max(longSide, 1920)
   };
 }
 
@@ -1658,6 +1732,7 @@ function buildComfyVariables(
     inputImage?: string;
     lastFrameImage?: string;
     lastFramePrompt?: string;
+    frameKind?: ReferenceFrameKind;
     outputPrefix?: string;
     promptOverride?: string;
     referenceContext?: string;
@@ -1679,7 +1754,7 @@ function buildComfyVariables(
             ? getVideoWorkflowPrompt(project, shot, appSettings, {
                 durationSeconds
               })
-            : buildFirstFrameWorkflowPrompt(project, shot, workflow)),
+            : buildReferenceFrameWorkflowPrompt(project, shot, workflow, options.frameKind ?? 'start')),
         options.referenceContext ?? ''
       ),
     negative_prompt: negativePrompt,
@@ -1766,13 +1841,14 @@ async function runStoryboardImageWorkflowForShot(
   shot: Project['storyboard'][number],
   appSettings: AppSettings,
   workflowPath: string,
-  generationReferenceInputs: GenerationReferenceInputs
+  generationReferenceInputs: GenerationReferenceInputs,
+  frameKind: ReferenceFrameKind
 ): Promise<{ buffer: Buffer; extension: string; passCount: number }> {
   const signal = getProjectAbortSignal(project.id);
   const referencePasses = buildStoryboardReferencePasses(generationReferenceInputs.referenceImages);
 
   if (!referencePasses.length) {
-    throw new Error('首帧生成工作流至少需要一张参考图。');
+    throw new Error('参考帧生成工作流至少需要一张参考图。');
   }
 
   let latestBuffer: Buffer | null = null;
@@ -1786,14 +1862,15 @@ async function runStoryboardImageWorkflowForShot(
 
     appendLog(
       project,
-      `首帧生成 ${shot.title} 参考图批次 ${passIndex + 1}/${referencePasses.length}：注入 ${sourceReferenceImages.length} 张参考图。`
+      `参考帧生成 ${shot.title}${frameKind === 'start' ? '起始' : '结束'}参考图批次 ${passIndex + 1}/${referencePasses.length}：注入 ${sourceReferenceImages.length} 张参考图。`
     );
     await saveProject(project);
 
     const outputFiles = await runComfyWorkflow(
       workflowPath,
       buildComfyVariables(project, shot, appSettings, 'storyboard_image', {
-        outputPrefix: `${project.id}_${shot.id}_storyboard_image_pass_${passIndex + 1}`,
+        frameKind,
+        outputPrefix: `${project.id}_${shot.id}_${frameKind}_storyboard_image_pass_${passIndex + 1}`,
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: buildStoryboardReferencePassVariables(
           generationReferenceInputs.referenceVariables,
@@ -1823,7 +1900,7 @@ async function runStoryboardImageWorkflowForShot(
   }
 
   if (!latestBuffer) {
-    throw new Error('首帧生成工作流未返回任何图片输出。');
+    throw new Error('参考帧生成工作流未返回任何图片输出。');
   }
 
   return {
@@ -1870,12 +1947,17 @@ function buildSegmentVideoPrompt(
   appSettings: AppSettings,
   segmentIndex: number,
   segmentCount: number,
-  totalDurationSeconds: number
+  segmentDurationSeconds: number,
+  useLastFrameReference: boolean
 ): string {
   const basePrompt = getVideoWorkflowPrompt(project, shot, appSettings, {
-    durationSeconds: totalDurationSeconds
+    durationSeconds: segmentDurationSeconds
   });
   const lastFramePrompt = sanitizeVideoPromptText(shot.lastFramePrompt);
+
+  if (!useLastFrameReference) {
+    return basePrompt;
+  }
 
   if (segmentCount <= 1) {
     return lastFramePrompt
@@ -1924,7 +2006,14 @@ function buildShotAssetOutputPath(
   shotId: string,
   extension: string
 ): string {
-  const folder = stage === 'images' ? 'images' : stage === 'audios' ? 'audio' : 'videos';
+  const folder =
+    stage === 'images'
+      ? path.join('images', 'start')
+      : stage === 'lastImages'
+        ? path.join('images', 'end')
+        : stage === 'audios'
+          ? 'audio'
+          : 'videos';
   const normalizedExtension = extension.startsWith('.') ? extension : `.${extension}`;
   return path.join(folder, shotId, `${Date.now()}-${crypto.randomUUID().slice(0, 8)}${normalizedExtension}`);
 }
@@ -1982,7 +2071,7 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
       !appSettings.comfyui.workflows.image_edit.workflowPath &&
       !appSettings.comfyui.workflows.text_to_image.workflowPath
     ) {
-      throw new Error('系统设置中未配置 ComfyUI 首帧生成工作流或文生图工作流路径。');
+      throw new Error('系统设置中未配置 ComfyUI 参考帧生成工作流或文生图工作流路径。');
     }
 
     return;
@@ -1999,14 +2088,6 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
 
     if (!appSettings.comfyui.workflows.image_to_video.workflowPath) {
       throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
-    }
-
-    if (
-      !useTtsWorkflow &&
-      project.storyboard.some((shot) => getShotVideoSegmentDurations(project, shot).length > 1) &&
-      !appSettings.comfyui.workflows.reference_image_to_image.workflowPath
-    ) {
-      throw new Error('存在长镜头分段生成需求，但未配置参考图生图工作流，无法生成尾帧图。');
     }
 
     if (!useTtsWorkflow && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
@@ -2696,7 +2777,7 @@ function resolveImageStageWorkflow(
   const textToImageWorkflow = appSettings.comfyui.workflows.text_to_image;
 
   if (!storyboardImageWorkflow.workflowPath && !imageEditWorkflow.workflowPath && !textToImageWorkflow.workflowPath) {
-    throw new Error('系统设置中未配置 ComfyUI 首帧生成工作流或文生图工作流路径。');
+    throw new Error('系统设置中未配置 ComfyUI 参考帧生成工作流或文生图工作流路径。');
   }
 
   const hasEditInputs = generationReferenceInputs.referenceImages.length > 0;
@@ -2719,7 +2800,7 @@ function resolveImageStageWorkflow(
       };
 
   if (!selectedWorkflow.workflowPath) {
-    throw new Error('首帧生成工作流需要至少一张参考图；当前未找到可注入的参考图，且未配置文生图回退工作流。');
+    throw new Error('参考帧生成工作流需要至少一张参考图；当前未找到可注入的参考图，且未配置文生图回退工作流。');
   }
 
   return selectedWorkflow;
@@ -2735,32 +2816,33 @@ function appendImageWorkflowLog(
   appendLog(
     project,
     generationReferenceInputs.referenceCount
-      ? `首帧生成将注入 ${generationReferenceInputs.referenceCount} 个资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
-      : '资产库暂无可用参考项，首帧生成将仅使用镜头 Prompt。',
+      ? `参考帧生成将注入 ${generationReferenceInputs.referenceCount} 个资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
+      : '资产库暂无可用参考项，参考帧生成将仅使用镜头 Prompt。',
     generationReferenceInputs.referenceCount ? 'info' : 'warn'
   );
 
   if (selectedWorkflow.type === 'storyboard_image') {
-    appendLog(project, '首帧阶段使用 storyboard_image 首帧生成工作流。');
+    appendLog(project, '参考帧阶段使用 storyboard_image 工作流。');
   } else if (selectedWorkflow.type === 'image_edit') {
-    appendLog(project, '未单独配置 storyboard_image，首帧阶段回退到 legacy image_edit 工作流。', 'warn');
+    appendLog(project, '未单独配置 storyboard_image，参考帧阶段回退到 legacy image_edit 工作流。', 'warn');
   } else if (hasEditInputs) {
-    appendLog(project, '当前没有可用的首帧生成工作流，首帧阶段回退到 text_to_image，仅使用 Prompt 与参考上下文。', 'warn');
+    appendLog(project, '当前没有可用的参考帧生成工作流，参考帧阶段回退到 text_to_image，仅使用 Prompt 与参考上下文。', 'warn');
   } else {
-    appendLog(project, '当前没有可注入的参考图，首帧阶段回退到 text_to_image 工作流。', 'warn');
+    appendLog(project, '当前没有可注入的参考图，参考帧阶段回退到 text_to_image 工作流。', 'warn');
   }
 }
 
-async function generateImageAssetForShot(
+async function generateReferenceFrameAssetForShot(
   project: Project,
   shot: Project['storyboard'][number],
   appSettings: AppSettings,
   selectedWorkflow: SelectedImageStageWorkflow,
-  generationReferenceInputs: GenerationReferenceInputs
+  generationReferenceInputs: GenerationReferenceInputs,
+  frameKind: ReferenceFrameKind
 ): Promise<GeneratedAsset> {
   const signal = getProjectAbortSignal(project.id);
   const generationPrompt = appendReferenceContext(
-    buildFirstFrameWorkflowPrompt(project, shot, selectedWorkflow.type),
+    buildReferenceFrameWorkflowPrompt(project, shot, selectedWorkflow.type, frameKind),
     generationReferenceInputs.referenceContext
   );
   let buffer: Buffer;
@@ -2772,19 +2854,24 @@ async function generateImageAssetForShot(
       shot,
       appSettings,
       selectedWorkflow.workflowPath,
-      generationReferenceInputs
+      generationReferenceInputs,
+      frameKind
     );
     buffer = result.buffer;
     extension = result.extension;
 
     if (result.passCount > 1) {
-      appendLog(project, `${shot.title} 已按 ${result.passCount} 轮参考图批次完成首帧生成。`);
+      appendLog(
+        project,
+        `${shot.title} 的${frameKind === 'start' ? '起始' : '结束'}参考帧已按 ${result.passCount} 轮参考图批次生成完成。`
+      );
       await saveProject(project);
     }
   } else {
     const outputFiles = await runComfyWorkflow(
       selectedWorkflow.workflowPath,
       buildComfyVariables(project, shot, appSettings, selectedWorkflow.type, {
+        frameKind,
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables
       }),
@@ -2798,7 +2885,11 @@ async function generateImageAssetForShot(
     extension = path.extname(outputFile.filename) || '.png';
   }
 
-  const saved = await writeProjectFile(project.id, buildShotAssetOutputPath('images', shot.id, extension), buffer);
+  const saved = await writeProjectFile(
+    project.id,
+    buildShotAssetOutputPath(frameKind === 'start' ? 'images' : 'lastImages', shot.id, extension),
+    buffer
+  );
   return buildAsset(saved.relativePath, generationPrompt, shot.sceneNumber, shot.id);
 }
 
@@ -2810,16 +2901,21 @@ async function generateVideoAssetForShot(
   ttsUploadCache: Map<string, string>
 ): Promise<GeneratedAsset> {
   const signal = getProjectAbortSignal(project.id);
-  const workflowPath = appSettings.comfyui.workflows.image_to_video.workflowPath;
+  const imageAsset = getActiveShotAsset(project, 'images', shot.id);
+  const lastImageAsset = shot.useLastFrameReference ? getActiveShotAsset(project, 'lastImages', shot.id) : null;
+
+  if (!imageAsset) {
+    throw new Error(`镜头 ${shot.id} 缺少起始参考帧，无法生成视频。`);
+  }
+
+  if (shot.useLastFrameReference && !lastImageAsset) {
+    throw new Error(`镜头 ${shot.id} 需要结束参考帧，但当前未生成结束参考帧图片。`);
+  }
+
+  const workflowPath = resolveVideoWorkflowPath(appSettings, Boolean(lastImageAsset));
 
   if (!workflowPath) {
     throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
-  }
-
-  const imageAsset = getActiveShotAsset(project, 'images', shot.id);
-
-  if (!imageAsset) {
-    throw new Error(`镜头 ${shot.id} 缺少首帧图片，无法生成视频。`);
   }
 
   const preparedTtsAudio = await ensureShotTtsAudio(project, shot, appSettings, ttsUploadCache);
@@ -2828,10 +2924,6 @@ async function generateVideoAssetForShot(
   const segmentDurations = getVideoSegmentDurations(project, effectiveDurationSeconds);
   const segmentCount = segmentDurations.length;
   const shotSeed = Math.floor(Math.random() * 9_000_000_000);
-
-  if (segmentCount > 1 && !appSettings.comfyui.workflows.reference_image_to_image.workflowPath) {
-    throw new Error('当前镜头按“原镜头时长与语音时长中的较大值”计算后需要长镜头分段生成，但未配置参考图生图工作流，无法生成尾帧图。');
-  }
 
   if (segmentCount > 1 && !appSettings.ffmpeg.binaryPath) {
     throw new Error('当前镜头按“原镜头时长与语音时长中的较大值”计算后需要长镜头分段生成，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
@@ -2867,7 +2959,9 @@ async function generateVideoAssetForShot(
   if (segmentCount > 1) {
     appendLog(
       project,
-      `镜头 ${shot.title} 为长镜头，将拆成 ${segmentCount} 段生成（总时长 ${effectiveDurationSeconds}s，每段最长 ${getMaxVideoSegmentDurationSeconds(project)}s），并使用首尾帧约束收束画面。`
+      `镜头 ${shot.title} 为长镜头，将拆成 ${segmentCount} 段生成（总时长 ${effectiveDurationSeconds}s，每段最长 ${getMaxVideoSegmentDurationSeconds(project)}s）${
+        lastImageAsset ? '，并在最后一段使用结束参考帧收束画面。' : '。'
+      }`
     );
     await saveProject(project);
   }
@@ -2875,36 +2969,8 @@ async function generateVideoAssetForShot(
   let currentInputImagePath = fromStorageRelative(imageAsset.relativePath);
   const segmentVideoPaths: string[] = [];
   let savedVideoRelativePath: string | null = null;
-  let targetLastFrameImagePath = '';
+  let targetLastFrameImagePath = lastImageAsset ? fromStorageRelative(lastImageAsset.relativePath) : '';
   let uploadedTargetLastFrameImage = '';
-
-  if (segmentCount > 1) {
-    const lastFrameOutputFiles = await runComfyWorkflow(
-      appSettings.comfyui.workflows.reference_image_to_image.workflowPath,
-      buildComfyVariables(project, shot, appSettings, 'reference_image_to_image', {
-        outputPrefix: `${project.id}_${shot.id}_lastframe`,
-        promptOverride: shot.lastFramePrompt,
-        referenceContext: generationReferenceInputs.referenceContext,
-        referenceVariables: generationReferenceInputs.referenceVariables,
-        seed: shotSeed
-      }),
-      {
-        signal
-      }
-    );
-    const lastFrameOutputFile = pickOutputFile(lastFrameOutputFiles, 'image');
-    const lastFrameBuffer = await fetchComfyOutputFile(lastFrameOutputFile, { signal });
-    const lastFrameExtension = path.extname(lastFrameOutputFile.filename) || '.png';
-    const lastFrameSaved = await writeProjectFile(
-      project.id,
-      path.join('.video-stage', shot.id, 'frames', `target-last${lastFrameExtension}`),
-      lastFrameBuffer
-    );
-    targetLastFrameImagePath = lastFrameSaved.absolutePath;
-
-    appendLog(project, `镜头 ${shot.title} 的尾帧图已生成，长镜头最后一段会向该尾帧收束。`);
-    await saveProject(project);
-  }
 
   for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
     await throwIfRunInterrupted(project.id, 'videos');
@@ -2923,7 +2989,7 @@ async function generateVideoAssetForShot(
         durationSeconds: segmentDuration,
         inputImage: uploadedImage,
         lastFrameImage: isFinalSegment ? uploadedTargetLastFrameImage : '',
-        lastFramePrompt: shot.lastFramePrompt,
+        lastFramePrompt: shot.useLastFrameReference ? shot.lastFramePrompt : '',
         outputPrefix:
           segmentCount === 1
             ? `${project.id}_${shot.id}_video`
@@ -2934,7 +3000,8 @@ async function generateVideoAssetForShot(
           appSettings,
           segmentIndex,
           segmentCount,
-          effectiveDurationSeconds
+          segmentDuration,
+          Boolean(targetLastFrameImagePath)
         ),
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables,
@@ -3019,16 +3086,40 @@ async function runImageStage(project: Project): Promise<void> {
     const shot = project.storyboard[index];
     const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
     const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
-    appendLog(project, `首帧生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
+    appendLog(project, `参考帧生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
     appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
     await saveProject(project);
 
-    const imageAsset = await generateImageAssetForShot(project, shot, appSettings, selectedWorkflow, generationReferenceInputs);
-    setActiveShotAsset(project, 'images', shot.id, imageAsset);
+    const startFrameAsset = await generateReferenceFrameAssetForShot(
+      project,
+      shot,
+      appSettings,
+      selectedWorkflow,
+      generationReferenceInputs,
+      'start'
+    );
+    setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
+
+    if (shot.useLastFrameReference) {
+      appendLog(project, `镜头 ${shot.title} 需要结束参考帧，开始补生成结束参考帧。`);
+      await saveProject(project);
+      const endFrameAsset = await generateReferenceFrameAssetForShot(
+        project,
+        shot,
+        appSettings,
+        selectedWorkflow,
+        generationReferenceInputs,
+        'end'
+      );
+      setActiveShotAsset(project, 'lastImages', shot.id, endFrameAsset);
+    } else {
+      clearActiveShotAsset(project, 'lastImages', shot.id);
+    }
+
     await saveProject(project);
   }
 
-  appendLog(project, '全部镜头首帧生成完成。');
+  appendLog(project, '全部镜头参考帧生成完成。');
 }
 
 async function runVideoStage(project: Project): Promise<void> {
@@ -3055,13 +3146,9 @@ async function runVideoStage(project: Project): Promise<void> {
 
   if (
     !useTtsWorkflow &&
-    project.storyboard.some((shot) => getShotVideoSegmentDurations(project, shot).length > 1) &&
-    !appSettings.comfyui.workflows.reference_image_to_image.workflowPath
+    requiresVideoStageFfmpeg(project) &&
+    !appSettings.ffmpeg.binaryPath
   ) {
-    throw new Error('存在长镜头分段生成需求，但未配置参考图生图工作流，无法生成尾帧图。');
-  }
-
-  if (!useTtsWorkflow && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
     throw new Error('存在长镜头分段生成需求，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
   }
 
@@ -3079,7 +3166,7 @@ async function runVideoStage(project: Project): Promise<void> {
       project,
       generationReferenceInputs.referenceCount
         ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
-        : '当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和首尾帧。',
+        : `当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和${shot.useLastFrameReference ? '参考帧' : '起始参考帧'}。`,
       generationReferenceInputs.referenceCount ? 'info' : 'warn'
     );
     await saveProject(project);
@@ -3585,13 +3672,37 @@ async function executeStoryboardShotImageGeneration(projectId: string, shotId: s
   const referenceUploadCache = new Map<string, string>();
   const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
   const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
-  appendLog(project, `开始为镜头 ${shot.title} 单独执行首帧生成。`);
+  appendLog(project, `开始为镜头 ${shot.title} 单独执行参考帧生成。`);
   appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
   await saveProject(project);
 
-  const imageAsset = await generateImageAssetForShot(project, shot, appSettings, selectedWorkflow, generationReferenceInputs);
+  const startFrameAsset = await generateReferenceFrameAssetForShot(
+    project,
+    shot,
+    appSettings,
+    selectedWorkflow,
+    generationReferenceInputs,
+    'start'
+  );
+  setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
+
+  if (shot.useLastFrameReference) {
+    appendLog(project, `镜头 ${shot.title} 需要结束参考帧，开始补生成结束参考帧。`);
+    await saveProject(project);
+    const endFrameAsset = await generateReferenceFrameAssetForShot(
+      project,
+      shot,
+      appSettings,
+      selectedWorkflow,
+      generationReferenceInputs,
+      'end'
+    );
+    setActiveShotAsset(project, 'lastImages', shot.id, endFrameAsset);
+  } else {
+    clearActiveShotAsset(project, 'lastImages', shot.id);
+  }
+
   const replacedVideoAsset = clearActiveShotAsset(project, 'videos', shot.id);
-  setActiveShotAsset(project, 'images', shot.id, imageAsset);
   project.assets.finalVideo = null;
   resetStage(project, 'videos');
   resetStage(project, 'edit');
@@ -3599,8 +3710,8 @@ async function executeStoryboardShotImageGeneration(projectId: string, shotId: s
   appendLog(
     project,
     replacedVideoAsset
-      ? `镜头 ${shot.title} 的首帧图片已更新，原视频片段已移入历史版本，请重新生成或重新选择视频版本。`
-      : `镜头 ${shot.title} 的首帧图片已更新，历史版本已保留。`
+      ? `镜头 ${shot.title} 的参考帧已更新，原视频片段已移入历史版本，请重新生成或重新选择视频版本。`
+      : `镜头 ${shot.title} 的参考帧已更新，历史版本已保留。`
   );
   await saveProject(project);
 }
@@ -3618,21 +3729,17 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
   }
 
   if (!getActiveShotAsset(project, 'images', shot.id)) {
-    throw new Error('请先为当前镜头生成或选择首帧图片，再生成视频片段。');
+    throw new Error('请先为当前镜头生成或选择起始参考帧，再生成视频片段。');
+  }
+
+  if (shot.useLastFrameReference && !getActiveShotAsset(project, 'lastImages', shot.id)) {
+    throw new Error('当前镜头需要结束参考帧；请先重新生成参考帧后再生成视频片段。');
   }
 
   const appSettings = getAppSettings();
   const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
   if (!appSettings.comfyui.workflows.image_to_video.workflowPath) {
     throw new Error('系统设置中未配置 ComfyUI 图生视频工作流路径。');
-  }
-
-  if (
-    !useTtsWorkflow &&
-    getShotVideoSegmentDurations(project, shot).length > 1 &&
-    !appSettings.comfyui.workflows.reference_image_to_image.workflowPath
-  ) {
-    throw new Error('当前镜头需要长镜头分段生成，但未配置参考图生图工作流，无法生成尾帧图。');
   }
 
   if (!useTtsWorkflow && getShotVideoSegmentDurations(project, shot).length > 1 && !appSettings.ffmpeg.binaryPath) {
@@ -3653,7 +3760,7 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
     project,
     generationReferenceInputs.referenceCount
       ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
-      : '当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和首尾帧。',
+      : `当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和${shot.useLastFrameReference ? '参考帧' : '起始参考帧'}。`,
     generationReferenceInputs.referenceCount ? 'info' : 'warn'
   );
   await saveProject(project);
@@ -3718,7 +3825,7 @@ async function selectStoryboardShotAssetVersion(
     project.assets.finalVideo = null;
     resetStage(project, 'videos');
     resetStage(project, 'edit');
-    appendLog(project, `镜头 ${shot.title} 已切换到指定首帧版本；当前视频片段已失效，请重新生成或重新选择视频版本。`);
+    appendLog(project, `镜头 ${shot.title} 已切换到指定起始参考帧版本；当前视频片段已失效，请重新生成或重新选择视频版本。`);
   } else {
     project.assets.finalVideo = null;
     resetStage(project, 'edit');
@@ -3800,10 +3907,12 @@ export async function addReferenceAssetToStoryboardShot(
   const invalidation = invalidateGeneratedMediaFromStoryboardShotReferenceChange(project, shotId);
   appendLog(
     project,
-    invalidation.hadImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
-      ? `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；相关首帧图片、视频片段和最终成片已失效，请重新生成。`
-      : `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；后续首帧与视频生成会注入这张参考图。`,
-    invalidation.hadImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo ? 'warn' : 'info'
+    invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
+      ? `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
+      : `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；后续参考帧与视频生成会注入这张参考图。`,
+    invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
+      ? 'warn'
+      : 'info'
   );
   await persistStoryboard(project);
   await saveProject(project);
@@ -3848,10 +3957,12 @@ export async function removeReferenceAssetFromStoryboardShot(
   const invalidation = invalidateGeneratedMediaFromStoryboardShotReferenceChange(project, shotId);
   appendLog(
     project,
-    invalidation.hadImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
-      ? `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”；相关首帧图片、视频片段和最终成片已失效，请重新生成。`
+    invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
+      ? `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
       : `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”。`,
-    invalidation.hadImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo ? 'warn' : 'info'
+    invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
+      ? 'warn'
+      : 'info'
   );
   await persistStoryboard(project);
   await saveProject(project);
@@ -3880,7 +3991,8 @@ export async function updateStoryboardShotPrompts(
   }
 
   const changes: string[] = [];
-  let shouldInvalidateImageOutputs = false;
+  let shouldInvalidateStartFrameOutputs = false;
+  let shouldInvalidateLastFrameOutputs = false;
   let shouldInvalidateAudioOutputs = false;
   let shouldInvalidateVideoOutputs = false;
   let shouldInvalidateEditOutput = false;
@@ -3911,26 +4023,27 @@ export async function updateStoryboardShotPrompts(
   if (input.firstFramePrompt !== undefined) {
     const nextPrompt = input.firstFramePrompt.trim();
     if (!nextPrompt) {
-      throw new Error('首帧 Prompt 不能为空。');
+      throw new Error('起始参考帧 Prompt 不能为空。');
     }
 
     if (shot.firstFramePrompt !== nextPrompt) {
       shot.firstFramePrompt = nextPrompt;
-      changes.push('首帧 Prompt');
-      shouldInvalidateImageOutputs = true;
+      changes.push('起始参考帧 Prompt');
+      shouldInvalidateStartFrameOutputs = true;
       shouldInvalidateVideoOutputs = true;
     }
   }
 
   if (input.lastFramePrompt !== undefined) {
     const nextPrompt = input.lastFramePrompt.trim();
-    if (!nextPrompt) {
-      throw new Error('尾帧 Prompt 不能为空。');
+    if (shot.useLastFrameReference && !nextPrompt) {
+      throw new Error('结束参考帧 Prompt 不能为空。');
     }
 
-    if (shot.lastFramePrompt !== nextPrompt) {
+    if (shot.useLastFrameReference && shot.lastFramePrompt !== nextPrompt) {
       shot.lastFramePrompt = nextPrompt;
-      changes.push('尾帧 Prompt');
+      changes.push('结束参考帧 Prompt');
+      shouldInvalidateLastFrameOutputs = true;
       shouldInvalidateVideoOutputs = true;
     }
   }
@@ -4000,8 +4113,13 @@ export async function updateStoryboardShotPrompts(
     project.storyboard = normalizeStoryboardShots(project.storyboard, project.settings);
   }
 
-  if (shouldInvalidateImageOutputs) {
-    clearActiveShotAsset(project, 'images', shotId);
+  if (shouldInvalidateStartFrameOutputs || shouldInvalidateLastFrameOutputs) {
+    if (shouldInvalidateStartFrameOutputs) {
+      clearActiveShotAsset(project, 'images', shotId);
+    }
+    if (shouldInvalidateLastFrameOutputs) {
+      clearActiveShotAsset(project, 'lastImages', shotId);
+    }
     if (shouldInvalidateAudioOutputs) {
       clearActiveShotAsset(project, 'audios', shotId, { archive: false });
       setShotAssetHistory(project, 'audios', shotId, []);
@@ -4032,8 +4150,8 @@ export async function updateStoryboardShotPrompts(
 
   appendLog(
     project,
-    shouldInvalidateImageOutputs
-      ? `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新生成相关首帧图片、视频片段和最终成片。`
+    shouldInvalidateStartFrameOutputs || shouldInvalidateLastFrameOutputs
+      ? `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新生成相关参考帧、视频片段和最终成片。`
       : shouldInvalidateVideoOutputs
       ? `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新生成相关视频片段和最终成片。`
       : shouldInvalidateEditOutput

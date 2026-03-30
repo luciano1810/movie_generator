@@ -1,0 +1,428 @@
+{
+  "9": {
+    "inputs": {
+      "filename_prefix": "{{output_prefix}}",
+      "images": [
+        "170",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像"
+    }
+  },
+  "39": {
+    "inputs": {
+      "clip_name": "qwen_3_4b.safetensors",
+      "type": "lumina2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "40": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "42": {
+    "inputs": {
+      "conditioning": [
+        "45",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "条件零化"
+    }
+  },
+  "45": {
+    "inputs": {
+      "text": [
+        "524",
+        0
+      ],
+      "clip": [
+        "446",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP文本编码"
+    }
+  },
+  "47": {
+    "inputs": {
+      "shift": 3,
+      "model": [
+        "446",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "采样算法（AuraFlow）"
+    }
+  },
+  "129": {
+    "inputs": {
+      "samples": [
+        "484",
+        0
+      ],
+      "vae": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "170": {
+    "inputs": {
+      "upscale_by": [
+        "175",
+        0
+      ],
+      "seed": [
+        "496",
+        0
+      ],
+      "steps": 3,
+      "cfg": 1,
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "sgm_uniform",
+      "denoise": 0.26,
+      "mode_type": "Chess",
+      "tile_width": [
+        "176",
+        0
+      ],
+      "tile_height": [
+        "172",
+        0
+      ],
+      "mask_blur": 64,
+      "tile_padding": 96,
+      "seam_fix_mode": "None",
+      "seam_fix_denoise": 1,
+      "seam_fix_width": 64,
+      "seam_fix_mask_blur": 8,
+      "seam_fix_padding": 16,
+      "force_uniform_tiles": true,
+      "tiled_decode": false,
+      "batch_size": 1,
+      "image": [
+        "129",
+        0
+      ],
+      "model": [
+        "47",
+        0
+      ],
+      "positive": [
+        "514",
+        0
+      ],
+      "negative": [
+        "42",
+        0
+      ],
+      "vae": [
+        "40",
+        0
+      ],
+      "upscale_model": [
+        "171",
+        0
+      ]
+    },
+    "class_type": "UltimateSDUpscale",
+    "_meta": {
+      "title": "Ultimate SD Upscale"
+    }
+  },
+  "171": {
+    "inputs": {
+      "model_name": "4x-UltraSharp.pth"
+    },
+    "class_type": "UpscaleModelLoader",
+    "_meta": {
+      "title": "加载放大模型"
+    }
+  },
+  "172": {
+    "inputs": {
+      "value": "(a*b + (96 * 2))/2",
+      "a": [
+        "450",
+        1
+      ],
+      "b": [
+        "175",
+        0
+      ]
+    },
+    "class_type": "SimpleMath+",
+    "_meta": {
+      "title": "Calculate optimized height"
+    }
+  },
+  "175": {
+    "inputs": {
+      "value": 2.2
+    },
+    "class_type": "FloatConstant",
+    "_meta": {
+      "title": "SD Upscale Factor (放大大小）"
+    }
+  },
+  "176": {
+    "inputs": {
+      "value": "(a*b + (96 * 2))/2",
+      "a": [
+        "450",
+        0
+      ],
+      "b": [
+        "175",
+        0
+      ]
+    },
+    "class_type": "SimpleMath+",
+    "_meta": {
+      "title": "Calculate optimized width"
+    }
+  },
+  "443": {
+    "inputs": {
+      "width": "{{image_width}}",
+      "height": "{{image_height}}",
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image (Base Dimensions) 初始大小"
+    }
+  },
+  "446": {
+    "inputs": {
+      "PowerLoraLoaderHeaderWidget": {
+        "type": "PowerLoraLoaderHeaderWidget"
+      },
+      "➕ Add Lora": "",
+      "model": [
+        "530",
+        0
+      ],
+      "clip": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": {
+      "title": "Power Lora Loader (rgthree)"
+    }
+  },
+  "450": {
+    "inputs": {
+      "image": [
+        "129",
+        0
+      ]
+    },
+    "class_type": "GetImageSize",
+    "_meta": {
+      "title": "获取图像尺寸"
+    }
+  },
+  "452": {
+    "inputs": {
+      "samples": [
+        "483",
+        0
+      ],
+      "vae": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "454": {
+    "inputs": {
+      "seed": "{{seed}}"
+    },
+    "class_type": "Seed (rgthree)",
+    "_meta": {
+      "title": "Seed (1ST)"
+    }
+  },
+  "483": {
+    "inputs": {
+      "add_noise": "enable",
+      "noise_seed": [
+        "454",
+        0
+      ],
+      "steps": 9,
+      "cfg": 1,
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "beta",
+      "start_at_step": 0,
+      "end_at_step": 7,
+      "return_with_leftover_noise": "enable",
+      "model": [
+        "47",
+        0
+      ],
+      "positive": [
+        "45",
+        0
+      ],
+      "negative": [
+        "42",
+        0
+      ],
+      "latent_image": [
+        "443",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器（高级）"
+    }
+  },
+  "484": {
+    "inputs": {
+      "add_noise": "disable",
+      "noise_seed": [
+        "488",
+        0
+      ],
+      "steps": 9,
+      "cfg": 1,
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "sgm_uniform",
+      "start_at_step": 4,
+      "end_at_step": 999,
+      "return_with_leftover_noise": "disable",
+      "model": [
+        "47",
+        0
+      ],
+      "positive": [
+        "45",
+        0
+      ],
+      "negative": [
+        "42",
+        0
+      ],
+      "latent_image": [
+        "485",
+        0
+      ]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": {
+      "title": "K采样器（高级）"
+    }
+  },
+  "485": {
+    "inputs": {
+      "upscale_method": "bislerp",
+      "scale_by": 1.7,
+      "samples": [
+        "483",
+        0
+      ]
+    },
+    "class_type": "LatentUpscaleBy",
+    "_meta": {
+      "title": "缩放Latent（比例）"
+    }
+  },
+  "487": {
+    "inputs": {
+      "value": 0
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Seed (2ND) - Keep 0 by default"
+    }
+  },
+  "488": {
+    "inputs": {
+      "value": "a+b",
+      "a": [
+        "487",
+        0
+      ],
+      "b": [
+        "454",
+        0
+      ]
+    },
+    "class_type": "SimpleMath+",
+    "_meta": {
+      "title": "🔧 Simple Math"
+    }
+  },
+  "496": {
+    "inputs": {
+      "seed": "{{seed}}"
+    },
+    "class_type": "Seed (rgthree)",
+    "_meta": {
+      "title": "Seed (SD Upscale)"
+    }
+  },
+  "514": {
+    "inputs": {
+      "text": "{{prompt}}",
+      "clip": [
+        "39",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "SD Upscale Prompt 放大提示词 -"
+    }
+  },
+  "524": {
+    "inputs": {
+      "text": "{{prompt}}"
+    },
+    "class_type": "Text Multiline",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "530": {
+    "inputs": {
+      "unet_name": "moodyPornMix_v10DPO_q6_k.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)"
+    }
+  }
+}

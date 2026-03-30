@@ -144,6 +144,7 @@ export interface StoryboardShot {
   camera: string;
   composition: string;
   transitionHint: string;
+  useLastFrameReference: boolean;
   firstFramePrompt: string;
   lastFramePrompt: string;
   videoPrompt: string;
@@ -225,6 +226,8 @@ export interface Project {
   assets: {
     images: GeneratedAsset[];
     imageHistory: ShotAssetHistoryMap;
+    lastImages: GeneratedAsset[];
+    lastImageHistory: ShotAssetHistoryMap;
     audios: GeneratedAsset[];
     audioHistory: ShotAssetHistoryMap;
     videos: GeneratedAsset[];
@@ -413,7 +416,7 @@ export const STAGE_LABELS: Record<StageId, string> = {
   script: '剧本生成',
   assets: '资产生成',
   storyboard: '分镜生成',
-  images: '首帧生成',
+  images: '参考帧生成',
   videos: '视频生成',
   edit: '视频剪辑'
 };
@@ -755,6 +758,10 @@ export function normalizeStoryboardShot(
       .replace(/^-+|-+$/g, '') || `scene-${sceneNumber}-shot-${shotNumber}`;
   const dialogue = normalizeString(input?.dialogue, '');
   const voiceover = normalizeString(input?.voiceover, '');
+  const useLastFrameReference = normalizeBoolean(
+    input?.useLastFrameReference,
+    Boolean(typeof input?.lastFramePrompt === 'string' && input.lastFramePrompt.trim())
+  );
 
   return {
     id,
@@ -772,14 +779,14 @@ export function normalizeStoryboardShot(
     camera: normalizeString(input?.camera, '中近景，稳定推进'),
     composition: normalizeString(input?.composition, '主体明确，突出人物情绪'),
     transitionHint: normalizeString(input?.transitionHint, 'cut'),
+    useLastFrameReference,
     firstFramePrompt: normalizeString(
       input?.firstFramePrompt,
-      `${settings.visualStyle}，场景${sceneNumber}镜头${shotNumber}首帧`
+      `${settings.visualStyle}，场景${sceneNumber}镜头${shotNumber}起始参考帧`
     ),
-    lastFramePrompt: normalizeString(
-      input?.lastFramePrompt,
-      `${settings.visualStyle}，场景${sceneNumber}镜头${shotNumber}尾帧`
-    ),
+    lastFramePrompt: useLastFrameReference
+      ? normalizeString(input?.lastFramePrompt, `${settings.visualStyle}，场景${sceneNumber}镜头${shotNumber}结束参考帧`)
+      : '',
     videoPrompt: normalizeString(
       input?.videoPrompt,
       `${settings.visualStyle}，场景${sceneNumber}镜头${shotNumber}视频动作描述`

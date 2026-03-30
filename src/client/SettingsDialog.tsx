@@ -60,8 +60,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
     },
     {
       key: 'storyboard_image',
-      label: '首帧生成',
-      description: '用于镜头首帧生成；服务端会自动注入最多 3 张参考图，超过 3 张时分批多轮执行',
+      label: '参考帧生成',
+      description: '用于镜头参考帧生成；服务端会自动注入最多 3 张参考图，超过 3 张时分批多轮执行',
       workflowPlaceholder: '/absolute/path/to/storyboard-image-workflow.json'
     },
     {
@@ -73,7 +73,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
     {
       key: 'reference_image_to_image',
       label: '参考图生图',
-      description: '用于带参考资产约束的首帧图片生成',
+      description: '用于带参考资产约束的参考帧图片生成',
       workflowPlaceholder: '/absolute/path/to/reference-image-to-image-workflow.json'
     },
     {
@@ -91,7 +91,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
     {
       key: 'image_to_video',
       label: '图生视频',
-      description: '用于基于首帧图或参考图生成视频片段',
+      description: '用于基于参考帧或参考图生成视频片段',
       workflowPlaceholder: '/absolute/path/to/image-to-video-workflow.json'
     },
     {

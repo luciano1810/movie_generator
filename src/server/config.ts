@@ -54,7 +54,7 @@ export const envAppSettingsDefaults: AppSettings = {
             process.env.COMFYUI_SCENE_WORKFLOW ??
             process.env.COMFYUI_OBJECT_WORKFLOW ??
             process.env.COMFYUI_IMAGE_WORKFLOW,
-          'config/workflows/image-workflow.template.json'
+          'config/workflows/zimage_text_to_image.template.json'
         )
       },
       reference_image_to_image: {
@@ -80,7 +80,7 @@ export const envAppSettingsDefaults: AppSettings = {
       image_to_video: {
         workflowPath: resolveMaybeRelative(
           process.env.COMFYUI_IMAGE_TO_VIDEO_WORKFLOW ?? process.env.COMFYUI_VIDEO_WORKFLOW,
-          'config/workflows/ltx_2.3_ti2v_api.template.json'
+          'config/workflows/ltx_2.3_i2v_first_last_api.template.json'
         )
       },
       tts: {
