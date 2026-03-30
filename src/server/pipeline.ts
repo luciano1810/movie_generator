@@ -237,8 +237,7 @@ function buildCharacterAssetWorkflowPrompt(
   prompt: string,
   ethnicityHint: string,
   genderHint: string,
-  ageHint: string,
-  hasReferenceImage: boolean
+  ageHint: string
 ): string {
   const trimmedPrompt = prompt.trim();
   const trimmedName = characterName.trim() || '角色';
@@ -248,15 +247,8 @@ function buildCharacterAssetWorkflowPrompt(
     inferCharacterAgeHint({ name: trimmedName, ageHint, summary: '', generationPrompt: trimmedPrompt }) || '年龄未说明';
   const resolvedEthnicity = ethnicityHint.trim() || '人种未说明';
   const resolvedDescription = trimmedPrompt || '人物描述未说明';
-  const basePrompt = `${trimmedName}的全身照，${resolvedGender}，${resolvedAge}，${resolvedEthnicity}，${resolvedDescription}`;
-  const fullBodyRequirement =
-    '画面要求：生成单人完整全身照片，人物从头到脚完整入镜，清楚露出头顶与双脚，不要半身像、特写、多人同框、拼贴图或局部裁切。';
 
-  if (hasReferenceImage) {
-    return `${basePrompt}。基于用户上传参考图生成，保持角色身份、年龄感、人种和外貌设定一致。${fullBodyRequirement}`;
-  }
-
-  return `${basePrompt}。确保角色身份稳定、外观一致，可作为后续镜头与视频生成的人物一致性参考。${fullBodyRequirement}`;
+  return `${trimmedName}的全身照，${resolvedGender}，${resolvedAge}，${resolvedEthnicity}，${resolvedDescription}`;
 }
 
 function now(): string {
@@ -1118,6 +1110,12 @@ function appendReferenceContext(prompt: string, referenceContext: string): strin
 
 type ReferenceFrameKind = 'start' | 'end';
 
+function buildReferenceFrameGazePrompt(frameKind: ReferenceFrameKind): string {
+  return frameKind === 'start'
+    ? '人物眼神要求：如画面中出现人物，必须明确主要人物在镜头开始瞬间的眼神方向、注视对象和眼神状态，写清是在看谁、看向哪里，以及这种眼神传达出的情绪与心理张力；不要只写“看向前方”或只写表情。'
+    : '人物眼神要求：如画面中出现人物，必须明确主要人物在镜头结束瞬间的眼神方向、注视对象和眼神状态，写清是在看谁、看向哪里，以及这种眼神传达出的情绪与心理张力；不要只写“看向前方”或只写表情。';
+}
+
 function buildReferenceFrameShotDirectivePrompt(
   shot: Project['storyboard'][number],
   frameKind: ReferenceFrameKind
@@ -1128,8 +1126,8 @@ function buildReferenceFrameShotDirectivePrompt(
     `- 景别与机位：${shot.camera.trim()}`,
     `- 构图与主体：${shot.composition.trim()}`,
     frameKind === 'start'
-      ? '- 定格要求：这是镜头开始瞬间的静态画面，要明确主体位置、朝向、视线、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次。'
-      : '- 定格要求：这是镜头结束瞬间的静态画面，要明确主体最终位置、朝向、视线、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次。',
+      ? '- 定格要求：这是镜头开始瞬间的静态画面，要明确主体位置、朝向、视线方向、眼神焦点、眼神状态、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次。'
+      : '- 定格要求：这是镜头结束瞬间的静态画面，要明确主体最终位置、朝向、视线方向、眼神焦点、眼神状态、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次。',
     frameKind === 'start'
       ? '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物起始动作，不要只写剧情概述，不要只写某人正在做某事这种过于简略的提示。'
       : '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物收束后的最终状态，不要只写剧情概述，不要只写某人做完某事这种过于简略的提示。'
@@ -1177,13 +1175,14 @@ function buildReferenceFrameWorkflowPrompt(
   const basePrompt = (frameKind === 'start' ? shot.firstFramePrompt : shot.lastFramePrompt).trim();
 
   if (workflow === 'text_to_image') {
-    return basePrompt;
+    return [basePrompt, buildReferenceFrameGazePrompt(frameKind)].filter(Boolean).join('\n\n');
   }
 
   const characterPrompt = buildFirstFrameCharacterReferencePrompt(project, shot);
   const parts = [
     buildReferenceFrameShotDirectivePrompt(shot, frameKind),
     basePrompt,
+    buildReferenceFrameGazePrompt(frameKind),
     characterPrompt,
     buildReferenceFrameQualityPrompt(workflow, frameKind),
     frameKind === 'start'
@@ -2543,8 +2542,7 @@ async function generateReferenceAssetForProject(
             generationPrompt,
             ethnicityHint,
             genderHint,
-            ageHint,
-            shouldUseReferenceImage
+            ageHint
           )
         : generationPrompt;
 
