@@ -13,6 +13,7 @@ import type {
 import {
   DEFAULT_SETTINGS,
   STORY_LENGTH_LABELS,
+  getStoryboardShotFallbackDurationSeconds,
   getStoryLengthReference,
   normalizeStoryboardShot,
   normalizeStoryboardShots
@@ -881,19 +882,12 @@ function getPreferredLongShotDurationSeconds(settings: ProjectSettings): number 
   return getStoryLengthReference(settings).preferredLongShotDurationSeconds;
 }
 
-function buildStoryboardShotDurationGuideline(
-  defaultShotDurationSeconds: number,
-  preferredLongShotDurationSeconds: number,
-  maxVideoSegmentDurationSeconds: number
-): string {
-  const preferredUpperBound = Math.min(8, maxVideoSegmentDurationSeconds);
-  const preferredLowerBound = Math.min(preferredLongShotDurationSeconds, preferredUpperBound);
+function buildStoryboardShotDurationGuideline(maxVideoSegmentDurationSeconds: number): string {
+  return `每个镜头的 durationSeconds 必须由你在分镜时独立决定。项目篇幅只决定整片总量，不决定单个镜头该拍几秒。请根据当前镜头承载的信息量、动作完整度、表演停顿、对白长度、运镜路径和情绪发酵空间自行给出时长；短反应镜头可以更短，完整动作链、对白来回或情绪收束镜头可以更长，但任何一个镜头都不能超过 ${maxVideoSegmentDurationSeconds} 秒。`;
+}
 
-  if (preferredLowerBound < preferredUpperBound) {
-    return `durationSeconds 由你根据剧情节奏、动作复杂度、表演长度自行决定；${defaultShotDurationSeconds} 秒只是常规参考，不是硬限制。整体上要偏向更完整、更耐看的镜头时长：能用 ${preferredLowerBound} 到 ${preferredUpperBound} 秒完整呈现的动作、表演、停顿、走位或对话，不要轻易压缩成很短的镜头。`;
-  }
-
-  return `durationSeconds 由你根据剧情节奏、动作复杂度、表演长度自行决定；${defaultShotDurationSeconds} 秒只是常规参考，但单个镜头必须控制在 ${maxVideoSegmentDurationSeconds} 秒以内，并在这个上限内尽量给足动作、表演、停顿和走位，不要无谓压缩成过短镜头。`;
+function buildStoryboardShotSplitGuideline(): string {
+  return '是否继续拆镜只取决于当前内容是否包含多个戏剧节拍、对话来回、动作升级、信息反转或人物进出场，不由项目篇幅档位决定；同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切。';
 }
 
 function getStoryLengthScriptGenerationTarget(settings: ProjectSettings): {
@@ -1413,7 +1407,7 @@ function normalizeStoryboardPlanShot(
     purpose: normalizeString(input?.purpose, '推进剧情'),
     durationSeconds: normalizeDuration(
       input?.durationSeconds,
-      getStoryLengthReference(settings).defaultShotDurationSeconds
+      getStoryboardShotFallbackDurationSeconds(settings)
     ),
     overview: normalizeString(input?.overview, `${title}，突出关键动作、对白推进和情绪变化。`)
   };
@@ -1545,18 +1539,11 @@ function buildStoryboardConversationPrelude(
   settings: ProjectSettings,
   referenceLibrary?: ProjectReferenceLibrary
 ): ChatCompletionMessageParam[] {
-  const structureRequirement = getStoryboardStructureRequirement(settings);
   const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
-  const splitReferenceSeconds = getStoryboardShotSplitReferenceSeconds(settings);
   const recommendedMinimumShotCount = getRecommendedMinimumStoryboardShotCount(script, settings);
-  const preferredLongShotDurationSeconds = getPreferredLongShotDurationSeconds(settings);
-  const defaultShotDurationSeconds = getStoryLengthReference(settings).defaultShotDurationSeconds;
-  const shotDurationGuideline = buildStoryboardShotDurationGuideline(
-    defaultShotDurationSeconds,
-    preferredLongShotDurationSeconds,
-    maxVideoSegmentDurationSeconds
-  );
+  const shotDurationGuideline = buildStoryboardShotDurationGuideline(maxVideoSegmentDurationSeconds);
+  const shotSplitGuideline = buildStoryboardShotSplitGuideline();
   const sceneRules = script.scenes
     .map(
       (scene) =>
@@ -1583,7 +1570,7 @@ function buildStoryboardConversationPrelude(
 6. 镜头数量不要预设上限，由你根据戏剧节奏、信息密度、动作复杂度、对白来回和情绪变化自行决定；但镜头颗粒度不能过粗。当前剧本总时长约 ${script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0)} 秒，全剧推荐至少 ${recommendedMinimumShotCount} 个镜头，避免把多个戏剧节拍硬塞进一个镜头，也不要把本可在一个连续镜头内完成的动作、反应和情绪停顿机械切碎；如果实际略少于这个参考值，也不要为了凑数重复镜头或硬塞空镜
 7. 分场镜头密度参考如下：
 ${sceneRules}
-8. ${splitReferenceSeconds} 秒左右只是判断是否该继续拆镜的参考尺度，不是硬性时长限制；包含对话来回、动作升级、信息反转、人物进出场的场景要继续拆开，不要把多个戏剧节拍塞进一个镜头；但同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切
+8. ${shotSplitGuideline}
 9. ${shotDurationGuideline}
 10. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；这是硬上限，不是建议值。任何一个镜头的 durationSeconds 都不能超过它；如果一段动作、对白或情绪变化超出这个上限，你必须主动拆成多个镜头，不要依赖系统自动拼接兜底
 11. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
@@ -1654,19 +1641,12 @@ ${contextScenes || '无相邻场景'}`;
 }
 
 function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectSettings, retryFeedback = ''): string {
-  const structureRequirement = getStoryboardStructureRequirement(settings);
   const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
-  const splitReferenceSeconds = getStoryboardShotSplitReferenceSeconds(settings);
   const minimumShotCount = getMinimumStoryboardShotCount(script, settings);
   const recommendedMinimumShotCount = getRecommendedMinimumStoryboardShotCount(script, settings);
-  const preferredLongShotDurationSeconds = getPreferredLongShotDurationSeconds(settings);
-  const defaultShotDurationSeconds = getStoryLengthReference(settings).defaultShotDurationSeconds;
-  const shotDurationGuideline = buildStoryboardShotDurationGuideline(
-    defaultShotDurationSeconds,
-    preferredLongShotDurationSeconds,
-    maxVideoSegmentDurationSeconds
-  );
+  const shotDurationGuideline = buildStoryboardShotDurationGuideline(maxVideoSegmentDurationSeconds);
+  const shotSplitGuideline = buildStoryboardShotSplitGuideline();
   const retryNotice = retryFeedback
     ? `\n上一次规划结果不合格，必须修正以下问题：\n${retryFeedback}\n本次输出必须一次性给出修正后的完整分镜规划 JSON。\n`
     : '';
@@ -1685,7 +1665,7 @@ function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectS
 3. 全剧推荐至少 ${recommendedMinimumShotCount} 个镜头，按场景下限累积出的参考值约为 ${minimumShotCount} 个镜头；如果实际略少于这个参考值，也不要为了凑数重复镜头或硬塞空镜
 4. 分场镜头密度参考如下：
 ${sceneRules}
-5. ${splitReferenceSeconds} 秒左右只是判断是否该继续拆镜的参考尺度，不是硬性时长限制；包含对话来回、动作升级、信息反转、人物进出场的场景要继续拆开，不要把多个戏剧节拍塞进一个镜头；但同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切
+5. ${shotSplitGuideline}
 6. ${shotDurationGuideline}
 7. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；这是硬上限，不是建议值。任何一个规划镜头的 durationSeconds 都不能超过它
 8. 每个规划镜头都要给出 1 句 overview，说明这个镜头的画面焦点、动作/对白推进和情绪/转场作用，概况要具体但紧凑
@@ -1703,7 +1683,7 @@ ${sceneRules}
       "shotNumber": 1,
       "title": "镜头标题",
       "purpose": "镜头作用",
-      "durationSeconds": ${defaultShotDurationSeconds},
+      "durationSeconds": ${getStoryboardShotFallbackDurationSeconds(settings)},
       "overview": "这个镜头的画面焦点、动作/对白推进和情绪/转场概况"
     }
   ]
@@ -1785,9 +1765,9 @@ function buildStoryboardShotTurnPrompt(
   }
 
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
-  const splitReferenceSeconds = getStoryboardShotSplitReferenceSeconds(settings);
   const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
   const spokenLanguageLabel = describeProjectLanguage(settings.language);
+  const shotSplitGuideline = buildStoryboardShotSplitGuideline();
   const retryNotice = retryFeedback
     ? `\n上一次结果不合格，必须修正以下问题：\n${retryFeedback}\n本次输出必须一次性给出修正后的完整镜头 JSON。\n`
     : '';
@@ -1827,7 +1807,7 @@ ${buildCompletedStoryboardContext(storyboard, shotPlan)}
 5. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
 6. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
 7. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
-8. ${splitReferenceSeconds} 秒左右只是判断是否该继续拆镜的参考尺度，不是硬性时长限制；当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
+8. ${shotSplitGuideline} 当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
 9. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
 10. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
 11. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图

@@ -481,6 +481,12 @@ export function getDefaultShotDurationSeconds(value: Pick<ProjectSettings, 'stor
   return getStoryLengthReference(value).defaultShotDurationSeconds;
 }
 
+export function getStoryboardShotFallbackDurationSeconds(
+  value: Pick<ProjectSettings, 'maxVideoSegmentDurationSeconds'>
+): number {
+  return Math.max(1, Math.min(4, value.maxVideoSegmentDurationSeconds || 4));
+}
+
 export const DEFAULT_SETTINGS: ProjectSettings = {
   scriptMode: 'generate',
   storyLength: 'medium',
@@ -668,7 +674,7 @@ export function normalizeSettings(input?: Partial<ProjectSettings>): ProjectSett
     fps: normalizePositiveInteger(merged.fps, DEFAULT_SETTINGS.fps),
     maxVideoSegmentDurationSeconds: normalizePositiveInteger(
       merged.maxVideoSegmentDurationSeconds,
-      getDefaultShotDurationSeconds(storyLength)
+      DEFAULT_SETTINGS.maxVideoSegmentDurationSeconds
     ),
     maxShotsPerScene: normalizePositiveInteger(merged.maxShotsPerScene, DEFAULT_SETTINGS.maxShotsPerScene),
     useTtsWorkflow: normalizeBoolean(merged.useTtsWorkflow, DEFAULT_SETTINGS.useTtsWorkflow)
@@ -826,7 +832,7 @@ export function normalizeStoryboardShot(
     shotNumber,
     title: normalizeString(input?.title, `场景${sceneNumber}镜头${shotNumber}`),
     purpose: normalizeString(input?.purpose, '推进剧情'),
-    durationSeconds: normalizePositiveInteger(input?.durationSeconds, getDefaultShotDurationSeconds(settings)),
+    durationSeconds: normalizePositiveInteger(input?.durationSeconds, getStoryboardShotFallbackDurationSeconds(settings)),
     startTimeSeconds: 0,
     endTimeSeconds: 0,
     startTimecode: '00:00',
