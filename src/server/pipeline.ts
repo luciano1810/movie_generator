@@ -39,6 +39,7 @@ import {
   type ComfyOutputFile,
   type TemplateVariable,
   fetchComfyOutputFile,
+  prepareComfyWorkflow,
   runComfyWorkflow,
   uploadAudioToComfy,
   uploadImageBufferToComfy,
@@ -55,6 +56,7 @@ const projectAbortControllers = new Map<string, AbortController>();
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm', '.mkv', '.gif']);
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus']);
+const COMFY_DEBUG_DIR = path.join('.debug', 'comfy');
 
 interface GenerationReferenceInputs {
   referenceContext: string;
@@ -92,6 +94,8 @@ interface PreparedShotTtsAudio {
   useReferenceAudio: boolean;
   reusedExisting: boolean;
 }
+
+type ComfyOutputKind = 'image' | 'video' | 'audio';
 
 const DEFAULT_CHARACTER_POSE_REFERENCE_PATH = path.resolve(
   process.cwd(),
@@ -1762,11 +1766,14 @@ async function ensureShotTtsAudio(
   for (const segment of ttsPlan.segments) {
     const referenceAudioPlan = await buildTtsReferenceAudioPlan(segment, uploadCache, signal);
     const ttsWorkflowPath = resolveTtsWorkflowPath(appSettings, referenceAudioPlan.useReferenceAudio);
-    const outputFiles = await runComfyWorkflow(
+    const outputFiles = await runProjectComfyWorkflow(
+      project,
       ttsWorkflowPath,
       buildTtsVariables(project, shot, segment, referenceAudioPlan),
       {
-        signal
+        signal,
+        label: `tts_${shot.id}_${segment.outputKey}`,
+        outputKind: 'audio'
       }
     );
     const outputFile = pickOutputFile(outputFiles, 'audio');
@@ -1980,7 +1987,8 @@ async function runStoryboardImageWorkflowForShot(
     );
     await saveProject(project);
 
-    const outputFiles = await runComfyWorkflow(
+    const outputFiles = await runProjectComfyWorkflow(
+      project,
       workflowPath,
       buildComfyVariables(project, shot, appSettings, 'storyboard_image', {
         frameKind,
@@ -1996,7 +2004,9 @@ async function runStoryboardImageWorkflowForShot(
         )
       }),
       {
-        signal
+        signal,
+        label: `storyboard_${shot.id}_${frameKind}_pass_${passIndex + 1}`,
+        outputKind: 'image'
       }
     );
 
@@ -2098,6 +2108,136 @@ function pickOutputFile(files: ComfyOutputFile[], kind: 'image' | 'video' | 'aud
   }
 
   return selected;
+}
+
+function sanitizeComfyDebugLabel(value: string): string {
+  const sanitized = value
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 80);
+
+  return sanitized || 'run';
+}
+
+function buildComfyDebugBaseName(label: string): string {
+  return `${new Date().toISOString().replace(/[:.]/g, '-')}_${sanitizeComfyDebugLabel(label)}_${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function serializeComfyDebugError(error: unknown): { name: string; message: string; stack: string | null } {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack ?? null
+    };
+  }
+
+  return {
+    name: 'Error',
+    message: String(error),
+    stack: null
+  };
+}
+
+function tryPickOutputFile(files: ComfyOutputFile[], kind: ComfyOutputKind): ComfyOutputFile | null {
+  try {
+    return pickOutputFile(files, kind);
+  } catch {
+    return null;
+  }
+}
+
+async function writeComfyDebugFile(
+  projectId: string,
+  baseName: string,
+  suffix: 'request' | 'result',
+  payload: unknown
+): Promise<string | null> {
+  try {
+    const saved = await writeProjectFile(
+      projectId,
+      path.join(COMFY_DEBUG_DIR, `${baseName}.${suffix}.json`),
+      JSON.stringify(payload, null, 2)
+    );
+    return saved.relativePath;
+  } catch (error) {
+    console.warn(`Failed to write Comfy debug file for project ${projectId}:`, error);
+    return null;
+  }
+}
+
+async function runProjectComfyWorkflow(
+  project: Project,
+  workflowPath: string,
+  variables: Record<string, TemplateVariable>,
+  options: {
+    signal?: AbortSignal;
+    label: string;
+    outputKind?: ComfyOutputKind;
+  } = {
+    label: 'comfy'
+  }
+): Promise<ComfyOutputFile[]> {
+  const createdAt = now();
+  const baseName = buildComfyDebugBaseName(options.label);
+  let requestDebugPath: string | null = null;
+
+  try {
+    const preparedWorkflow = await prepareComfyWorkflow(workflowPath, variables);
+    requestDebugPath = await writeComfyDebugFile(project.id, baseName, 'request', {
+      createdAt,
+      label: options.label,
+      workflowPath,
+      outputKind: options.outputKind ?? null,
+      resolvedPrompt: typeof variables.prompt === 'string' ? variables.prompt : null,
+      variables,
+      requestBody: {
+        prompt: preparedWorkflow
+      }
+    });
+  } catch (error) {
+    await writeComfyDebugFile(project.id, baseName, 'result', {
+      createdAt,
+      failedAt: now(),
+      label: options.label,
+      workflowPath,
+      outputKind: options.outputKind ?? null,
+      error: serializeComfyDebugError(error)
+    });
+    throw error;
+  }
+
+  try {
+    const outputFiles = await runComfyWorkflow(workflowPath, variables, {
+      signal: options.signal
+    });
+    const selectedOutputFile = options.outputKind ? tryPickOutputFile(outputFiles, options.outputKind) : null;
+
+    await writeComfyDebugFile(project.id, baseName, 'result', {
+      createdAt,
+      completedAt: now(),
+      label: options.label,
+      workflowPath,
+      outputKind: options.outputKind ?? null,
+      requestDebugPath,
+      outputFiles,
+      selectedOutputFile
+    });
+
+    return outputFiles;
+  } catch (error) {
+    await writeComfyDebugFile(project.id, baseName, 'result', {
+      createdAt,
+      failedAt: now(),
+      label: options.label,
+      workflowPath,
+      outputKind: options.outputKind ?? null,
+      requestDebugPath,
+      error: serializeComfyDebugError(error)
+    });
+    throw error;
+  }
 }
 
 function buildAsset(
@@ -2329,28 +2469,35 @@ async function generateReferenceAssetForProject(
         ? buildCharacterAssetWorkflowPrompt(itemName, generationPrompt, ethnicityHint, shouldUseReferenceImage)
         : generationPrompt;
 
-    const outputFiles = await runComfyWorkflow(workflow.workflowPath, {
-      prompt: workflowPrompt,
-      negative_prompt: project.settings.negativePrompt,
-      output_prefix: `${project.id}_${kind}_${itemId}_reference`,
-      image_width: project.settings.imageWidth,
-      image_height: project.settings.imageHeight,
-      video_width: project.settings.videoWidth,
-      video_height: project.settings.videoHeight,
-      duration_seconds: getDefaultShotDurationSeconds(project.settings),
-      fps: project.settings.fps,
-      input_image: uploadedReferenceImage,
-      reference_image: uploadedReferenceImage,
-      reference_images: [uploadedReferenceImage, uploadedCharacterPoseImage].filter(Boolean),
-      edit_image_1: editImage1,
-      edit_image_2: editImage2,
-      edit_image_3: editImage3,
-      scene_number: 0,
-      shot_number: 0,
-      seed: Math.floor(Math.random() * 9_000_000_000)
-    }, {
-      signal
-    });
+    const outputFiles = await runProjectComfyWorkflow(
+      project,
+      workflow.workflowPath,
+      {
+        prompt: workflowPrompt,
+        negative_prompt: project.settings.negativePrompt,
+        output_prefix: `${project.id}_${kind}_${itemId}_reference`,
+        image_width: project.settings.imageWidth,
+        image_height: project.settings.imageHeight,
+        video_width: project.settings.videoWidth,
+        video_height: project.settings.videoHeight,
+        duration_seconds: getDefaultShotDurationSeconds(project.settings),
+        fps: project.settings.fps,
+        input_image: uploadedReferenceImage,
+        reference_image: uploadedReferenceImage,
+        reference_images: [uploadedReferenceImage, uploadedCharacterPoseImage].filter(Boolean),
+        edit_image_1: editImage1,
+        edit_image_2: editImage2,
+        edit_image_3: editImage3,
+        scene_number: 0,
+        shot_number: 0,
+        seed: Math.floor(Math.random() * 9_000_000_000)
+      },
+      {
+        signal,
+        label: `reference_${kind}_${itemId}_${workflowKind}`,
+        outputKind: 'image'
+      }
+    );
 
     const outputFile = pickOutputFile(outputFiles, 'image');
     const buffer = await fetchComfyOutputFile(outputFile, { signal });
@@ -2983,7 +3130,8 @@ async function generateReferenceFrameAssetForShot(
       await saveProject(project);
     }
   } else {
-    const outputFiles = await runComfyWorkflow(
+    const outputFiles = await runProjectComfyWorkflow(
+      project,
       selectedWorkflow.workflowPath,
       buildComfyVariables(project, shot, appSettings, selectedWorkflow.type, {
         frameKind,
@@ -2991,7 +3139,9 @@ async function generateReferenceFrameAssetForShot(
         referenceVariables: generationReferenceInputs.referenceVariables
       }),
       {
-        signal
+        signal,
+        label: `reference_frame_${shot.id}_${frameKind}_${selectedWorkflow.type}`,
+        outputKind: 'image'
       }
     );
 
@@ -3098,7 +3248,8 @@ async function generateVideoAssetForShot(
       uploadedTargetLastFrameImage = await uploadImageToComfy(targetLastFrameImagePath, { signal });
     }
 
-    const outputFiles = await runComfyWorkflow(
+    const outputFiles = await runProjectComfyWorkflow(
+      project,
       workflowPath,
       buildComfyVariables(project, shot, appSettings, 'image_to_video', {
         durationSeconds: segmentDuration,
@@ -3123,7 +3274,9 @@ async function generateVideoAssetForShot(
         seed: shotSeed
       }),
       {
-        signal
+        signal,
+        label: `video_${shot.id}_seg_${segmentIndex + 1}_of_${segmentCount}`,
+        outputKind: 'video'
       }
     );
 

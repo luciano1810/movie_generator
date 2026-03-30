@@ -54,6 +54,13 @@ async function loadWorkflowTemplate(templatePath: string): Promise<Record<string
   return parsed;
 }
 
+export async function prepareComfyWorkflow(
+  templatePath: string,
+  variables: Record<string, TemplateVariable>
+): Promise<Record<string, unknown>> {
+  return fillTemplateValue(await loadWorkflowTemplate(templatePath), variables) as Record<string, unknown>;
+}
+
 function createAbortError(): Error {
   const error = new Error('操作已中止。');
   error.name = 'AbortError';
@@ -160,7 +167,7 @@ export async function runComfyWorkflow(
   options: ComfyRequestOptions = {}
 ): Promise<ComfyOutputFile[]> {
   const settings = getAppSettings();
-  const workflow = fillTemplateValue(await loadWorkflowTemplate(templatePath), variables);
+  const workflow = await prepareComfyWorkflow(templatePath, variables);
   const clientId = crypto.randomUUID();
   const signal = options.signal;
 
