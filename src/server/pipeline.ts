@@ -179,16 +179,18 @@ function buildCharacterAssetWorkflowPrompt(
   });
   const prefix = trimmedName ? `角色名：${trimmedName}。` : '';
   const detailSentence = detail ? `角色设定：${detail}。` : '';
+  const fullBodyRequirement =
+    '画面要求：生成单人完整全身照片，人物从头到脚完整入镜，清楚露出头顶与双脚，不要半身像、特写、多人同框、拼贴图或局部裁切。';
 
   if (hasReferenceImage) {
-    return `${prefix}${detailSentence}基于用户上传参考图生成该角色的人物参考图，保持角色姓名、人种/族裔提示与人物外貌设定一致。`;
+    return `${prefix}${detailSentence}基于用户上传参考图生成该角色的人物参考图，保持角色姓名、人种/族裔提示与人物外貌设定一致。${fullBodyRequirement}`;
   }
 
-  if (trimmedPrompt) {
-    return trimmedPrompt;
+  if (trimmedPrompt || trimmedName || ethnicityHint.trim()) {
+    return `${prefix}${detailSentence}基于上述角色姓名、人种/族裔提示与人物外貌设定生成该角色的人物参考图，确保角色身份稳定、外观一致，可作为后续镜头与视频生成的人物一致性参考。${fullBodyRequirement}`;
   }
 
-  return `${prefix}${detailSentence}生成该角色的人物参考图，清晰呈现脸型五官、发型发色、体型、服装主色和关键配饰，可作为后续镜头与视频生成的人物一致性参考。`;
+  return `生成该角色的人物参考图，清晰呈现脸型五官、发型发色、体型、服装主色和关键配饰，可作为后续镜头与视频生成的人物一致性参考。${fullBodyRequirement}`;
 }
 
 function now(): string {
