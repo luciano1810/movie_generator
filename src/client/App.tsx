@@ -1951,7 +1951,7 @@ export function App() {
       setNotice(
         meta?.envStatus.ttsWorkflowExists
           ? '背景声音和台词/旁白 Prompt 已保存；重新生成视频片段后会更新配音并自动匹配视频时长'
-          : '背景声音和台词/旁白 Prompt 已保存；未配置 TTS 时需重新生成视频片段和最终成片'
+          : '背景声音和台词/旁白 Prompt 已保存；未配置 TTS 时，系统会按“人物描述：对白”格式把对白并入视频工作流，请重新生成视频片段和最终成片'
       );
       await loadProjects(selectedId);
     } catch (error) {
@@ -4426,12 +4426,12 @@ export function App() {
                       type="checkbox"
                     />
                     <span>
-                      启用独立 TTS 工作流。关闭后，台词会直接输入到视频工作流；开启后，视频工作流只负责背景音/动作音，台词由 TTS 单独生成。
+                      启用独立 TTS 工作流。关闭后，台词会以“人物描述：对白”的格式直接输入到视频工作流；开启后，视频工作流只负责背景音/动作音与口型表演，台词由 TTS 单独生成。
                     </span>
                   </div>
                 </label>
                 <label className="field">
-                  <span>单次生成最长视频秒数（系统设置）</span>
+                  <span>镜头视频最长秒数（系统设置）</span>
                   <input
                     type="number"
                     value={effectiveMaxVideoSegmentDurationSeconds}
@@ -4440,7 +4440,7 @@ export function App() {
                 </label>
               </div>
               <p className="settings-hint">
-                项目篇幅用于表达整体体量偏好。剧本阶段不会再按固定场次数限制 LLM 展开剧情；镜头数量和拆镜颗粒度也仍由 LLM 在分镜阶段自行决定。这里显示的是视频工作流“单次调用”的系统上限；当镜头总时长超过该值时，服务端会自动多次生成并拼接成完整镜头。
+                项目篇幅用于表达整体体量偏好。剧本阶段不会再按固定场次数限制 LLM 展开剧情；镜头数量和拆镜颗粒度也仍由 LLM 在分镜阶段自行决定。这里显示的是当前系统允许的单个镜头视频硬上限；镜头时长超过该值时，需要在分镜阶段主动拆成多个镜头。
               </p>
               <p className="settings-hint">
                 当前项目的 TTS 状态：{ttsWorkflowStatusLabel}。

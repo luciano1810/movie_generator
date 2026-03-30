@@ -32,7 +32,8 @@ import {
 import {
   extractReferenceLibraryFromScript,
   generateScriptFromText,
-  generateStoryboardFromScript
+  generateStoryboardFromScript,
+  type StoryboardPlanShot
 } from './openai-client.js';
 import {
   type ComfyOutputFile,
@@ -295,11 +296,31 @@ async function persistReferenceLibrary(project: Project): Promise<void> {
   project.artifacts.referenceLibraryJson = libraryFile.relativePath;
 }
 
-async function persistStoryboard(project: Project): Promise<void> {
+async function persistStoryboard(project: Project, planShots: StoryboardPlanShot[] | null = null): Promise<void> {
   const storyboardFile = await writeProjectFile(
     project.id,
     'storyboard/storyboard.json',
-    JSON.stringify({ shots: project.storyboard }, null, 2)
+    JSON.stringify(
+      {
+        plan: planShots
+          ? {
+              totalShots: planShots.length,
+              shots: planShots.map((shot) => ({
+                id: shot.id,
+                sceneNumber: shot.sceneNumber,
+                shotNumber: shot.shotNumber,
+                title: shot.title,
+                purpose: shot.purpose,
+                durationSeconds: shot.durationSeconds,
+                overview: shot.overview
+              }))
+            }
+          : null,
+        shots: project.storyboard
+      },
+      null,
+      2
+    )
   );
   project.artifacts.storyboardJson = storyboardFile.relativePath;
 }
@@ -777,6 +798,30 @@ function buildVideoCharacterReferencePrompt(
   ].join('\n');
 }
 
+function buildFirstFrameCharacterReferencePrompt(
+  project: Project,
+  shot: Project['storyboard'][number]
+): string {
+  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const characters = referenceLibrary.characters
+    .map((item) => ({
+      name: item.name.trim(),
+      detail: buildCharacterReferenceDetail(item)
+    }))
+    .filter((item) => item.name && item.detail)
+    .slice(0, 6);
+
+  if (!characters.length) {
+    return '';
+  }
+
+  return [
+    '人物一致性约束：',
+    ...characters.map((item) => `- ${item.name}：${item.detail}`),
+    '- 上述人物设定属于硬约束：脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质保持稳定；当前首帧里实际出镜的人物必须与这些设定一致，不要换脸、换装、换年龄感，也不要混入额外主角。'
+  ].join('\n');
+}
+
 function sanitizeVideoPromptText(text: string): string {
   return text
     .trim()
@@ -811,7 +856,19 @@ function buildVideoContinuityPrompt(): string {
   return [
     '连贯性要求：',
     '- 镜头内部优先通过人物走位、视线变化、前后景层次和轻微运镜推进节奏，不要频繁跳变构图或突然切到另一个状态。',
-    '- 表演与动作要连续自然，保留细微停顿、呼吸感和余韵，避免生硬跳切感。'
+    '- 表演与动作要连续自然，保留细微停顿、呼吸感和余韵，避免生硬跳切感。',
+    '- 必须严格承接首帧输入图里的角色位置、服装、道具、光线方向和空间关系，不要重新起镜或换一套画面状态。'
+  ].join('\n');
+}
+
+function buildVideoQualityGuardPrompt(hasSpeechContent: boolean): string {
+  return [
+    '质量约束：',
+    '- 人物脸型五官、发型发色、体型比例、服装主色、关键配饰和道具状态在整段镜头内保持稳定，不要中途漂移、闪变或替换人物。',
+    '- 动作要符合真实受力、惯性和节奏，避免突然抽动、无意义抖动、瞬移、肢体穿模、手指数量异常和背景呼吸感。',
+    hasSpeechContent
+      ? '- 有语音时，只有正确的说话主体出现明显口型、下颌和呼吸节奏变化，其他人物不要误开口；口型、表情、视线和身体动作必须互相匹配。'
+      : '- 无语音时，人物嘴部保持自然闭合或仅有呼吸性微动，不要出现无故张嘴、说话感或错误的人声表演。'
   ].join('\n');
 }
 
@@ -948,14 +1005,38 @@ function buildFirstFrameShotDirectivePrompt(shot: Project['storyboard'][number])
   return ['首帧画面要求：', ...detailLines].join('\n');
 }
 
+function buildFirstFrameQualityPrompt(
+  workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video'
+): string {
+  const parts = [
+    '首帧质量要求：',
+    '- 输出必须是一张电影级写实静帧，不是概念草图、分镜示意图、海报、拼贴图、多联画、人物设定板或 UI 截图。',
+    '- 主体边缘清晰，人物五官稳定，双眼对称，手部结构正确，道具形体完整；避免糊脸、崩手、重复人物、额外肢体、奇怪透视和背景漂移。',
+    '- 画面要同时具备明确主体、可读动作定格、前中后景层次、可信光线方向、材质细节和空间深度，优先选择最能代表镜头开场信息的决定性瞬间。',
+    '- 不要生成字幕、水印、logo、边框、贴纸、说明文字、时间戳，也不要做成二次元线稿感或低完成度草模感。'
+  ];
+
+  if (workflow === 'storyboard_image' || workflow === 'image_edit') {
+    parts.push(
+      '- 参考图只用于锁定人物身份、服装、场景和物品，不要照抄参考图构图，也不要把多张参考图机械拼接到同一张画面里。'
+    );
+  }
+
+  return parts.join('\n');
+}
+
 function buildFirstFrameWorkflowPrompt(
+  project: Project,
   shot: Project['storyboard'][number],
   workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video'
 ): string {
   const basePrompt = shot.firstFramePrompt.trim();
+  const characterPrompt = buildFirstFrameCharacterReferencePrompt(project, shot);
   const parts = [
     buildFirstFrameShotDirectivePrompt(shot),
     basePrompt,
+    characterPrompt,
+    buildFirstFrameQualityPrompt(workflow),
     '补充要求：把镜头开场一瞬间写实地冻结成一张完整画面，优先具体化角色状态、空间关系和环境信息。'
   ];
 
@@ -978,15 +1059,20 @@ function buildMergedVideoPrompt(
     durationSeconds?: number;
   }
 ): string {
-  const hasSpeechContent = Boolean(shot.dialogue.trim() || shot.voiceover.trim());
+  const hasDialogueContent = Boolean(shot.dialogue.trim());
+  const hasVoiceoverContent = Boolean(shot.voiceover.trim());
+  const hasSpeechContent = hasDialogueContent || hasVoiceoverContent;
   const videoPrompt = sanitizeVideoPromptText(shot.videoPrompt);
   const characterPrompt = buildVideoCharacterReferencePrompt(project, shot);
   const backgroundSoundPrompt = sanitizeVideoPromptText(shot.backgroundSoundPrompt);
   const speechPrompt = sanitizeVideoPromptText(shot.speechPrompt);
+  const inlineDialogueInstruction = buildInlineDialogueInstruction(project, shot);
+  const inlineVoiceoverInstruction = buildInlineVoiceoverInstruction(shot);
   const parts = [
     buildVideoShotDirectivePromptWithDuration(shot, options.durationSeconds ?? shot.durationSeconds),
     videoPrompt,
-    buildVideoContinuityPrompt()
+    buildVideoContinuityPrompt(),
+    buildVideoQualityGuardPrompt(hasDialogueContent)
   ];
 
   if (characterPrompt) {
@@ -1004,7 +1090,19 @@ function buildMergedVideoPrompt(
       parts.push('背景声音要求：保留自然环境音、动作音和空间氛围声，不要额外生成独立对白人声。');
     }
 
-    parts.push('说话者要求：如镜头中有人说话，必须通过人物外观、身份和气质特征明确发声主体，并让口型、表情、动作与台词或旁白同步。');
+    if (hasDialogueContent) {
+      parts.push(
+        options.includeSpeechPrompt
+          ? '说话者要求：如镜头中有人说话，必须通过人物外观、身份和气质特征明确发声主体，并让口型、表情、动作与台词同步。'
+          : '口型表演要求：如镜头中有人说话，只表现正确说话主体的口型、呼吸、表情和身体伴随动作，不要额外生成独立对白人声；对白音轨会在后续单独处理。'
+      );
+    } else if (hasVoiceoverContent) {
+      parts.push(
+        options.includeSpeechPrompt
+          ? '旁白表演要求：这是画外音/旁白，不要让镜头内人物强行对口型；画面情绪、节奏和反应要与旁白信息同步。'
+          : '旁白表演要求：画面只需要承接画外音带来的情绪和节奏，不要额外生成独立对白人声，也不要让镜头内人物误开口。'
+      );
+    }
   } else {
     parts.push(
       backgroundSoundPrompt
@@ -1013,8 +1111,20 @@ function buildMergedVideoPrompt(
     );
   }
 
-  if (options.includeSpeechPrompt && speechPrompt) {
-    parts.push(`台词/旁白要求：${speechPrompt}`);
+  if (options.includeSpeechPrompt) {
+    if (inlineDialogueInstruction) {
+      parts.push(
+        `对白内容要求：严格按以下“人物描述：对白”关系执行，不要改写台词文字，也不要输出字幕：${inlineDialogueInstruction}`
+      );
+    }
+
+    if (inlineVoiceoverInstruction) {
+      parts.push(`旁白内容要求：${inlineVoiceoverInstruction}。这是画外音，不要强行让镜头内人物都对口型。`);
+    }
+
+    if (speechPrompt) {
+      parts.push(`发声表演要求：${speechPrompt}`);
+    }
   }
 
   return parts.filter(Boolean).join('\n\n');
@@ -1049,6 +1159,20 @@ function getVideoWorkflowPrompt(
   );
 }
 
+function buildVideoNegativePrompt(baseNegativePrompt: string): string {
+  const extraNegativePrompt =
+    'subtitle, text overlay, logo, identity drift, face drift, temporal inconsistency, flickering, duplicate person, extra limbs, wrong mouth movement';
+
+  return baseNegativePrompt.trim() ? `${baseNegativePrompt}, ${extraNegativePrompt}` : extraNegativePrompt;
+}
+
+function buildImageNegativePrompt(baseNegativePrompt: string): string {
+  const extraNegativePrompt =
+    'low quality, blurry, soft focus, out of frame, duplicate person, extra limbs, extra fingers, missing fingers, bad anatomy, asymmetrical eyes, deformed face, waxy skin, broken hands, fused fingers, bad perspective, collage, split screen, storyboard sheet, concept art page, sketch, text, subtitle, watermark, logo';
+
+  return baseNegativePrompt.trim() ? `${baseNegativePrompt}, ${extraNegativePrompt}` : extraNegativePrompt;
+}
+
 function isSpeechPromptDisabled(speechPrompt: string): boolean {
   return /无语音内容|不生成语音|无需语音|无台词|无旁白/.test(speechPrompt.trim());
 }
@@ -1065,6 +1189,29 @@ function sanitizeTtsInstructionText(value: string): string {
     .replace(/\s+/g, ' ')
     .replace(/[“”"'`]/g, '')
     .trim();
+}
+
+function buildDialogueSpeakerDescription(
+  speaker: string | null,
+  referenceCharacter: ReferenceAssetItem | null
+): string {
+  const referenceDetail = referenceCharacter
+    ? sanitizeVideoPromptText(
+        buildCharacterReferenceDetail(referenceCharacter).split(referenceCharacter.name.trim()).join('该人物')
+      )
+        .replace(/[:：]/g, '，')
+        .replace(/[;；]+/g, '，')
+    : '';
+
+  if (referenceDetail) {
+    return referenceDetail;
+  }
+
+  if (speaker?.trim()) {
+    return `镜头中名为${speaker.trim()}的人物`;
+  }
+
+  return '镜头中当前出声的人物';
 }
 
 function extractDialogueSegments(
@@ -1203,6 +1350,33 @@ function buildTtsPlan(project: Project, shot: Project['storyboard'][number]): Tt
   };
 }
 
+function buildInlineDialogueInstruction(project: Project, shot: Project['storyboard'][number]): string {
+  const dialogueSegments = extractDialogueSegments(shot.dialogue.trim());
+
+  if (!dialogueSegments.length) {
+    return '';
+  }
+
+  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+
+  return dialogueSegments
+    .map((segment) => {
+      const referenceCharacter = findReferenceCharacterForDialogueSegment(referenceLibrary.characters, segment.speaker);
+      return `${buildDialogueSpeakerDescription(segment.speaker, referenceCharacter)}：${segment.text}`;
+    })
+    .join('；');
+}
+
+function buildInlineVoiceoverInstruction(shot: Project['storyboard'][number]): string {
+  const voiceover = normalizeTtsSpeechText(shot.voiceover.trim());
+
+  if (!voiceover) {
+    return '';
+  }
+
+  return `画外音/旁白：${voiceover}`;
+}
+
 function normalizeReferenceSearchText(value: string): string {
   return value
     .toLowerCase()
@@ -1332,6 +1506,27 @@ function getAudioDrivenVideoDurationSeconds(
 
   const minimumAudioCoveredDuration = Math.ceil(audioDurationSeconds + AUDIO_DRIVEN_VIDEO_PADDING_SECONDS);
   return Math.max(1, shot.durationSeconds, minimumAudioCoveredDuration);
+}
+
+function resolveVideoGenerationDuration(
+  project: Project,
+  shot: Project['storyboard'][number],
+  audioDurationSeconds: number | null
+): {
+  durationSeconds: number;
+  requestedDurationSeconds: number;
+  maxSegmentDurationSeconds: number;
+  requiresSegmentStitching: boolean;
+} {
+  const requestedDurationSeconds = getAudioDrivenVideoDurationSeconds(shot, audioDurationSeconds);
+  const maxSegmentDurationSeconds = getMaxVideoSegmentDurationSeconds(project);
+
+  return {
+    durationSeconds: requestedDurationSeconds,
+    requestedDurationSeconds,
+    maxSegmentDurationSeconds,
+    requiresSegmentStitching: requestedDurationSeconds > maxSegmentDurationSeconds
+  };
 }
 
 async function ensureShotTtsAudio(
@@ -1471,6 +1666,10 @@ function buildComfyVariables(
   } = {}
 ) {
   const durationSeconds = options.durationSeconds ?? shot.durationSeconds;
+  const negativePrompt =
+    workflow === 'image_to_video'
+      ? buildVideoNegativePrompt(project.settings.negativePrompt)
+      : buildImageNegativePrompt(project.settings.negativePrompt);
 
   return {
     prompt:
@@ -1480,10 +1679,10 @@ function buildComfyVariables(
             ? getVideoWorkflowPrompt(project, shot, appSettings, {
                 durationSeconds
               })
-            : buildFirstFrameWorkflowPrompt(shot, workflow)),
+            : buildFirstFrameWorkflowPrompt(project, shot, workflow)),
         options.referenceContext ?? ''
       ),
-    negative_prompt: project.settings.negativePrompt,
+    negative_prompt: negativePrompt,
     output_prefix: options.outputPrefix ?? `${project.id}_${shot.id}_${workflow}`,
     image_width: project.settings.imageWidth,
     image_height: project.settings.imageHeight,
@@ -1676,13 +1875,16 @@ function buildSegmentVideoPrompt(
   const basePrompt = getVideoWorkflowPrompt(project, shot, appSettings, {
     durationSeconds: totalDurationSeconds
   });
+  const lastFramePrompt = sanitizeVideoPromptText(shot.lastFramePrompt);
 
   if (segmentCount <= 1) {
-    return basePrompt;
+    return lastFramePrompt
+      ? `${basePrompt}\n\n镜头收束要求：镜头结尾必须自然落到以下尾帧状态，不要突然停帧、突然黑场或卡住动作：${lastFramePrompt}`
+      : basePrompt;
   }
 
   if (segmentIndex === segmentCount - 1) {
-    return `${basePrompt}\n\n本段是长镜头的收尾段，动作、表演和运镜必须自然减速并收束到以下尾帧描述，不要突然停帧或骤然切换：${sanitizeVideoPromptText(shot.lastFramePrompt)}`;
+    return `${basePrompt}\n\n本段是长镜头的收尾段，动作、表演和运镜必须自然减速并收束到以下尾帧描述，不要突然停帧或骤然切换：${lastFramePrompt}`;
   }
 
   return `${basePrompt}\n\n本段是长镜头的第 ${segmentIndex + 1}/${segmentCount} 段，保持人物、机位、动作、表演与光线连续，让动作自然延续并留出下一段承接空间，暂时不要提前收束到最终尾帧，也不要突然切断当前动作。`;
@@ -2434,29 +2636,46 @@ async function runStoryboardStage(project: Project): Promise<void> {
 
   appendLog(project, '开始根据剧本拆解分镜。');
   project.storyboard = [];
-  await persistStoryboard(project);
+  let storyboardPlan: StoryboardPlanShot[] | null = null;
+  await persistStoryboard(project, storyboardPlan);
   await saveProject(project);
 
   const storyboard = await generateStoryboardFromScript(project.script, project.settings, {
     signal: getProjectAbortSignal(project.id),
     referenceLibrary: project.referenceLibrary,
-    onSceneStart: async ({ scene, completedScenes, totalScenes }) => {
+    onPlanGenerated: async ({ planShots, totalShots }) => {
       await throwIfRunInterrupted(project.id, 'storyboard');
-      appendLog(project, `分镜生成 ${completedScenes + 1}/${totalScenes}: 场景 ${scene.sceneNumber}`);
-      await saveProject(project);
-    },
-    onSceneGenerated: async ({ scene, sceneShots, storyboard: partialStoryboard, completedScenes, totalScenes }) => {
-      project.storyboard = partialStoryboard;
-      await persistStoryboard(project);
+      storyboardPlan = planShots;
+      await persistStoryboard(project, storyboardPlan);
+      const shotsByScene = planShots.reduce<Map<number, number>>((map, shot) => {
+        map.set(shot.sceneNumber, (map.get(shot.sceneNumber) ?? 0) + 1);
+        return map;
+      }, new Map());
       appendLog(
         project,
-        `场景 ${scene.sceneNumber} 分镜生成完成，新增 ${sceneShots.length} 个镜头，当前已完成 ${completedScenes}/${totalScenes} 个场景，累计 ${partialStoryboard.length} 个镜头。`
+        `分镜规划完成，共 ${totalShots} 个镜头。场景分布：${Array.from(shotsByScene.entries())
+          .map(([sceneNumber, count]) => `场景 ${sceneNumber} ${count} 个`)
+          .join('；')}`
+      );
+      await saveProject(project);
+    },
+    onShotStart: async ({ scene, shotPlan, globalShotIndex, totalShots }) => {
+      await throwIfRunInterrupted(project.id, 'storyboard');
+      appendLog(project, `分镜生成 ${globalShotIndex}/${totalShots}: 场景 ${scene.sceneNumber} 镜头 ${shotPlan.shotNumber} ${shotPlan.title}`);
+      await saveProject(project);
+    },
+    onShotGenerated: async ({ scene, shot, storyboard: partialStoryboard, completedShots, totalShots }) => {
+      project.storyboard = partialStoryboard;
+      await persistStoryboard(project, storyboardPlan);
+      appendLog(
+        project,
+        `镜头生成完成：场景 ${scene.sceneNumber} 镜头 ${shot.shotNumber} ${shot.title}，当前已完成 ${completedShots}/${totalShots} 个镜头，累计已保存 ${partialStoryboard.length} 个镜头。`
       );
       await saveProject(project);
     }
   });
   project.storyboard = storyboard;
-  await persistStoryboard(project);
+  await persistStoryboard(project, storyboardPlan);
   appendLog(
     project,
     `分镜生成完成，共 ${storyboard.length} 个镜头，总时长 ${storyboard.at(-1)?.endTimecode ?? '00:00'}。`
@@ -2541,7 +2760,7 @@ async function generateImageAssetForShot(
 ): Promise<GeneratedAsset> {
   const signal = getProjectAbortSignal(project.id);
   const generationPrompt = appendReferenceContext(
-    buildFirstFrameWorkflowPrompt(shot, selectedWorkflow.type),
+    buildFirstFrameWorkflowPrompt(project, shot, selectedWorkflow.type),
     generationReferenceInputs.referenceContext
   );
   let buffer: Buffer;
@@ -2604,7 +2823,8 @@ async function generateVideoAssetForShot(
   }
 
   const preparedTtsAudio = await ensureShotTtsAudio(project, shot, appSettings, ttsUploadCache);
-  const effectiveDurationSeconds = getAudioDrivenVideoDurationSeconds(shot, preparedTtsAudio.durationSeconds);
+  const resolvedDuration = resolveVideoGenerationDuration(project, shot, preparedTtsAudio.durationSeconds);
+  const effectiveDurationSeconds = resolvedDuration.durationSeconds;
   const segmentDurations = getVideoSegmentDurations(project, effectiveDurationSeconds);
   const segmentCount = segmentDurations.length;
   const shotSeed = Math.floor(Math.random() * 9_000_000_000);
@@ -2624,7 +2844,9 @@ async function generateVideoAssetForShot(
     if (preparedTtsAudio.durationSeconds !== null) {
       appendLog(
         project,
-        `镜头 ${shot.title} 已${ttsSourceLabel}（${ttsModeLabel}），语音时长约 ${preparedTtsAudio.durationSeconds.toFixed(2)} 秒；本次视频将按原分镜时长与语音时长中的较大值生成，当前为 ${effectiveDurationSeconds} 秒。`
+        resolvedDuration.requiresSegmentStitching
+          ? `镜头 ${shot.title} 已${ttsSourceLabel}（${ttsModeLabel}），语音时长约 ${preparedTtsAudio.durationSeconds.toFixed(2)} 秒；由于系统设置规定单段视频最长 ${resolvedDuration.maxSegmentDurationSeconds} 秒，本次会按总时长 ${effectiveDurationSeconds} 秒拆成 ${segmentCount} 段生成并自动拼接，避免在成片里靠尾帧静止补时长。`
+          : `镜头 ${shot.title} 已${ttsSourceLabel}（${ttsModeLabel}），语音时长约 ${preparedTtsAudio.durationSeconds.toFixed(2)} 秒；本次视频将按原分镜时长与语音时长中的较大值生成，当前为 ${effectiveDurationSeconds} 秒。`
       );
     } else {
       appendLog(
@@ -2633,6 +2855,12 @@ async function generateVideoAssetForShot(
         'warn'
       );
     }
+    await saveProject(project);
+  } else if (resolvedDuration.requiresSegmentStitching) {
+    appendLog(
+      project,
+      `镜头 ${shot.title} 的目标时长 ${resolvedDuration.requestedDurationSeconds} 秒超过单段上限 ${resolvedDuration.maxSegmentDurationSeconds} 秒；本次会按总时长 ${effectiveDurationSeconds} 秒拆成 ${segmentCount} 段生成并自动拼接。`
+    );
     await saveProject(project);
   }
 
@@ -3666,6 +3894,12 @@ export async function updateStoryboardShotPrompts(
     }
 
     const nextDuration = Math.round(parsedDuration);
+    const maxDurationSeconds = getMaxVideoSegmentDurationSeconds(project);
+
+    if (nextDuration > maxDurationSeconds) {
+      throw new Error(`镜头时长不能超过系统设置中的 ${maxDurationSeconds} 秒。`);
+    }
+
     if (shot.durationSeconds !== nextDuration) {
       shot.durationSeconds = nextDuration;
       changes.push('镜头时长');

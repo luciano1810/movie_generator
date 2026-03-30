@@ -34,6 +34,25 @@ function createAbortError(): Error {
   return error;
 }
 
+function buildAtempoFilterChain(tempo: number): string {
+  const safeTempo = Number.isFinite(tempo) && tempo > 0 ? tempo : 1;
+  const filters: string[] = [];
+  let remainingTempo = safeTempo;
+
+  while (remainingTempo < 0.5) {
+    filters.push('atempo=0.5');
+    remainingTempo /= 0.5;
+  }
+
+  while (remainingTempo > 2) {
+    filters.push('atempo=2');
+    remainingTempo /= 2;
+  }
+
+  filters.push(`atempo=${remainingTempo.toFixed(6)}`);
+  return filters.join(',');
+}
+
 async function runFfmpeg(args: string[], options: FfmpegRunOptions = {}): Promise<void> {
   const settings = getAppSettings();
 
@@ -195,6 +214,7 @@ async function normalizeSegmentsWithAudio(
     const args = ['-y', '-i', videoPath];
     let targetDurationSeconds: number | null = null;
     let audioMap = '';
+    let sourceAudioFilter = '[0:a]aresample=48000';
 
     if (audioPath) {
       const [videoDurationSeconds, audioDurationSeconds] = await Promise.all([
@@ -202,9 +222,10 @@ async function normalizeSegmentsWithAudio(
         getMediaDurationSeconds(audioPath, options)
       ]);
 
-      if (audioDurationSeconds > videoDurationSeconds + AUDIO_SYNC_TOLERANCE_SECONDS) {
-        const padDurationSeconds = audioDurationSeconds - videoDurationSeconds;
-        args.push('-vf', `tpad=stop_mode=clone:stop_duration=${padDurationSeconds.toFixed(3)}`);
+      if (videoDurationSeconds > 0 && audioDurationSeconds > videoDurationSeconds + AUDIO_SYNC_TOLERANCE_SECONDS) {
+        const stretchRatio = audioDurationSeconds / videoDurationSeconds;
+        args.push('-vf', `setpts=${stretchRatio.toFixed(6)}*PTS`);
+        sourceAudioFilter = `${sourceAudioFilter},${buildAtempoFilterChain(1 / stretchRatio)}`;
         targetDurationSeconds = audioDurationSeconds;
       }
 
@@ -212,14 +233,14 @@ async function normalizeSegmentsWithAudio(
       if (sourceHasAudio) {
         args.push(
           '-filter_complex',
-          '[0:a]aresample=48000,apad[va];[1:a]aresample=48000,apad[ea];[va][ea]amix=inputs=2:duration=first:dropout_transition=0[aout]'
+          `${sourceAudioFilter},apad[va];[1:a]aresample=48000,apad[ea];[va][ea]amix=inputs=2:duration=first:dropout_transition=0[aout]`
         );
       } else {
         args.push('-filter_complex', '[1:a]aresample=48000,apad[aout]');
       }
       audioMap = '[aout]';
     } else if (sourceHasAudio) {
-      args.push('-filter_complex', '[0:a]aresample=48000,apad[aout]');
+      args.push('-filter_complex', `${sourceAudioFilter},apad[aout]`);
       audioMap = '[aout]';
     } else {
       args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');

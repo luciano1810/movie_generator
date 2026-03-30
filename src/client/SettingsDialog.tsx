@@ -287,7 +287,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               />
             </label>
             <label className="field">
-              <span>图生视频单次最长秒数</span>
+              <span>镜头视频最长秒数</span>
               <input
                 type="number"
                 value={draft.comfyui.maxVideoSegmentDurationSeconds}
