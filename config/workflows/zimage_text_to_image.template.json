@@ -1,7 +1,7 @@
 {
   "9": {
     "inputs": {
-      "filename_prefix": "{{output_prefix}}",
+      "filename_prefix": "image/2026-03-30/160806",
       "images": [
         "170",
         0
@@ -71,6 +71,36 @@
     "class_type": "ModelSamplingAuraFlow",
     "_meta": {
       "title": "采样算法（AuraFlow）"
+    }
+  },
+  "64": {
+    "inputs": {
+      "rgthree_comparer": {
+        "images": [
+          {
+            "name": "A",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_mttse_00047_.png&type=temp&subfolder=&rand=0.5474564227909793"
+          },
+          {
+            "name": "B",
+            "selected": true,
+            "url": "/api/view?filename=rgthree.compare._temp_mttse_00048_.png&type=temp&subfolder=&rand=0.7819999426964477"
+          }
+        ]
+      },
+      "image_a": [
+        "170",
+        0
+      ],
+      "image_b": [
+        "129",
+        0
+      ]
+    },
+    "class_type": "Image Comparer (rgthree)",
+    "_meta": {
+      "title": "SD Upscale Comapre"
     }
   },
   "129": {
@@ -205,10 +235,22 @@
       "title": "Calculate optimized width"
     }
   },
+  "200": {
+    "inputs": {
+      "images": [
+        "129",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image 2ND"
+    }
+  },
   "443": {
     "inputs": {
-      "width": "{{image_width}}",
-      "height": "{{image_height}}",
+      "width": 640,
+      "height": 960,
       "batch_size": 1
     },
     "class_type": "EmptyLatentImage",
@@ -266,11 +308,23 @@
   },
   "454": {
     "inputs": {
-      "seed": "{{seed}}"
+      "seed": 36731994344740
     },
     "class_type": "Seed (rgthree)",
     "_meta": {
       "title": "Seed (1ST)"
+    }
+  },
+  "455": {
+    "inputs": {
+      "images": [
+        "452",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image 1ST"
     }
   },
   "483": {
@@ -387,7 +441,7 @@
   },
   "496": {
     "inputs": {
-      "seed": "{{seed}}"
+      "seed": 572963003486900
     },
     "class_type": "Seed (rgthree)",
     "_meta": {
