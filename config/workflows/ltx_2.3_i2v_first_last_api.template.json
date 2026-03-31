@@ -173,7 +173,7 @@
   },
   "15": {
     "inputs": {
-      "ckpt_name": "ltx-2.3-22b-dev.safetensors"
+      "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"
     },
     "class_type": "LTXVAudioVAELoader"
   },
@@ -223,8 +223,8 @@
   },
   "20": {
     "inputs": {
-      "text_encoder": "gemma_3_12B_it.safetensors",
-      "ckpt_name": "ltx-2.3-22b-dev.safetensors",
+      "text_encoder": "gemma_3_12B_it_fpmixed.safetensors",
+      "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors",
       "device": "default"
     },
     "class_type": "LTXAVTextEncoderLoader"
@@ -309,7 +309,7 @@
   },
   "32": {
     "inputs": {
-      "ckpt_name": "ltx-2.3-22b-dev.safetensors"
+      "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"
     },
     "class_type": "CheckpointLoaderSimple"
   },
@@ -497,27 +497,19 @@
         "57",
         0
       ],
-      "image_1": [
+      "num_images": "2",
+      "num_images.image_1": [
         "38",
         0
       ],
-      "image_3": [
+      "num_images.image_2": [
         "26",
         0
       ],
-      "index_1": 0,
-      "strength_1": 0.7000000000000002,
-      "index_2": 1,
-      "strength_2": 0.6500000000000001,
-      "index_3": [
-        "51",
-        0
-      ],
-      "strength_3": 1,
-      "index_4": 0,
-      "strength_4": 1,
-      "index_5": 0,
-      "strength_5": 1
+      "num_images.strength_1": 1,
+      "num_images.strength_2": 1,
+      "num_images.index_1": 0,
+      "num_images.index_2": -1
     },
     "class_type": "LTXVImgToVideoInplaceKJ"
   },

@@ -130,6 +130,15 @@ export interface ScriptPackage {
   markdown: string;
 }
 
+export type StoryboardDialogueFlowRole = 'single' | 'start' | 'middle' | 'end';
+
+export interface StoryboardDialogueIdentifier {
+  groupId: string;
+  sequenceIndex: number;
+  sequenceLength: number;
+  flowRole: StoryboardDialogueFlowRole;
+}
+
 export interface StoryboardShot {
   id: string;
   sceneNumber: number;
@@ -141,6 +150,7 @@ export interface StoryboardShot {
   endTimeSeconds: number;
   startTimecode: string;
   endTimecode: string;
+  dialogueIdentifier: StoryboardDialogueIdentifier | null;
   dialogue: string;
   voiceover: string;
   camera: string;
@@ -256,6 +266,80 @@ function normalizeReferenceSearchText(value: string): string {
     .toLowerCase()
     .replace(/[\s"'`“”‘’「」『』（）()【】[\]{}<>《》，,。.!！？?；;：:/\\|_-]+/g, '')
     .trim();
+}
+
+function normalizeDialogueIdentifierGroupId(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function normalizeStoryboardDialogueFlowRole(
+  value: unknown,
+  fallback: StoryboardDialogueFlowRole
+): StoryboardDialogueFlowRole {
+  return value === 'single' || value === 'start' || value === 'middle' || value === 'end'
+    ? value
+    : fallback;
+}
+
+function deriveStoryboardDialogueFlowRole(
+  sequenceIndex: number,
+  sequenceLength: number
+): StoryboardDialogueFlowRole {
+  if (sequenceLength <= 1) {
+    return 'single';
+  }
+
+  if (sequenceIndex <= 1) {
+    return 'start';
+  }
+
+  if (sequenceIndex >= sequenceLength) {
+    return 'end';
+  }
+
+  return 'middle';
+}
+
+export function normalizeStoryboardDialogueIdentifier(
+  value: unknown,
+  fallback: StoryboardDialogueIdentifier | null = null
+): StoryboardDialogueIdentifier | null {
+  if (!value || typeof value !== 'object') {
+    return fallback;
+  }
+
+  const input = value as Partial<StoryboardDialogueIdentifier>;
+  const groupId = normalizeDialogueIdentifierGroupId(input.groupId);
+
+  if (!groupId) {
+    return fallback;
+  }
+
+  const sequenceLength = normalizePositiveInteger(input.sequenceLength, fallback?.sequenceLength ?? 1);
+  const sequenceIndex = Math.min(
+    sequenceLength,
+    normalizePositiveInteger(input.sequenceIndex, fallback?.sequenceIndex ?? 1)
+  );
+  const flowRole = normalizeStoryboardDialogueFlowRole(
+    input.flowRole,
+    deriveStoryboardDialogueFlowRole(sequenceIndex, sequenceLength)
+  );
+
+  return {
+    groupId,
+    sequenceIndex,
+    sequenceLength,
+    flowRole
+  };
 }
 
 function normalizedTextMatches(left: string, right: string): boolean {
@@ -825,6 +909,7 @@ export function normalizeStoryboardShot(
     input?.useLastFrameReference,
     Boolean(typeof input?.lastFramePrompt === 'string' && input.lastFramePrompt.trim())
   );
+  const dialogueIdentifier = normalizeStoryboardDialogueIdentifier(input?.dialogueIdentifier);
 
   return {
     id,
@@ -837,6 +922,7 @@ export function normalizeStoryboardShot(
     endTimeSeconds: 0,
     startTimecode: '00:00',
     endTimecode: '00:00',
+    dialogueIdentifier,
     dialogue,
     voiceover,
     camera: normalizeString(input?.camera, '中近景，稳定推进'),
@@ -878,13 +964,58 @@ function formatStoryboardTimecode(totalSeconds: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
+function finalizeStoryboardDialogueIdentifiers(shots: StoryboardShot[]): StoryboardShot[] {
+  const groupedShotIndexes = new Map<string, number[]>();
+
+  shots.forEach((shot, index) => {
+    if (!shot.dialogueIdentifier?.groupId) {
+      return;
+    }
+
+    const groupKey = `${shot.sceneNumber}:${shot.dialogueIdentifier.groupId}`;
+    const indexes = groupedShotIndexes.get(groupKey) ?? [];
+    indexes.push(index);
+    groupedShotIndexes.set(groupKey, indexes);
+  });
+
+  if (!groupedShotIndexes.size) {
+    return shots;
+  }
+
+  return shots.map((shot, index) => {
+    if (!shot.dialogueIdentifier?.groupId) {
+      return shot;
+    }
+
+    const groupKey = `${shot.sceneNumber}:${shot.dialogueIdentifier.groupId}`;
+    const groupedIndexes = groupedShotIndexes.get(groupKey);
+
+    if (!groupedIndexes?.length) {
+      return shot;
+    }
+
+    const sequenceIndex = groupedIndexes.indexOf(index) + 1;
+    const sequenceLength = groupedIndexes.length;
+
+    return {
+      ...shot,
+      dialogueIdentifier: {
+        groupId: shot.dialogueIdentifier.groupId,
+        sequenceIndex,
+        sequenceLength,
+        flowRole: deriveStoryboardDialogueFlowRole(sequenceIndex, sequenceLength)
+      }
+    };
+  });
+}
+
 export function normalizeStoryboardShots(
   inputs: Array<Partial<StoryboardShot> | undefined>,
   settings: ProjectSettings
 ): StoryboardShot[] {
   let elapsedSeconds = 0;
 
-  return inputs.map((input, index) => {
+  const normalizedShots = inputs.map((input, index) => {
     const shot = normalizeStoryboardShot(input, index, settings);
     const startTimeSeconds = elapsedSeconds;
     const endTimeSeconds = startTimeSeconds + shot.durationSeconds;
@@ -898,6 +1029,8 @@ export function normalizeStoryboardShots(
       endTimecode: formatStoryboardTimecode(endTimeSeconds)
     };
   });
+
+  return finalizeStoryboardDialogueIdentifiers(normalizedShots);
 }
 
 export function createEmptyStageState(): StageState {

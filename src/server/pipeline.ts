@@ -387,6 +387,11 @@ async function persistStoryboard(project: Project, planShots: StoryboardPlanShot
                 title: shot.title,
                 purpose: shot.purpose,
                 durationSeconds: shot.durationSeconds,
+                dialogueIdentifier: shot.dialogueIdentifier?.groupId
+                  ? {
+                      groupId: shot.dialogueIdentifier.groupId
+                    }
+                  : null,
                 overview: shot.overview
               }))
             }

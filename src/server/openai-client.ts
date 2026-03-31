@@ -5,6 +5,7 @@ import type {
   ProjectSettings,
   ReferenceAssetItem,
   ReferenceAssetKind,
+  StoryboardDialogueIdentifier,
   StoryboardShot,
   ScriptDialogueLine,
   ScriptPackage,
@@ -15,6 +16,7 @@ import {
   STORY_LENGTH_LABELS,
   getStoryboardShotFallbackDurationSeconds,
   getStoryLengthReference,
+  normalizeStoryboardDialogueIdentifier,
   normalizeStoryboardShot,
   normalizeStoryboardShots
 } from '../shared/types.js';
@@ -1126,6 +1128,10 @@ interface StoryboardValidationResult {
   feedback: string;
 }
 
+interface StoryboardDialogueIdentifierPayload {
+  groupId?: string;
+}
+
 interface StoryboardShotPayload {
   id?: string;
   sceneNumber?: number;
@@ -1133,6 +1139,7 @@ interface StoryboardShotPayload {
   title?: string;
   purpose?: string;
   durationSeconds?: number;
+  dialogueIdentifier?: StoryboardDialogueIdentifierPayload | null;
   dialogue?: string;
   voiceover?: string;
   camera?: string;
@@ -1153,6 +1160,7 @@ interface StoryboardPlanShotPayload {
   title?: string;
   purpose?: string;
   durationSeconds?: number;
+  dialogueIdentifier?: StoryboardDialogueIdentifierPayload | null;
   overview?: string;
 }
 
@@ -1163,6 +1171,7 @@ export interface StoryboardPlanShot {
   title: string;
   purpose: string;
   durationSeconds: number;
+  dialogueIdentifier: StoryboardDialogueIdentifier | null;
   overview: string;
 }
 
@@ -1174,6 +1183,55 @@ interface StoryboardPlanPayload {
 interface StoryboardSingleShotPayload {
   shot?: StoryboardShotPayload;
   shots?: StoryboardShotPayload[];
+}
+
+interface StoryboardDialogueSequenceShotPayload {
+  sceneNumber?: number;
+  shotNumber?: number;
+  dialogue?: string;
+  voiceover?: string;
+  camera?: string;
+  composition?: string;
+  transitionHint?: string;
+  promptHint?: string;
+}
+
+interface StoryboardDialogueSequencePayload {
+  groupId?: string;
+  summary?: string;
+  continuityNotes?: string;
+  shots?: StoryboardDialogueSequenceShotPayload[];
+}
+
+interface StoryboardDialogueSequenceShotBrief {
+  id: string;
+  sceneNumber: number;
+  shotNumber: number;
+  dialogue: string;
+  voiceover: string;
+  camera: string;
+  composition: string;
+  transitionHint: string;
+  promptHint: string;
+}
+
+interface StoryboardDialogueSequenceBrief {
+  groupId: string;
+  sceneNumber: number;
+  summary: string;
+  continuityNotes: string;
+  shots: StoryboardDialogueSequenceShotBrief[];
+}
+
+interface StoryboardDialogueSequenceGroup {
+  groupId: string;
+  scene: ScriptScene;
+  shots: StoryboardPlanShot[];
+}
+
+interface StoryboardDialogueSequenceShotContext {
+  group: StoryboardDialogueSequenceBrief;
+  shot: StoryboardDialogueSequenceShotBrief;
 }
 
 interface StoryboardSceneCoverageIssue {
@@ -1390,6 +1448,54 @@ function normalizeStoryboardShotForGeneration(
   );
 }
 
+function finalizeStoryboardPlanDialogueIdentifiers(planShots: StoryboardPlanShot[]): StoryboardPlanShot[] {
+  const groupedShotIndexes = new Map<string, number[]>();
+
+  planShots.forEach((shot, index) => {
+    const groupId = shot.dialogueIdentifier?.groupId;
+
+    if (!groupId) {
+      return;
+    }
+
+    const groupKey = `${shot.sceneNumber}:${groupId}`;
+    const indexes = groupedShotIndexes.get(groupKey) ?? [];
+    indexes.push(index);
+    groupedShotIndexes.set(groupKey, indexes);
+  });
+
+  if (!groupedShotIndexes.size) {
+    return planShots;
+  }
+
+  return planShots.map((shot, index) => {
+    const groupId = shot.dialogueIdentifier?.groupId;
+
+    if (!groupId) {
+      return shot;
+    }
+
+    const groupKey = `${shot.sceneNumber}:${groupId}`;
+    const groupedIndexes = groupedShotIndexes.get(groupKey);
+
+    if (!groupedIndexes?.length) {
+      return shot;
+    }
+
+    const sequenceIndex = groupedIndexes.indexOf(index) + 1;
+    const sequenceLength = groupedIndexes.length;
+
+    return {
+      ...shot,
+      dialogueIdentifier: normalizeStoryboardDialogueIdentifier({
+        groupId,
+        sequenceIndex,
+        sequenceLength
+      })
+    };
+  });
+}
+
 function normalizeStoryboardPlanShot(
   input: StoryboardPlanShotPayload | undefined,
   index: number,
@@ -1409,6 +1515,7 @@ function normalizeStoryboardPlanShot(
       input?.durationSeconds,
       getStoryboardShotFallbackDurationSeconds(settings)
     ),
+    dialogueIdentifier: normalizeStoryboardDialogueIdentifier(input?.dialogueIdentifier),
     overview: normalizeString(input?.overview, `${title}，突出关键动作、对白推进和情绪变化。`)
   };
 }
@@ -1435,7 +1542,7 @@ function normalizeAndFinalizeStoryboardPlanShots(
     });
   const shotNumberByScene = new Map<number, number>();
 
-  return normalized.map((shot) => {
+  return finalizeStoryboardPlanDialogueIdentifiers(normalized.map((shot) => {
     const nextShotNumber = (shotNumberByScene.get(shot.sceneNumber) ?? 0) + 1;
     shotNumberByScene.set(shot.sceneNumber, nextShotNumber);
 
@@ -1444,7 +1551,7 @@ function normalizeAndFinalizeStoryboardPlanShots(
       id: `scene-${shot.sceneNumber}-shot-${nextShotNumber}`,
       shotNumber: nextShotNumber
     };
-  });
+  }));
 }
 
 function validateStoryboardPlanAgainstScript(
@@ -1511,6 +1618,17 @@ function validateStoryboardShotAgainstPlan(
 
   if (shot.durationSeconds > maxVideoSegmentDurationSeconds) {
     issues.push(`单个镜头时长不能超过 ${maxVideoSegmentDurationSeconds} 秒，当前为 ${shot.durationSeconds} 秒`);
+  }
+
+  const plannedDialogueGroupId = plan.dialogueIdentifier?.groupId ?? '';
+  const actualDialogueGroupId = shot.dialogueIdentifier?.groupId ?? '';
+
+  if (plannedDialogueGroupId !== actualDialogueGroupId) {
+    issues.push(
+      plannedDialogueGroupId
+        ? `dialogueIdentifier.groupId 必须为 ${plannedDialogueGroupId}，当前为 ${actualDialogueGroupId || '空'}`
+        : `当前镜头不应输出 dialogueIdentifier，当前为 ${actualDialogueGroupId}`
+    );
   }
 
   if (availableReferenceAssetIds?.size) {
@@ -1581,12 +1699,14 @@ ${sceneRules}
 16. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
 17. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
 18. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
-19. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头在参考帧/视频生成时要加载哪些参考资产。你必须结合下方“可用参考资产列表”中的名称、类别、摘要和细节判断该镜头实际要用哪些资产，不能只看 ID 猜测
-20. referenceAssetIds 只能使用“可用参考资产列表”里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
-21. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
-22. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
-23. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-24. 第 1 轮只输出总镜头数和所有镜头概况，不要提前输出完整镜头字段；后续每一轮只输出当前指定的单个完整镜头 JSON，不能提前生成其他镜头，也不要重复已完成镜头
+19. 如果一个镜头属于同一段连续对白、接话反打、双人来回或以对白反应为核心的连续切镜，必须额外输出 dialogueIdentifier；同一段连续对白里的镜头使用同一个 groupId，例如 scene-2-dialogue-1。非对白镜头或不承担连续对白切换功能的镜头，dialogueIdentifier 输出 null
+20. dialogueIdentifier 目前只需要输出 groupId；系统会根据镜头顺序自动补全 sequenceIndex、sequenceLength 和 flowRole。因此不要为同一段连续对白随意改 groupId，也不要把不同对白段混成同一个 groupId
+21. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头在参考帧/视频生成时要加载哪些参考资产。你必须结合下方“可用参考资产列表”中的名称、类别、摘要和细节判断该镜头实际要用哪些资产，不能只看 ID 猜测
+22. referenceAssetIds 只能使用“可用参考资产列表”里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
+23. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
+24. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
+25. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
+26. 第 1 轮只输出总镜头数和所有镜头概况，不要提前输出完整镜头字段；后续每一轮只输出当前指定的单个完整镜头 JSON，不能提前生成其他镜头，也不要重复已完成镜头
 
 剧本 JSON：
 ${JSON.stringify(script, null, 2)}
@@ -1674,7 +1794,9 @@ ${sceneRules}
 11. totalShots、sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
 12. totalShots 必须严格等于 shots.length
 13. shotNumber 必须在每个 scene 内从 1 开始连续递增
-14. 输出结构：
+14. 如果一个规划镜头属于同一段连续对白、接话反打、双人来回或以对白反应为核心的连续切镜，必须输出 dialogueIdentifier，并为这段连续对白保持稳定的 groupId，例如 scene-1-dialogue-1；非此类镜头输出 null
+15. 这一轮的 dialogueIdentifier 只需要输出 groupId；系统会根据镜头顺序自动补全 sequenceIndex、sequenceLength 和 flowRole
+16. 输出结构：
 {
   "totalShots": ${recommendedMinimumShotCount},
   "shots": [
@@ -1684,6 +1806,7 @@ ${sceneRules}
       "title": "镜头标题",
       "purpose": "镜头作用",
       "durationSeconds": ${getStoryboardShotFallbackDurationSeconds(settings)},
+      "dialogueIdentifier": { "groupId": "scene-1-dialogue-1" },
       "overview": "这个镜头的画面焦点、动作/对白推进和情绪/转场概况"
     }
   ]
@@ -1708,7 +1831,7 @@ function buildStoryboardScenePlanContext(planShots: StoryboardPlanShot[], sceneN
   return scenePlanShots
     .map(
       (shot) =>
-        `- shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s｜概况：${shot.overview}`
+        `- shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s｜对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}｜概况：${shot.overview}`
     )
     .join('\n');
 }
@@ -1718,14 +1841,34 @@ function buildStoryboardAdjacentPlanContext(planShots: StoryboardPlanShot[], sho
     .filter((shot): shot is StoryboardPlanShot => Boolean(shot))
     .map(
       (shot) =>
-        `- scene ${shot.sceneNumber} shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s｜概况：${shot.overview}`
+        `- scene ${shot.sceneNumber} shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s｜对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}｜概况：${shot.overview}`
     )
     .join('\n');
+}
+
+function formatStoryboardDialogueIdentifier(
+  identifier: Pick<StoryboardDialogueIdentifier, 'groupId' | 'sequenceIndex' | 'sequenceLength' | 'flowRole'> | null
+): string {
+  if (!identifier?.groupId) {
+    return '无';
+  }
+
+  const flowRoleLabel =
+    identifier.flowRole === 'single'
+      ? '单镜'
+      : identifier.flowRole === 'start'
+        ? '起始'
+        : identifier.flowRole === 'middle'
+          ? '中段'
+          : '结束';
+
+  return `${identifier.groupId}（${flowRoleLabel} ${identifier.sequenceIndex}/${identifier.sequenceLength}）`;
 }
 
 function formatGeneratedStoryboardShotContext(shot: StoryboardShot): string {
   return [
     `- scene ${shot.sceneNumber} shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s`,
+    `  对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}`,
     `  对白：${shot.dialogue || '无'}｜画外音：${shot.voiceover || '无'}`,
     `  结束参考帧：${shot.useLastFrameReference ? truncateStoryboardPromptText(shot.lastFramePrompt, 140) : '无'}`,
     `  转场：${shot.transitionHint}`
@@ -1749,6 +1892,245 @@ function buildCompletedStoryboardContext(storyboard: StoryboardShot[], currentPl
     : '当前还没有与本镜头直接相关的已完成镜头。';
 }
 
+function collectStoryboardDialogueSequenceGroups(
+  script: ScriptPackage,
+  planShots: StoryboardPlanShot[]
+): StoryboardDialogueSequenceGroup[] {
+  const groups = new Map<string, StoryboardDialogueSequenceGroup>();
+
+  for (const shot of planShots) {
+    const groupId = shot.dialogueIdentifier?.groupId;
+
+    if (!groupId) {
+      continue;
+    }
+
+    const scene = script.scenes.find((item) => item.sceneNumber === shot.sceneNumber);
+
+    if (!scene) {
+      continue;
+    }
+
+    const groupKey = `${shot.sceneNumber}:${groupId}`;
+    const existing = groups.get(groupKey);
+
+    if (existing) {
+      existing.shots.push(shot);
+      continue;
+    }
+
+    groups.set(groupKey, {
+      groupId,
+      scene,
+      shots: [shot]
+    });
+  }
+
+  return [...groups.values()].filter((group) => group.shots.length >= 2);
+}
+
+function buildStoryboardDialogueSequencePlanContext(group: StoryboardDialogueSequenceGroup): string {
+  return group.shots
+    .map(
+      (shot) =>
+        `- scene ${shot.sceneNumber} shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s｜概况：${shot.overview}`
+    )
+    .join('\n');
+}
+
+function buildStoryboardDialogueSequenceNeighborContext(
+  planShots: StoryboardPlanShot[],
+  group: StoryboardDialogueSequenceGroup
+): string {
+  const firstIndex = planShots.findIndex((shot) => shot.id === group.shots[0]?.id);
+  const lastIndex = planShots.findIndex((shot) => shot.id === group.shots.at(-1)?.id);
+  const neighbors = [planShots[firstIndex - 1], ...group.shots, planShots[lastIndex + 1]].filter(
+    (shot): shot is StoryboardPlanShot => Boolean(shot)
+  );
+
+  return neighbors
+    .map(
+      (shot) =>
+        `- scene ${shot.sceneNumber} shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}｜概况：${shot.overview}`
+    )
+    .join('\n');
+}
+
+function getStoryboardDialogueSequenceGenerationMaxTokens(group: StoryboardDialogueSequenceGroup): number {
+  return Math.min(4_000, Math.max(1_800, group.shots.length * 600));
+}
+
+function buildStoryboardDialogueSequencePrompt(
+  script: ScriptPackage,
+  settings: ProjectSettings,
+  group: StoryboardDialogueSequenceGroup,
+  planShots: StoryboardPlanShot[]
+): string {
+  const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
+  const spokenLanguageLabel = describeProjectLanguage(settings.language);
+
+  return `现在请为一组连续对白镜头生成“对白连续性简报” JSON，帮助后续逐镜头生成时把来回对话拍得连贯自然。
+
+目标对白组：
+- groupId: ${group.groupId}
+- sceneNumber: ${group.scene.sceneNumber}
+- 镜头数: ${group.shots.length}
+
+该对白组镜头规划：
+${buildStoryboardDialogueSequencePlanContext(group)}
+
+前后承接规划：
+${buildStoryboardDialogueSequenceNeighborContext(planShots, group)}
+
+要求：
+1. 只处理这个对白组，不要扩写其他镜头
+2. 你需要根据目标场景的原始对白、剧情推进、情绪变化和镜头规划，把这组镜头拆成连续流畅的对白来回与反应链，重点优化接话点、停顿、眼神反打、动作承接、镜头切换理由和节奏递进
+3. dialogue 和 voiceover 中的实际语音内容必须使用 ${spokenLanguageLabel}。${spokenLanguageRequirement}
+4. 每个镜头都要给出 dialogue，可为空字符串；但如果该镜头承担对白来回、接话、反应后补句或用对白推动冲突，就必须给出紧凑清晰的 dialogue
+5. 不要凭空添加关键剧情信息；可以为了镜头拆分，把同一场对白中的句子重新分配到不同镜头，或者把长句压缩成更利于切镜的短句，但不能改变原场景的事件逻辑和人物关系
+6. camera、composition、transitionHint、promptHint 必须服务于连续对白拍法，强调轴线、视线方向、人物站位、景别切换、谁接谁的话、在哪里切到反应、如何从上一镜自然进入下一镜
+7. camera、composition、transitionHint、promptHint 各写 1 句，具体但紧凑；promptHint 重点写后续生成单镜头 prompt 时必须保留的连续性要求
+8. transitionHint 不要只写 cut，要说明这是接话切、视线切、反应切、动作承接切还是情绪延续切
+9. 只输出 JSON，结构如下：
+{
+  "groupId": ${JSON.stringify(group.groupId)},
+  "summary": "这组连续对白镜头的整体拍法和情绪推进概括",
+  "continuityNotes": "这组镜头在轴线、站位、视线、节奏、动作承接上的统一约束",
+  "shots": [
+    {
+      "sceneNumber": ${group.scene.sceneNumber},
+      "shotNumber": ${group.shots[0]?.shotNumber ?? 1},
+      "dialogue": "分配给这个镜头的对白，没有则留空字符串",
+      "voiceover": "分配给这个镜头的画外音，没有则留空字符串",
+      "camera": "当前镜头的对白拍法建议",
+      "composition": "当前镜头的构图重心建议",
+      "transitionHint": "当前镜头如何自然切入或切出",
+      "promptHint": "后续生成完整镜头 prompt 时必须吸收的连续性提示"
+    }
+  ]
+}
+
+目标场景上下文：
+${buildStoryboardSceneContext(script, group.scene)}`;
+}
+
+function normalizeStoryboardDialogueSequenceBrief(
+  payload: StoryboardDialogueSequencePayload,
+  group: StoryboardDialogueSequenceGroup
+): StoryboardDialogueSequenceBrief {
+  const shotsByKey = new Map(
+    (payload.shots ?? []).map((shot) => [
+      `${normalizePositiveInteger(shot.sceneNumber, group.scene.sceneNumber)}:${normalizePositiveInteger(shot.shotNumber, 1)}`,
+      shot
+    ])
+  );
+
+  return {
+    groupId: group.groupId,
+    sceneNumber: group.scene.sceneNumber,
+    summary: normalizeString(
+      payload.summary,
+      `围绕 ${group.groupId} 这组连续对白镜头，通过接话与反应切换保持节奏递进。`
+    ),
+    continuityNotes: normalizeString(
+      payload.continuityNotes,
+      '保持人物站位、视线方向、情绪升级和动作承接连续，切镜优先跟随接话点、反应点和情绪波峰。'
+    ),
+    shots: group.shots.map((planShot) => {
+      const matched = shotsByKey.get(`${planShot.sceneNumber}:${planShot.shotNumber}`);
+
+      return {
+        id: planShot.id,
+        sceneNumber: planShot.sceneNumber,
+        shotNumber: planShot.shotNumber,
+        dialogue: normalizeString(matched?.dialogue, ''),
+        voiceover: normalizeString(matched?.voiceover, ''),
+        camera: normalizeString(
+          matched?.camera,
+          `${planShot.title}的对白拍法要清楚承接上一镜的接话点与人物反应，保持轴线和景别变化自然。`
+        ),
+        composition: normalizeString(
+          matched?.composition,
+          `${planShot.title}需要明确当前说话者、听者反应和两人的空间关系，避免视线与站位突然跳变。`
+        ),
+        transitionHint: normalizeString(
+          matched?.transitionHint,
+          '通过接话、视线承接、动作延续或情绪反应自然切入下一镜，避免硬切。'
+        ),
+        promptHint: normalizeString(
+          matched?.promptHint,
+          `${planShot.title}需要保留对白接力点、停顿节奏、人物视线方向和空间朝向的连续性。`
+        )
+      };
+    })
+  };
+}
+
+async function generateStoryboardDialogueSequenceBrief(
+  script: ScriptPackage,
+  settings: ProjectSettings,
+  group: StoryboardDialogueSequenceGroup,
+  planShots: StoryboardPlanShot[],
+  options?: StoryboardGenerationOptions
+): Promise<StoryboardDialogueSequenceBrief> {
+  const payload = await requestJson<StoryboardDialogueSequencePayload>(
+    [
+      {
+        role: 'system',
+        content:
+          '你是一名擅长拍对白戏的影视导演与场面调度顾问。请把连续对白镜头拆成流畅的 shot-reverse-shot / 双人镜头 / 反应镜头节奏方案。只输出 JSON，不要输出额外说明。'
+      },
+      {
+        role: 'user',
+        content: buildStoryboardDialogueSequencePrompt(script, settings, group, planShots)
+      }
+    ],
+    {
+      temperature: 0.35,
+      maxTokens: getStoryboardDialogueSequenceGenerationMaxTokens(group),
+      signal: options?.signal
+    }
+  );
+
+  return normalizeStoryboardDialogueSequenceBrief(payload, group);
+}
+
+function buildStoryboardDialogueSequenceShotContextMap(
+  briefs: StoryboardDialogueSequenceBrief[]
+): Map<string, StoryboardDialogueSequenceShotContext> {
+  const contextMap = new Map<string, StoryboardDialogueSequenceShotContext>();
+
+  for (const group of briefs) {
+    for (const shot of group.shots) {
+      contextMap.set(shot.id, {
+        group,
+        shot
+      });
+    }
+  }
+
+  return contextMap;
+}
+
+function mergeStoryboardDialogueSequenceFallbacks(
+  shot: StoryboardShotPayload,
+  dialogueSequenceContext: StoryboardDialogueSequenceShotContext | null | undefined
+): StoryboardShotPayload {
+  if (!dialogueSequenceContext) {
+    return shot;
+  }
+
+  return {
+    ...shot,
+    dialogueIdentifier: shot.dialogueIdentifier ?? { groupId: dialogueSequenceContext.group.groupId },
+    dialogue: normalizeString(shot.dialogue, dialogueSequenceContext.shot.dialogue),
+    voiceover: normalizeString(shot.voiceover, dialogueSequenceContext.shot.voiceover),
+    camera: normalizeString(shot.camera, dialogueSequenceContext.shot.camera),
+    composition: normalizeString(shot.composition, dialogueSequenceContext.shot.composition),
+    transitionHint: normalizeString(shot.transitionHint, dialogueSequenceContext.shot.transitionHint)
+  };
+}
+
 function buildStoryboardShotTurnPrompt(
   script: ScriptPackage,
   settings: ProjectSettings,
@@ -1756,6 +2138,7 @@ function buildStoryboardShotTurnPrompt(
   planShots: StoryboardPlanShot[],
   shotIndex: number,
   storyboard: StoryboardShot[],
+  dialogueSequenceContext: StoryboardDialogueSequenceShotContext | null,
   retryFeedback = ''
 ): string {
   const scene = script.scenes.find((item) => item.sceneNumber === shotPlan.sceneNumber);
@@ -1775,6 +2158,24 @@ function buildStoryboardShotTurnPrompt(
     shotIndex > 0
       ? `前面已经完成了 ${shotIndex}/${planShots.length} 个镜头。你必须延续已建立的人物外观、服装、道具状态、空间关系和情绪推进。`
       : '这是第一个完整镜头，需要为整部短剧建立稳定的人物与视觉基调。';
+  const dialogueIdentifierOutput = shotPlan.dialogueIdentifier?.groupId
+    ? JSON.stringify({ groupId: shotPlan.dialogueIdentifier.groupId })
+    : 'null';
+  const dialogueSequenceNotice = dialogueSequenceContext
+    ? `连续对白补充约束：
+- 当前镜头属于对白组 ${dialogueSequenceContext.group.groupId}，组内位置 ${shotPlan.dialogueIdentifier?.sequenceIndex ?? 1}/${shotPlan.dialogueIdentifier?.sequenceLength ?? 1}
+- 组整体拍法：${dialogueSequenceContext.group.summary}
+- 组统一连续性要求：${dialogueSequenceContext.group.continuityNotes}
+- 当前镜头建议承载的对白：${dialogueSequenceContext.shot.dialogue || '无'}
+- 当前镜头建议承载的画外音：${dialogueSequenceContext.shot.voiceover || '无'}
+- 当前镜头对白拍法建议：${dialogueSequenceContext.shot.camera}
+- 当前镜头构图建议：${dialogueSequenceContext.shot.composition}
+- 当前镜头切换建议：${dialogueSequenceContext.shot.transitionHint}
+- 生成完整镜头时必须吸收的额外提示：${dialogueSequenceContext.shot.promptHint}`
+    : '连续对白补充约束：当前镜头不属于需要额外优化的连续对白组。';
+  const dialogueIdentifierRequirement = shotPlan.dialogueIdentifier?.groupId
+    ? `当前镜头是对白标识镜头，dialogueIdentifier 必须输出为 ${dialogueIdentifierOutput}，不能改写 groupId，也不要输出其他额外字段。`
+    : '当前镜头不是对白标识镜头，dialogueIdentifier 必须输出 null。';
 
   return `现在生成第 ${shotIndex + 1}/${planShots.length} 个镜头的完整分镜 JSON。${retryNotice}
 
@@ -1787,6 +2188,7 @@ ${continuityNotice}
   "title": ${JSON.stringify(shotPlan.title)},
   "purpose": ${JSON.stringify(shotPlan.purpose)},
   "durationSeconds": ${shotPlan.durationSeconds},
+  "dialogueIdentifier": ${dialogueIdentifierOutput},
   "overview": ${JSON.stringify(shotPlan.overview)}
 }
 
@@ -1799,29 +2201,33 @@ ${buildStoryboardAdjacentPlanContext(planShots, shotIndex)}
 已完成镜头摘要：
 ${buildCompletedStoryboardContext(storyboard, shotPlan)}
 
+${dialogueSequenceNotice}
+
 要求：
 1. 只能输出这一个镜头的完整 JSON，不能输出其他镜头
 2. sceneNumber 必须是 ${shotPlan.sceneNumber}，shotNumber 必须是 ${shotPlan.shotNumber}，title 必须保持为 ${JSON.stringify(shotPlan.title)}，purpose 必须保持为 ${JSON.stringify(shotPlan.purpose)}，durationSeconds 必须保持为 ${shotPlan.durationSeconds}
 3. 必须把当前规划里的 overview 展开成完整可执行分镜，但不能偏离该镜头承担的戏剧功能
-4. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
-5. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
-6. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
-7. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
-8. ${shotSplitGuideline} 当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
-9. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
-10. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
-11. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
-12. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
-13. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
-14. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
-15. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
-16. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-17. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
-18. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-19. 你必须结合上文“可用参考资产列表”里的名称、摘要和细节判断这个镜头该用哪些资产，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义
-20. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
-21. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
-22. 输出结构：
+4. ${dialogueIdentifierRequirement}
+5. 如果上方存在“连续对白补充约束”，你必须把其中的对白分配、轴线、视线、站位、接话点、反应点和切换节奏吸收到 dialogue、camera、composition、transitionHint、videoPrompt 和 speechPrompt 中，让镜头切换自然顺滑
+6. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
+7. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
+8. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
+9. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
+10. ${shotSplitGuideline} 当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
+11. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
+12. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
+13. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
+14. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
+15. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
+16. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
+17. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
+18. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
+19. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
+20. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
+21. 你必须结合上文“可用参考资产列表”里的名称、摘要和细节判断这个镜头该用哪些资产，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义
+22. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
+23. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
+24. 输出结构：
 {
   "shot": {
     "id": "scene-${shotPlan.sceneNumber}-shot-${shotPlan.shotNumber}",
@@ -1830,6 +2236,7 @@ ${buildCompletedStoryboardContext(storyboard, shotPlan)}
     "title": ${JSON.stringify(shotPlan.title)},
     "purpose": ${JSON.stringify(shotPlan.purpose)},
     "durationSeconds": ${shotPlan.durationSeconds},
+    "dialogueIdentifier": ${dialogueIdentifierOutput},
     "dialogue": "本镜头核心台词，必须使用${spokenLanguageLabel}，没有可留空",
     "voiceover": "本镜头画外音，必须使用${spokenLanguageLabel}，没有可留空",
     "camera": "镜头语言",
@@ -1859,6 +2266,11 @@ function buildStoryboardPlanAssistantMessage(planShots: StoryboardPlanShot[]): s
         title: shot.title,
         purpose: shot.purpose,
         durationSeconds: shot.durationSeconds,
+        dialogueIdentifier: shot.dialogueIdentifier?.groupId
+          ? {
+              groupId: shot.dialogueIdentifier.groupId
+            }
+          : null,
         overview: shot.overview
       }))
     },
@@ -1909,6 +2321,7 @@ async function generateStoryboardShot(
   planShots: StoryboardPlanShot[],
   shotIndex: number,
   storyboard: StoryboardShot[],
+  dialogueSequenceContext: StoryboardDialogueSequenceShotContext | null,
   options?: StoryboardGenerationOptions
 ): Promise<{ requestPrompt: string; shot: StoryboardShot }> {
   let retryFeedback = '';
@@ -1922,6 +2335,7 @@ async function generateStoryboardShot(
       planShots,
       shotIndex,
       storyboard,
+      dialogueSequenceContext,
       retryFeedback
     );
     const payload = await requestJson<StoryboardSingleShotPayload>(
@@ -1939,9 +2353,12 @@ async function generateStoryboardShot(
       continue;
     }
 
+    const mergedRawShot = mergeStoryboardDialogueSequenceFallbacks(rawShot, dialogueSequenceContext);
+
     const normalizedShot = normalizeStoryboardShotForGeneration(
       {
-        ...rawShot,
+        ...mergedRawShot,
+        dialogueIdentifier: normalizeStoryboardDialogueIdentifier(mergedRawShot.dialogueIdentifier),
         id: shotPlan.id,
         sceneNumber: shotPlan.sceneNumber,
         shotNumber: shotPlan.shotNumber,
@@ -2280,6 +2697,17 @@ export async function generateStoryboardFromScript(
     storyboard
   });
 
+  const dialogueSequenceGroups = collectStoryboardDialogueSequenceGroups(script, planResult.planShots);
+  const dialogueSequenceBriefs: StoryboardDialogueSequenceBrief[] = [];
+
+  for (const group of dialogueSequenceGroups) {
+    dialogueSequenceBriefs.push(
+      await generateStoryboardDialogueSequenceBrief(script, settings, group, planResult.planShots, options)
+    );
+  }
+
+  const dialogueSequenceContextMap = buildStoryboardDialogueSequenceShotContextMap(dialogueSequenceBriefs);
+
   for (const [index, shotPlan] of planResult.planShots.entries()) {
     const scene = script.scenes.find((item) => item.sceneNumber === shotPlan.sceneNumber);
 
@@ -2305,6 +2733,7 @@ export async function generateStoryboardFromScript(
       planResult.planShots,
       index,
       storyboard,
+      dialogueSequenceContextMap.get(shotPlan.id) ?? null,
       options
     );
     storyboard = appendStoryboardShot(

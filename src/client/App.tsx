@@ -224,6 +224,25 @@ function formatShotTimeline(shot: Pick<Project['storyboard'][number], 'startTime
   return `${shot.startTimecode} - ${shot.endTimecode} · ${shot.durationSeconds}s`;
 }
 
+function formatDialogueIdentifier(
+  shot: Pick<Project['storyboard'][number], 'dialogueIdentifier'>
+): string {
+  if (!shot.dialogueIdentifier?.groupId) {
+    return '无';
+  }
+
+  const flowRoleLabel =
+    shot.dialogueIdentifier.flowRole === 'single'
+      ? '单镜'
+      : shot.dialogueIdentifier.flowRole === 'start'
+        ? '起始'
+        : shot.dialogueIdentifier.flowRole === 'middle'
+          ? '中段'
+          : '结束';
+
+  return `${shot.dialogueIdentifier.groupId} · ${flowRoleLabel} ${shot.dialogueIdentifier.sequenceIndex}/${shot.dialogueIdentifier.sequenceLength}`;
+}
+
 function truncateText(value: string | null | undefined, maxLength = 88): string {
   const trimmed = value?.trim() ?? '';
 
@@ -2492,6 +2511,10 @@ export function App() {
             <dd>{shot.dialogue || '无'}</dd>
           </div>
           <div>
+            <dt>对话标识</dt>
+            <dd>{formatDialogueIdentifier(shot)}</dd>
+          </div>
+          <div>
             <dt>画外音</dt>
             <dd>{shot.voiceover || '无'}</dd>
           </div>
@@ -2820,6 +2843,10 @@ export function App() {
           <div>
             <dt>对白</dt>
             <dd>{shot.dialogue || '无'}</dd>
+          </div>
+          <div>
+            <dt>对话标识</dt>
+            <dd>{formatDialogueIdentifier(shot)}</dd>
           </div>
           <div>
             <dt>画外音</dt>
@@ -3719,7 +3746,10 @@ export function App() {
                                         {imageMap.has(shot.id) ? '有缩略图' : '待生成'}
                                       </span>
                                     </div>
-                                    <small>{`S${shot.sceneNumber} · #${shot.shotNumber} · ${formatShotTimeline(shot)}`}</small>
+                                    <small>
+                                      {`S${shot.sceneNumber} · #${shot.shotNumber} · ${formatShotTimeline(shot)}`}
+                                      {shot.dialogueIdentifier?.groupId ? ` · 对话 ${formatDialogueIdentifier(shot)}` : ''}
+                                    </small>
                                     <p>{truncateText(shot.purpose, 78)}</p>
                                   </div>
                                 </button>
@@ -3857,7 +3887,10 @@ export function App() {
                                         {videoAsset ? '已生成' : videoVersions.length ? '历史版本' : '待生成'}
                                       </span>
                                     </div>
-                                    <small>{`S${shot.sceneNumber} · #${shot.shotNumber} · ${formatShotTimeline(shot)}`}</small>
+                                    <small>
+                                      {`S${shot.sceneNumber} · #${shot.shotNumber} · ${formatShotTimeline(shot)}`}
+                                      {shot.dialogueIdentifier?.groupId ? ` · 对话 ${formatDialogueIdentifier(shot)}` : ''}
+                                    </small>
                                     <p>{truncateText(videoPromptValue, 78)}</p>
                                   </div>
                                 </button>
