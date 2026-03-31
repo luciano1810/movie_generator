@@ -48,11 +48,11 @@ OPENAI_API_KEY=your_api_key
 OPENAI_MODEL=gpt-4o-mini
 
 COMFYUI_BASE_URL=http://100.100.8.2:8188
-COMFYUI_CHARACTER_ASSET_WORKFLOW=./config/workflows/firered-image-edit-1.1_api.template.json
-COMFYUI_STORYBOARD_IMAGE_WORKFLOW=./config/workflows/storyboard-image-edit-3ref.template.json
+COMFYUI_CHARACTER_ASSET_WORKFLOW=./config/workflows/qwen-rapid-aio-image-edit.template.json
+COMFYUI_STORYBOARD_IMAGE_WORKFLOW=./config/workflows/qwen-rapid-aio-image-edit.template.json
 COMFYUI_TEXT_TO_IMAGE_WORKFLOW=./config/workflows/zimage_text_to_image.template.json
-COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW=./config/workflows/image-workflow.template.json
-COMFYUI_IMAGE_EDIT_WORKFLOW=./config/workflows/firered-image-edit-1.1_api.template.json
+COMFYUI_REFERENCE_IMAGE_TO_IMAGE_WORKFLOW=./config/workflows/qwen-rapid-aio-image-edit.template.json
+COMFYUI_IMAGE_EDIT_WORKFLOW=./config/workflows/qwen-rapid-aio-image-edit.template.json
 COMFYUI_TEXT_TO_VIDEO_WORKFLOW=
 COMFYUI_IMAGE_TO_VIDEO_WORKFLOW=./config/workflows/ltx_2.3_ti2v_api.template.json
 COMFYUI_TTS_WORKFLOW=
@@ -176,15 +176,13 @@ npm start
 
 ### 图片编辑模板
 
-`config/workflows/firered-image-edit-1.1_api.template.json` 提供了一个 FireRed 三图输入模板，默认映射 `{{prompt}}`、`{{negative_prompt}}`、`{{output_prefix}}`、`{{seed}}` 和 `{{edit_image_1}}` ~ `{{edit_image_3}}`。
+`config/workflows/qwen-rapid-aio-image-edit.template.json` 是当前默认的参考图生图 / 图片编辑模板，默认映射 `{{prompt}}`、`{{negative_prompt}}`、`{{output_prefix}}`、`{{seed}}` 和 `{{edit_image_1}}` ~ `{{edit_image_3}}`。
 
-人物资产默认也可以使用这套模板；仓库内置的姿态参考图路径是 `config/reference-images/character-pose-three-view.png`。当角色资产未单独上传参考图时，系统会把这张三视图作为默认姿态输入；如果角色资产上传了参考图并选择“参考图 + Prompt”，该角色参考图会作为主参考输入，三视图仍会继续作为姿态约束。
+人物资产、参考帧生成、参考图生图和图片编辑现在都默认使用这套模板；仓库内置的姿态参考图路径是 `config/reference-images/character-pose-three-view.png`。当角色资产未单独上传参考图时，系统会把这张三视图作为默认姿态输入；如果角色资产上传了参考图并选择“参考图 + Prompt”，该角色参考图会作为主参考输入，三视图仍会继续作为姿态约束。
 
 ### 分镜图片模板
 
-`config/workflows/storyboard-image-edit-3ref.template.json` 是基于 FireRed 三图模板复制出的分镜首帧专用版本，默认同样映射 `{{prompt}}`、`{{negative_prompt}}`、`{{output_prefix}}`、`{{seed}}` 和 `{{edit_image_1}}` ~ `{{edit_image_3}}`。
-
-图片阶段会自动把资产库里的场景、角色、物品参考图按优先级注入这三个输入位；如果参考图超过 3 张，后端会自动把参考图拆成多批次运行，并把上一轮生成结果继续作为下一轮 `edit_image_1` 输入。
+图片阶段默认同样复用 `config/workflows/qwen-rapid-aio-image-edit.template.json`。系统会自动把资产库里的场景、角色、物品参考图按优先级注入三个输入位；如果参考图超过 3 张，后端会自动把参考图拆成多批次运行，并把上一轮生成结果继续作为下一轮 `edit_image_1` 输入。
 
 ### 生视频模板
 

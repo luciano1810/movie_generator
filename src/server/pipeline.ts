@@ -117,6 +117,7 @@ const DEFAULT_FIRST_LAST_FRAME_VIDEO_WORKFLOW_PATH = path.resolve(
   process.cwd(),
   'config/workflows/ltx_2.3_i2v_first_last_api.template.json'
 );
+const ZIMAGE_TEXT_TO_IMAGE_WORKFLOW_BASENAME = 'zimage_text_to_image.template.json';
 const MAX_STORYBOARD_REFERENCE_IMAGES_PER_RUN = 3;
 const MAX_STORYBOARD_REFERENCE_IMAGES_PER_CHAIN_RUN = 2;
 const AUDIO_DRIVEN_VIDEO_PADDING_SECONDS = 0.25;
@@ -1960,6 +1961,35 @@ function roundDownToMultiple(value: number, multiple: number): number {
   return Math.max(multiple, Math.floor(value / multiple) * multiple);
 }
 
+function isZimageTextToImageWorkflowPath(workflowPath: string | undefined): boolean {
+  if (!workflowPath?.trim()) {
+    return false;
+  }
+
+  return path.basename(workflowPath).toLowerCase() === ZIMAGE_TEXT_TO_IMAGE_WORKFLOW_BASENAME;
+}
+
+function resolveWorkflowImageDimensions(
+  workflowPath: string | undefined,
+  width: number,
+  height: number
+): { imageWidth: number; imageHeight: number } {
+  const safeWidth = Math.max(1, Math.round(width));
+  const safeHeight = Math.max(1, Math.round(height));
+
+  if (!isZimageTextToImageWorkflowPath(workflowPath)) {
+    return {
+      imageWidth: safeWidth,
+      imageHeight: safeHeight
+    };
+  }
+
+  return {
+    imageWidth: roundDownToMultiple(Math.max(16, Math.round(safeWidth / 2)), 16),
+    imageHeight: roundDownToMultiple(Math.max(16, Math.round(safeHeight / 2)), 16)
+  };
+}
+
 function buildVideoWorkflowDerivedVariables(
   width: number,
   height: number,
@@ -1997,10 +2027,16 @@ function buildComfyVariables(
     promptOverride?: string;
     referenceContext?: string;
     referenceVariables?: Record<string, TemplateVariable>;
+    workflowPath?: string;
     seed?: number;
   } = {}
 ) {
   const durationSeconds = options.durationSeconds ?? shot.durationSeconds;
+  const resolvedImageDimensions = resolveWorkflowImageDimensions(
+    options.workflowPath,
+    project.settings.imageWidth,
+    project.settings.imageHeight
+  );
   const negativePrompt =
     workflow === 'image_to_video'
       ? buildVideoNegativePrompt(project.settings.negativePrompt)
@@ -2019,8 +2055,8 @@ function buildComfyVariables(
       ),
     negative_prompt: negativePrompt,
     output_prefix: options.outputPrefix ?? `${project.id}_${shot.id}_${workflow}`,
-    image_width: project.settings.imageWidth,
-    image_height: project.settings.imageHeight,
+    image_width: resolvedImageDimensions.imageWidth,
+    image_height: resolvedImageDimensions.imageHeight,
     video_width: project.settings.videoWidth,
     video_height: project.settings.videoHeight,
     duration_seconds: durationSeconds,
@@ -2131,6 +2167,7 @@ async function runStoryboardImageWorkflowForShot(
       workflowPath,
       buildComfyVariables(project, shot, appSettings, 'storyboard_image', {
         frameKind,
+        workflowPath,
         outputPrefix: `${project.id}_${shot.id}_${frameKind}_storyboard_image_pass_${passIndex + 1}`,
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: buildStoryboardReferencePassVariables(
@@ -2610,6 +2647,11 @@ async function generateReferenceAssetForProject(
             ageHint
           )
         : generationPrompt;
+    const resolvedImageDimensions = resolveWorkflowImageDimensions(
+      workflow.workflowPath,
+      project.settings.imageWidth,
+      project.settings.imageHeight
+    );
 
     const outputFiles = await runProjectComfyWorkflow(
       project,
@@ -2618,8 +2660,8 @@ async function generateReferenceAssetForProject(
         prompt: workflowPrompt,
         negative_prompt: project.settings.negativePrompt,
         output_prefix: `${project.id}_${kind}_${itemId}_reference`,
-        image_width: project.settings.imageWidth,
-        image_height: project.settings.imageHeight,
+        image_width: resolvedImageDimensions.imageWidth,
+        image_height: resolvedImageDimensions.imageHeight,
         video_width: project.settings.videoWidth,
         video_height: project.settings.videoHeight,
         duration_seconds: getDefaultShotDurationSeconds(project.settings),
@@ -3234,6 +3276,10 @@ function appendImageWorkflowLog(
   } else {
     appendLog(project, '当前没有可注入的参考图，参考帧阶段回退到 text_to_image 工作流。', 'warn');
   }
+
+  if (selectedWorkflow.type === 'text_to_image' && isZimageTextToImageWorkflowPath(selectedWorkflow.workflowPath)) {
+    appendLog(project, '当前 text_to_image 使用 zimage 模板；由于模板自带像素放大，输入分辨率会自动按目标值的一半传入。');
+  }
 }
 
 async function generateReferenceFrameAssetForShot(
@@ -3277,6 +3323,7 @@ async function generateReferenceFrameAssetForShot(
       selectedWorkflow.workflowPath,
       buildComfyVariables(project, shot, appSettings, selectedWorkflow.type, {
         frameKind,
+        workflowPath: selectedWorkflow.workflowPath,
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables
       }),

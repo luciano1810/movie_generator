@@ -7,11 +7,11 @@ export interface WorkflowTemplateOption {
 }
 
 export const DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS: Record<ComfyWorkflowType, string> = {
-  character_asset: 'config/workflows/firered-image-edit-1.1_api.template.json',
-  storyboard_image: 'config/workflows/storyboard-image-edit-3ref.template.json',
+  character_asset: 'config/workflows/qwen-rapid-aio-image-edit.template.json',
+  storyboard_image: 'config/workflows/qwen-rapid-aio-image-edit.template.json',
   text_to_image: 'config/workflows/zimage_text_to_image.template.json',
-  reference_image_to_image: 'config/workflows/image-workflow.template.json',
-  image_edit: 'config/workflows/firered-image-edit-1.1_api.template.json',
+  reference_image_to_image: 'config/workflows/qwen-rapid-aio-image-edit.template.json',
+  image_edit: 'config/workflows/qwen-rapid-aio-image-edit.template.json',
   text_to_video: 'config/workflows/video-workflow.template.json',
   image_to_video_first_last: 'config/workflows/ltx_2.3_i2v_first_last_api.template.json',
   image_to_video_first_frame: 'config/workflows/ltx_2.3_i2v_modular_api.template.json',
@@ -21,21 +21,16 @@ export const DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS: Record<ComfyWorkflowType, st
 export const WORKFLOW_TEMPLATE_OPTIONS: Record<ComfyWorkflowType, WorkflowTemplateOption[]> = {
   character_asset: [
     {
-      path: 'config/workflows/firered-image-edit-1.1_api.template.json',
-      label: 'FireRed Image Edit 1.1 API',
-      description: '当前人物资产默认模板，适合角色参考图与人物设定图生成。'
+      path: 'config/workflows/qwen-rapid-aio-image-edit.template.json',
+      label: 'Qwen Rapid GGUF Image Edit',
+      description: '当前人物参考图默认模板，适合角色参考图驱动的人物设定生成。'
     }
   ],
   storyboard_image: [
     {
-      path: 'config/workflows/storyboard-image-edit-3ref.template.json',
-      label: 'Storyboard Image Edit 3 Ref',
-      description: '当前参考帧推荐模板，可自动注入最多 3 张参考图。'
-    },
-    {
-      path: 'config/workflows/firered-image-edit-1.1_api.template.json',
-      label: 'FireRed Image Edit 1.1 API',
-      description: '参考帧阶段的兼容回退模板，适合简单图像编辑或重绘。'
+      path: 'config/workflows/qwen-rapid-aio-image-edit.template.json',
+      label: 'Qwen Rapid GGUF Image Edit',
+      description: '当前参考帧默认模板，适合多参考图约束的镜头参考帧生成。'
     }
   ],
   text_to_image: [
@@ -47,19 +42,14 @@ export const WORKFLOW_TEMPLATE_OPTIONS: Record<ComfyWorkflowType, WorkflowTempla
   ],
   reference_image_to_image: [
     {
+      path: 'config/workflows/qwen-rapid-aio-image-edit.template.json',
+      label: 'Qwen Rapid GGUF Image Edit',
+      description: '当前参考图生图默认模板，适合场景图、物品图和局部改写。'
+    },
+    {
       path: 'config/workflows/image-workflow.template.json',
       label: 'Legacy Reference Image Workflow',
-      description: '旧版参考图生图模板，适合兼容已有项目。'
-    },
-    {
-      path: 'config/workflows/storyboard-image-edit-3ref.template.json',
-      label: 'Storyboard Image Edit 3 Ref',
-      description: '可作为多参考图约束的替代模板。'
-    },
-    {
-      path: 'config/workflows/firered-image-edit-1.1_api.template.json',
-      label: 'FireRed Image Edit 1.1 API',
-      description: '适合单张参考图驱动的编辑和重绘。'
+      description: '旧版参考图生图模板，保留用于兼容已有项目。'
     }
   ],
   image_edit: [
@@ -67,16 +57,6 @@ export const WORKFLOW_TEMPLATE_OPTIONS: Record<ComfyWorkflowType, WorkflowTempla
       path: 'config/workflows/qwen-rapid-aio-image-edit.template.json',
       label: 'Qwen Rapid GGUF Image Edit',
       description: '基于 Qwen-Rapid-NSFW-v23_Q4_K.gguf 的三参考图图片编辑模板，使用 GGUF UNet 加载节点。'
-    },
-    {
-      path: 'config/workflows/firered-image-edit-1.1_api.template.json',
-      label: 'FireRed Image Edit 1.1 API',
-      description: '当前图片编辑默认模板，适合局部重绘、修图与二次加工。'
-    },
-    {
-      path: 'config/workflows/storyboard-image-edit-3ref.template.json',
-      label: 'Storyboard Image Edit 3 Ref',
-      description: '需要多参考图约束时可作为替代模板。'
     }
   ],
   text_to_video: [
