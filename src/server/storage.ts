@@ -7,6 +7,9 @@ import {
   type Project,
   type ProjectRunState,
   type ProjectSettings,
+  type RunStage,
+  type StageId,
+  type StageState,
   type ShotAssetHistoryMap,
   createIdleRunState,
   createEmptyReferenceLibrary,
@@ -93,13 +96,31 @@ function hydrateShotAssetHistoryMap(history: ShotAssetHistoryMap | undefined): S
   );
 }
 
+function normalizePersistedStageId(value: unknown): StageId | null {
+  if (value === 'images' || value === 'videos') {
+    return 'shots';
+  }
+
+  return value === 'script' || value === 'storyboard' || value === 'assets' || value === 'shots' || value === 'edit'
+    ? value
+    : null;
+}
+
+function normalizePersistedRunStage(value: unknown): RunStage | null {
+  if (value === 'all') {
+    return 'all';
+  }
+
+  return normalizePersistedStageId(value);
+}
+
 function hydrateProjectRunState(runState: ProjectRunState | undefined): ProjectRunState {
   const fallback = createIdleRunState();
 
   return {
     isRunning: runState?.isRunning ?? fallback.isRunning,
-    requestedStage: runState?.requestedStage ?? fallback.requestedStage,
-    currentStage: runState?.currentStage ?? fallback.currentStage,
+    requestedStage: normalizePersistedRunStage(runState?.requestedStage) ?? fallback.requestedStage,
+    currentStage: normalizePersistedStageId(runState?.currentStage) ?? fallback.currentStage,
     startedAt: runState?.startedAt ?? fallback.startedAt,
     pauseRequested: runState?.pauseRequested ?? fallback.pauseRequested,
     stopRequested: runState?.stopRequested ?? fallback.stopRequested,
@@ -110,10 +131,12 @@ function hydrateProjectRunState(runState: ProjectRunState | undefined): ProjectR
 function hydrateProject(project: Project): Project {
   const settings = normalizeSettings(project.settings);
   const defaultStages = createStageStateMap();
-  const rawStages = project.stages ?? {};
+  const rawStages = (project.stages ?? {}) as Partial<Record<StageId | 'images' | 'videos', StageState>>;
   const stages = Object.fromEntries(
-    Object.entries(defaultStages).map(([stageId, fallbackState]) => {
-      const currentState = rawStages[stageId as keyof typeof rawStages];
+    Object.entries(defaultStages).map(([stageKey, fallbackState]) => {
+      const stageId = stageKey as StageId;
+      const currentState =
+        stageId === 'shots' ? rawStages[stageId] ?? rawStages.videos ?? rawStages.images : rawStages[stageId];
 
       return [
         stageId,
@@ -287,7 +310,7 @@ export async function updateProject(
     project.assets.videos = [];
     project.assets.videoHistory = {};
     project.assets.finalVideo = null;
-    project.stages.videos = idleStages.videos;
+    project.stages.shots = idleStages.shots;
     project.stages.edit = idleStages.edit;
   }
 

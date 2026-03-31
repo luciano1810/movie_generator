@@ -102,20 +102,18 @@ const SCRIPT_MODE_LABELS: Record<ScriptMode, string> = {
 
 const TAB_LABELS: Record<ProjectPanelTab, string> = {
   script: '剧本生成',
-  assets: '资产生成',
   storyboard: '分镜生成',
-  images: '参考帧生成',
-  videos: '视频生成',
+  assets: '资产生成',
+  shots: '镜头生成',
   edit: '视频剪辑',
   logs: '执行日志'
 };
 
 const TAB_DESCRIPTIONS: Record<ProjectPanelTab, string> = {
   script: '根据输入文案生成或优化完整短剧剧本。',
+  storyboard: '基于剧本拆分镜头，输出镜头信息、长镜头承接标识和镜头生成描述。',
   assets: '提取角色、场景、物品候选，并批量生成参考资产。',
-  storyboard: '基于剧本拆分镜头，输出镜头信息和参考帧描述。',
-  images: '按分镜批量生成镜头参考帧。',
-  videos: '基于图片和镜头 Prompt 生成视频片段。',
+  shots: '为每个镜头先生成参考帧，再立即生成对应视频片段。',
   edit: '拼接视频片段，输出最终成片。',
   logs: '查看整个项目流水线的实时执行日志和错误信息。'
 };
@@ -241,6 +239,23 @@ function formatDialogueIdentifier(
           : '结束';
 
   return `${shot.dialogueIdentifier.groupId} · ${flowRoleLabel} ${shot.dialogueIdentifier.sequenceIndex}/${shot.dialogueIdentifier.sequenceLength}`;
+}
+
+function formatLongTakeIdentifier(
+  shot: Pick<Project['storyboard'][number], 'longTakeIdentifier'>
+): string {
+  return shot.longTakeIdentifier?.trim() ? shot.longTakeIdentifier : '无';
+}
+
+function isLongTakeContinuationShot(project: Project, shot: Project['storyboard'][number]): boolean {
+  const shotIndex = project.storyboard.findIndex((item) => item.id === shot.id);
+
+  if (shotIndex <= 0) {
+    return false;
+  }
+
+  const previousShot = project.storyboard[shotIndex - 1];
+  return Boolean(shot.longTakeIdentifier && previousShot?.longTakeIdentifier === shot.longTakeIdentifier);
 }
 
 function truncateText(value: string | null | undefined, maxLength = 88): string {
@@ -831,20 +846,16 @@ function inferProjectStageTab(project: Project): StageId {
     return 'script';
   }
 
-  if (!project.artifacts.referenceLibraryJson || countGeneratedReferenceAssets(project) === 0) {
-    return 'assets';
-  }
-
   if (!project.storyboard.length) {
     return 'storyboard';
   }
 
-  if (!project.assets.images.length) {
-    return 'images';
+  if (!project.artifacts.referenceLibraryJson || countGeneratedReferenceAssets(project) === 0) {
+    return 'assets';
   }
 
   if (!project.assets.videos.length) {
-    return 'videos';
+    return 'shots';
   }
 
   return 'edit';
@@ -1123,6 +1134,27 @@ export function App() {
 
     setProjectStageTab(project.runState.currentStage);
   }, [project?.runState.currentStage]);
+
+  useEffect(() => {
+    if (projectStageTab !== 'shots' || !project?.storyboard.length) {
+      return;
+    }
+
+    const availableShotIds = new Set(project.storyboard.map((shot) => shot.id));
+    const sharedShotId =
+      (selectedImageShotId && availableShotIds.has(selectedImageShotId) ? selectedImageShotId : null) ??
+      (selectedVideoShotId && availableShotIds.has(selectedVideoShotId) ? selectedVideoShotId : null) ??
+      project.storyboard[0]?.id ??
+      '';
+
+    if (selectedImageShotId !== sharedShotId) {
+      setSelectedImageShotId(sharedShotId);
+    }
+
+    if (selectedVideoShotId !== sharedShotId) {
+      setSelectedVideoShotId(sharedShotId);
+    }
+  }, [project?.storyboard, projectStageTab, selectedImageShotId, selectedVideoShotId]);
 
   useEffect(() => {
     if (!project) {
@@ -1654,7 +1686,7 @@ export function App() {
         ...current,
         [referenceDraftKey(kind, item.id)]: 0
       }));
-      setNotice(`已为${referenceKindLabel(kind)}“${item.name}”选用资产库素材，后续图片、视频和成片请重新生成`);
+      setNotice(`已为${referenceKindLabel(kind)}“${item.name}”选用资产库素材，后续镜头链路和成片请重新生成`);
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '选用资产库素材失败');
@@ -1682,7 +1714,7 @@ export function App() {
         }
       );
       setProject(updated);
-      setNotice(`已为当前镜头加入${referenceKindLabel(kind)}参考图“${itemName}”，请重新生成参考帧或视频`);
+      setNotice(`已为当前镜头加入${referenceKindLabel(kind)}参考图“${itemName}”，请重新生成当前镜头链路或视频片段`);
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '添加镜头参考图失败');
@@ -1809,11 +1841,11 @@ export function App() {
       await requestJson<{ ok: true }>(`/api/projects/${selectedId}/storyboard/${shotId}/image/generate`, {
         method: 'POST'
       });
-      setNotice('已提交当前镜头的参考帧生成任务，完成后可在版本列表中切换');
+      setNotice('已提交当前镜头的镜头生成任务，系统会先生成参考帧，再立即生成对应视频片段');
       await loadProject(selectedId, true, true);
       await loadProjects(selectedId);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : '提交参考帧生成任务失败');
+      setNotice(error instanceof Error ? error.message : '提交镜头生成任务失败');
     } finally {
       setPending('');
     }
@@ -1888,7 +1920,7 @@ export function App() {
         ...current,
         [shotId]: 0
       }));
-      setNotice('已切换当前镜头的视频版本；重新执行第 6 阶段后会按当前版本剪辑');
+      setNotice('已切换当前镜头的视频版本；重新执行“视频剪辑”后会按当前版本剪辑');
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '切换视频版本失败');
@@ -2059,7 +2091,7 @@ export function App() {
         ...current,
         [shotId]: 0
       }));
-      setNotice('镜头技术面板已保存；请按提示重新生成受影响的图片、视频或成片');
+      setNotice('镜头技术面板已保存；请按提示重新生成受影响的镜头链路、视频片段或成片');
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '保存镜头技术面板失败');
@@ -2121,6 +2153,10 @@ export function App() {
     : 0;
   const storyboardImageWorkflowReady =
     (meta?.envStatus.storyboardImageWorkflowExists ?? false) || (meta?.envStatus.imageEditWorkflowExists ?? false);
+  const shotVideoWorkflowReady =
+    (meta?.envStatus.textToVideoWorkflowExists ?? false) ||
+    (meta?.envStatus.imageToVideoFirstLastWorkflowExists ?? false) ||
+    (meta?.envStatus.imageToVideoFirstFrameWorkflowExists ?? false);
   const productionWorkflowReadyCount = meta
     ? [
         storyboardImageWorkflowReady,
@@ -2482,7 +2518,7 @@ export function App() {
 
   function renderStoryboardDetail() {
     if (!project || !selectedStoryboardShot) {
-      return <div className="empty-card stage-detail-empty">执行第 3 阶段后会在这里显示完整分镜。</div>;
+      return <div className="empty-card stage-detail-empty">执行第 2 阶段后会在这里显示完整分镜。</div>;
     }
 
     const shot = selectedStoryboardShot;
@@ -2515,6 +2551,10 @@ export function App() {
             <dd>{formatDialogueIdentifier(shot)}</dd>
           </div>
           <div>
+            <dt>长镜头组</dt>
+            <dd>{formatLongTakeIdentifier(shot)}</dd>
+          </div>
+          <div>
             <dt>画外音</dt>
             <dd>{shot.voiceover || '无'}</dd>
           </div>
@@ -2537,10 +2577,11 @@ export function App() {
 
   function renderImageDetail() {
     if (!project || !selectedImageShot) {
-      return <div className="empty-card stage-detail-empty">执行第 3 阶段生成分镜后，才能批量生成并查看参考帧图片。</div>;
+      return <div className="empty-card stage-detail-empty">执行第 4 阶段后，才能在这里查看镜头参考帧生成链路。</div>;
     }
 
     const shot = selectedImageShot;
+    const longTakeContinuation = isLongTakeContinuationShot(project, shot);
     const technicalPromptDraft = technicalPromptDrafts[shot.id];
     const shotReferencePreviewItems = getShotReferencePreviewItems(project, shot);
     const shotReferenceIds = new Set(
@@ -2706,6 +2747,16 @@ export function App() {
           <h5>结束参考帧策略</h5>
           <p>{shot.useLastFrameReference ? '该镜头会额外生成结束参考帧，并自动注入后续视频工作流。' : '该镜头仅生成起始参考帧，结束画面由视频工作流自然收束。'}</p>
         </div>
+        <div className="prompt-block">
+          <h5>长镜头承接</h5>
+          <p>
+            {shot.longTakeIdentifier
+              ? longTakeContinuation
+                ? `当前镜头属于长镜头组 ${shot.longTakeIdentifier}，不会单独生成首帧，而是直接复用上一镜头视频的尾帧作为起始帧。`
+                : `当前镜头是长镜头组 ${shot.longTakeIdentifier} 的起始镜头，会正常生成首帧。`
+              : '当前镜头未启用长镜头尾帧承接。'}
+          </p>
+        </div>
         <div className="asset-box">
           <span>起始参考帧版本</span>
           {selectedImage ? (
@@ -2775,7 +2826,7 @@ export function App() {
           onClick={() => void handleGenerateShotImage(shot.id)}
           type="button"
         >
-          {imageGeneratePending ? '生成中...' : imageAsset ? '重新生成当前镜头' : '生成当前镜头'}
+          {imageGeneratePending ? '生成中...' : imageAsset ? '重新生成当前镜头链路' : '生成当前镜头链路'}
         </button>
       </article>
     );
@@ -2783,10 +2834,11 @@ export function App() {
 
   function renderVideoDetail() {
     if (!project || !selectedVideoShot) {
-      return <div className="empty-card stage-detail-empty">执行第 3 阶段生成分镜后，才能在这里编辑视频 Prompt 并查看片段。</div>;
+      return <div className="empty-card stage-detail-empty">执行第 4 阶段后，才能在这里编辑视频 Prompt 并查看片段。</div>;
     }
 
     const shot = selectedVideoShot;
+    const longTakeContinuation = isLongTakeContinuationShot(project, shot);
     const imageAsset = imageMap.get(shot.id) ?? null;
     const audioAsset = audioMap.get(shot.id) ?? null;
     const videoAsset = videoMap.get(shot.id) ?? null;
@@ -2847,6 +2899,10 @@ export function App() {
           <div>
             <dt>对话标识</dt>
             <dd>{formatDialogueIdentifier(shot)}</dd>
+          </div>
+          <div>
+            <dt>长镜头组</dt>
+            <dd>{formatLongTakeIdentifier(shot)}</dd>
           </div>
           <div>
             <dt>画外音</dt>
@@ -3039,7 +3095,7 @@ export function App() {
                 </a>
               </>
             ) : (
-              <small>未生成</small>
+              <small>{longTakeContinuation ? '当前镜头会复用上一镜头视频尾帧作为输入首帧。' : '未生成'}</small>
             )}
           </div>
           <div className="asset-box">
@@ -3122,12 +3178,12 @@ export function App() {
             technicalPromptPending ||
             audioPromptPending ||
             videoGenerationDirty ||
-            !imageAsset
+            (!imageAsset && !longTakeContinuation)
           }
           onClick={() => void handleGenerateShotVideo(shot.id)}
           type="button"
         >
-          {videoGeneratePending ? '生成中...' : videoAsset ? '重新生成当前镜头' : '生成当前镜头'}
+          {videoGeneratePending ? '生成中...' : videoAsset ? '仅重新生成视频片段' : '仅生成视频片段'}
         </button>
       </article>
     );
@@ -3760,29 +3816,33 @@ export function App() {
                         <div className="stage-browser-detail">{renderStoryboardDetail()}</div>
                       </div>
                     ) : (
-                      <div className="empty-card">执行第 3 阶段后会在这里显示完整分镜。</div>
+                      <div className="empty-card">执行第 2 阶段后会在这里显示完整分镜。</div>
                     )}
                   </section>
                 ) : null}
 
-                {projectStageTab === 'images' ? (
+                {projectStageTab === 'shots' ? (
                   <section className="panel inset">
                     <div className="section-head">
-                      <h3>参考帧图片</h3>
-                      <span>{project.storyboard.length ? `${readyImageCount}/${project.storyboard.length} 已生成` : '等待分镜生成'}</span>
+                      <h3>镜头生成</h3>
+                      <span>{project.storyboard.length ? `${readyVideoCount}/${project.storyboard.length} 视频已生成` : '等待分镜生成'}</span>
                     </div>
                     <div className="status-strip">
                       <div className="status-item">
-                        <span>已生成图片</span>
+                        <span>参考帧</span>
                         <strong>{readyImageCount}</strong>
                       </div>
                       <div className="status-item">
-                        <span>镜头总数</span>
-                        <strong>{project.storyboard.length}</strong>
+                        <span>视频片段</span>
+                        <strong>{readyVideoCount}</strong>
                       </div>
                       <div className="status-item">
                         <span>参考帧工作流</span>
                         <strong>{storyboardImageWorkflowReady ? '已就绪' : '未配置'}</strong>
+                      </div>
+                      <div className="status-item">
+                        <span>视频工作流</span>
+                        <strong>{shotVideoWorkflowReady ? '已就绪' : '未配置'}</strong>
                       </div>
                     </div>
                     {project.storyboard.length ? (
@@ -3794,18 +3854,24 @@ export function App() {
                           </div>
                           <div className="stage-browser-list">
                             {project.storyboard.map((shot) => {
+                              const longTakeContinuation = isLongTakeContinuationShot(project, shot);
                               const imageAsset = imageMap.get(shot.id) ?? null;
                               const previewAsset = getShotPreviewAsset(project, shot, imageAsset);
+                              const videoAsset = videoMap.get(shot.id) ?? null;
                               const firstFramePromptValue =
                                 technicalPromptDrafts[shot.id]?.firstFramePrompt ?? shot.firstFramePrompt;
                               const imageVersions = getShotAssetVersions(project, 'images', shot.id);
-                              const isActive = selectedImageShot?.id === shot.id;
+                              const videoVersions = getShotAssetVersions(project, 'videos', shot.id);
+                              const isActive = selectedImageShot?.id === shot.id || selectedVideoShot?.id === shot.id;
 
                               return (
                                 <button
                                   key={shot.id}
                                   className={`stage-browser-item ${isActive ? 'active' : ''}`}
-                                  onClick={() => setSelectedImageShotId(shot.id)}
+                                  onClick={() => {
+                                    setSelectedImageShotId(shot.id);
+                                    setSelectedVideoShotId(shot.id);
+                                  }}
                                   type="button"
                                 >
                                   <div className="stage-browser-thumb">
@@ -3821,11 +3887,22 @@ export function App() {
                                   <div className="stage-browser-copy">
                                     <div className="stage-browser-copy-top">
                                       <strong>{shot.title}</strong>
-                                      <span className={`pill ${imageAsset ? 'success' : ''}`}>
-                                        {imageAsset ? '已生成' : imageVersions.length ? '历史版本' : '待生成'}
+                                      <span className={`pill ${videoAsset ? 'success' : imageAsset ? 'running' : ''}`}>
+                                        {videoAsset
+                                          ? '视频已生成'
+                                          : imageAsset
+                                            ? '已生成参考帧'
+                                            : imageVersions.length || videoVersions.length
+                                              ? '历史版本'
+                                              : '待生成'}
                                       </span>
                                     </div>
-                                    <small>{`S${shot.sceneNumber} · #${shot.shotNumber}`}</small>
+                                    <small>
+                                      {`S${shot.sceneNumber} · #${shot.shotNumber} · ${formatShotTimeline(shot)}`}
+                                      {shot.longTakeIdentifier
+                                        ? ` · ${longTakeContinuation ? '长镜头承接' : '长镜头起始'} ${shot.longTakeIdentifier}`
+                                        : ''}
+                                    </small>
                                     <p>{truncateText(firstFramePromptValue, 78)}</p>
                                   </div>
                                 </button>
@@ -3833,75 +3910,13 @@ export function App() {
                             })}
                           </div>
                         </aside>
-                        <div className="stage-browser-detail">{renderImageDetail()}</div>
+                        <div className="stage-browser-detail">
+                          {renderImageDetail()}
+                          {renderVideoDetail()}
+                        </div>
                       </div>
                     ) : (
-                      <div className="empty-card">执行第 3 阶段生成分镜后，才能批量生成并查看参考帧图片。</div>
-                    )}
-                  </section>
-                ) : null}
-
-                {projectStageTab === 'videos' ? (
-                  <section className="panel inset">
-                    <div className="section-head">
-                      <h3>视频片段</h3>
-                      <span>{project.storyboard.length ? `${readyVideoCount}/${project.storyboard.length} 已生成` : '等待分镜生成'}</span>
-                    </div>
-                    {project.storyboard.length ? (
-                      <div className="stage-browser">
-                        <aside className="stage-browser-sidebar">
-                          <div className="section-head stage-browser-sidebar-head">
-                            <h4>镜头列表</h4>
-                            <span>{project.storyboard.length} 条</span>
-                          </div>
-                          <div className="stage-browser-list">
-                            {project.storyboard.map((shot) => {
-                              const imageAsset = imageMap.get(shot.id) ?? null;
-                              const previewAsset = getShotPreviewAsset(project, shot, imageAsset);
-                              const videoAsset = videoMap.get(shot.id) ?? null;
-                              const videoVersions = getShotAssetVersions(project, 'videos', shot.id);
-                              const videoPromptValue = videoPromptDrafts[shot.id] ?? shot.videoPrompt;
-                              const isActive = selectedVideoShot?.id === shot.id;
-
-                              return (
-                                <button
-                                  key={shot.id}
-                                  className={`stage-browser-item ${isActive ? 'active' : ''}`}
-                                  onClick={() => setSelectedVideoShotId(shot.id)}
-                                  type="button"
-                                >
-                                  <div className="stage-browser-thumb">
-                                    {previewAsset ? (
-                                      <img src={assetUrl(previewAsset.relativePath)} alt={shot.title} />
-                                    ) : (
-                                      <div className="stage-browser-thumb-placeholder">
-                                        <span>{`S${shot.sceneNumber}`}</span>
-                                        <strong>{`#${shot.shotNumber}`}</strong>
-                                      </div>
-                                    )}
-                                  </div>
-                                  <div className="stage-browser-copy">
-                                    <div className="stage-browser-copy-top">
-                                      <strong>{shot.title}</strong>
-                                      <span className={`pill ${videoAsset ? 'success' : ''}`}>
-                                        {videoAsset ? '已生成' : videoVersions.length ? '历史版本' : '待生成'}
-                                      </span>
-                                    </div>
-                                    <small>
-                                      {`S${shot.sceneNumber} · #${shot.shotNumber} · ${formatShotTimeline(shot)}`}
-                                      {shot.dialogueIdentifier?.groupId ? ` · 对话 ${formatDialogueIdentifier(shot)}` : ''}
-                                    </small>
-                                    <p>{truncateText(videoPromptValue, 78)}</p>
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </aside>
-                        <div className="stage-browser-detail">{renderVideoDetail()}</div>
-                      </div>
-                    ) : (
-                      <div className="empty-card">执行第 3 阶段生成分镜后，才能在这里编辑视频 Prompt 并查看片段。</div>
+                      <div className="empty-card">执行第 4 阶段后，才能在这里查看参考帧与视频片段。</div>
                     )}
                   </section>
                 ) : null}
@@ -3944,7 +3959,7 @@ export function App() {
                         </div>
                       </div>
                     ) : (
-                      <div className="empty-card">执行第 6 阶段后会在这里预览最终成片。</div>
+                      <div className="empty-card">执行第 5 阶段后会在这里预览最终成片。</div>
                     )}
                   </section>
                 ) : null}

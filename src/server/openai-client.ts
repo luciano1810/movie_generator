@@ -5,11 +5,12 @@ import type {
   ProjectSettings,
   ReferenceAssetItem,
   ReferenceAssetKind,
-  StoryboardDialogueIdentifier,
-  StoryboardShot,
   ScriptDialogueLine,
   ScriptPackage,
-  ScriptScene
+  ScriptScene,
+  ScriptSceneBlock,
+  StoryboardDialogueIdentifier,
+  StoryboardShot
 } from '../shared/types.js';
 import {
   DEFAULT_SETTINGS,
@@ -470,6 +471,19 @@ function normalizePositiveInteger(value: unknown, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function normalizeLongTakeIdentifier(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 function makeReferenceId(prefix: string, value: string, index: number): string {
   const slug = value
     .toLowerCase()
@@ -800,17 +814,187 @@ ${JSON.stringify(script, null, 2)}`
   };
 }
 
-function formatDialogue(dialogue: ScriptDialogueLine[]): string {
-  if (!dialogue.length) {
-    return '无对白';
+function normalizeScriptSceneBlockType(value: unknown): ScriptSceneBlock['type'] | null {
+  if (typeof value !== 'string') {
+    return null;
   }
 
-  return dialogue
-    .map((line) => {
-      const performance = line.performanceNote ? `（${line.performanceNote}）` : '';
-      return `${line.character}${performance}：${line.line}`;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s.-]+/g, '_');
+
+  if (
+    normalized === 'action' ||
+    normalized === 'stage_direction' ||
+    normalized === 'scene_action' ||
+    normalized === 'description' ||
+    normalized === '动作'
+  ) {
+    return 'action';
+  }
+
+  if (normalized === 'dialogue' || normalized === 'dialog' || normalized === 'speech' || normalized === '对白') {
+    return 'dialogue';
+  }
+
+  if (
+    normalized === 'voiceover' ||
+    normalized === 'voice_over' ||
+    normalized === 'vo' ||
+    normalized === 'v_o' ||
+    normalized === '旁白' ||
+    normalized === '画外音'
+  ) {
+    return 'voiceover';
+  }
+
+  if (normalized === 'transition' || normalized === 'cut' || normalized === '转场') {
+    return 'transition';
+  }
+
+  return null;
+}
+
+function buildFallbackSceneHeading(location: string, timeOfDay: string): string {
+  const resolvedLocation = location.trim() || '未说明场景';
+  const resolvedTimeOfDay = timeOfDay.trim() || '未说明时间';
+  return `${resolvedLocation} - ${resolvedTimeOfDay}`;
+}
+
+function normalizeScriptSceneBlocks(value: unknown): ScriptSceneBlock[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((block) => {
+      if (!block || typeof block !== 'object') {
+        return null;
+      }
+
+      const input = block as Record<string, unknown>;
+      const type = normalizeScriptSceneBlockType(input.type);
+
+      if (!type) {
+        return null;
+      }
+
+      const text = normalizeOptionalString(input.text) || normalizeOptionalString(input.line);
+
+      if (!text) {
+        return null;
+      }
+
+      if (type === 'dialogue') {
+        return {
+          type,
+          character: normalizeString(input.character, '角色'),
+          text,
+          parenthetical: normalizeOptionalString(input.parenthetical) || normalizeOptionalString(input.performanceNote)
+        } satisfies ScriptSceneBlock;
+      }
+
+      if (type === 'voiceover') {
+        return {
+          type,
+          character: normalizeString(input.character, '旁白'),
+          text
+        } satisfies ScriptSceneBlock;
+      }
+
+      return {
+        type,
+        text
+      } satisfies ScriptSceneBlock;
     })
+    .filter((block): block is ScriptSceneBlock => block !== null);
+}
+
+function deriveSceneDialogueFromBlocks(scriptBlocks: ScriptSceneBlock[]): ScriptDialogueLine[] {
+  return scriptBlocks
+    .filter((block): block is Extract<ScriptSceneBlock, { type: 'dialogue' }> => block.type === 'dialogue')
+    .map((block) => ({
+      character: normalizeString(block.character, '角色'),
+      line: normalizeString(block.text, ''),
+      performanceNote: normalizeOptionalString(block.parenthetical)
+    }))
+    .filter((line) => Boolean(line.line));
+}
+
+function deriveSceneVoiceoverFromBlocks(scriptBlocks: ScriptSceneBlock[]): string {
+  return scriptBlocks
+    .filter((block): block is Extract<ScriptSceneBlock, { type: 'voiceover' }> => block.type === 'voiceover')
+    .map((block) => block.text.trim())
+    .filter(Boolean)
     .join('\n');
+}
+
+function buildLegacySceneBlocks(scene: Pick<ScriptScene, 'summary' | 'dialogue' | 'voiceover'>): ScriptSceneBlock[] {
+  const blocks: ScriptSceneBlock[] = [];
+
+  if (scene.summary.trim()) {
+    blocks.push({
+      type: 'action',
+      text: scene.summary.trim()
+    });
+  }
+
+  for (const line of scene.dialogue) {
+    if (!line.line.trim()) {
+      continue;
+    }
+
+    blocks.push({
+      type: 'dialogue',
+      character: line.character.trim() || '角色',
+      text: line.line.trim(),
+      parenthetical: line.performanceNote.trim()
+    });
+  }
+
+  if (scene.voiceover.trim()) {
+    blocks.push({
+      type: 'voiceover',
+      character: '旁白',
+      text: scene.voiceover.trim()
+    });
+  }
+
+  return blocks;
+}
+
+function getSceneBlocksForRendering(scene: Pick<ScriptScene, 'summary' | 'dialogue' | 'voiceover' | 'scriptBlocks'>): ScriptSceneBlock[] {
+  const scriptBlocks = Array.isArray(scene.scriptBlocks) ? scene.scriptBlocks : [];
+  return scriptBlocks.length ? scriptBlocks : buildLegacySceneBlocks(scene);
+}
+
+function formatScriptSceneBlock(block: ScriptSceneBlock): string {
+  if (block.type === 'action') {
+    return block.text;
+  }
+
+  if (block.type === 'dialogue') {
+    const parenthetical = block.parenthetical ? `\n（${block.parenthetical}）` : '';
+    return `${block.character}${parenthetical}\n${block.text}`;
+  }
+
+  if (block.type === 'voiceover') {
+    const speaker = block.character.trim() ? `${block.character}（V.O.）` : '旁白（V.O.）';
+    return `${speaker}\n${block.text}`;
+  }
+
+  return `转场：${block.text}`;
+}
+
+function formatSceneBody(scene: Pick<ScriptScene, 'summary' | 'dialogue' | 'voiceover' | 'scriptBlocks'>): string {
+  const blocks = getSceneBlocksForRendering(scene);
+
+  if (!blocks.length) {
+    return '暂无剧本正文';
+  }
+
+  return blocks.map((block) => formatScriptSceneBlock(block)).join('\n\n');
 }
 
 function formatScriptMarkdown(script: Omit<ScriptPackage, 'markdown'>): string {
@@ -825,16 +1009,10 @@ function formatScriptMarkdown(script: Omit<ScriptPackage, 'markdown'>): string {
     .map(
       (scene) =>
         `## 场景 ${scene.sceneNumber}\n` +
-        `- 地点：${scene.location}\n` +
-        `- 时间：${scene.timeOfDay}\n` +
-        `- 时长：${scene.durationSeconds}s\n` +
-        `- 概要：${scene.summary}\n` +
-        `- 情绪推进：${scene.emotionalBeat}\n` +
-        `- 画外音：${scene.voiceover || '无'}\n` +
-        `- 对白：\n${formatDialogue(scene.dialogue)
-          .split('\n')
-          .map((line) => `  ${line}`)
-          .join('\n')}`
+        `${scene.sceneHeading || buildFallbackSceneHeading(scene.location, scene.timeOfDay)}\n` +
+        `时长 ${scene.durationSeconds}s｜冲突：${scene.conflict || '冲突未说明'}\n` +
+        `情绪：${scene.emotionalBeat}｜转折：${scene.turningPoint || '转折未说明'}\n\n` +
+        `${formatSceneBody(scene)}`
     )
     .join('\n\n');
 
@@ -1140,6 +1318,7 @@ interface StoryboardShotPayload {
   purpose?: string;
   durationSeconds?: number;
   dialogueIdentifier?: StoryboardDialogueIdentifierPayload | null;
+  longTakeIdentifier?: string | null;
   dialogue?: string;
   voiceover?: string;
   camera?: string;
@@ -1161,6 +1340,7 @@ interface StoryboardPlanShotPayload {
   purpose?: string;
   durationSeconds?: number;
   dialogueIdentifier?: StoryboardDialogueIdentifierPayload | null;
+  longTakeIdentifier?: string | null;
   overview?: string;
 }
 
@@ -1172,6 +1352,7 @@ export interface StoryboardPlanShot {
   purpose: string;
   durationSeconds: number;
   dialogueIdentifier: StoryboardDialogueIdentifier | null;
+  longTakeIdentifier: string | null;
   overview: string;
 }
 
@@ -1516,6 +1697,7 @@ function normalizeStoryboardPlanShot(
       getStoryboardShotFallbackDurationSeconds(settings)
     ),
     dialogueIdentifier: normalizeStoryboardDialogueIdentifier(input?.dialogueIdentifier),
+    longTakeIdentifier: normalizeLongTakeIdentifier(input?.longTakeIdentifier) || null,
     overview: normalizeString(input?.overview, `${title}，突出关键动作、对白推进和情绪变化。`)
   };
 }
@@ -1622,12 +1804,22 @@ function validateStoryboardShotAgainstPlan(
 
   const plannedDialogueGroupId = plan.dialogueIdentifier?.groupId ?? '';
   const actualDialogueGroupId = shot.dialogueIdentifier?.groupId ?? '';
+  const plannedLongTakeIdentifier = plan.longTakeIdentifier ?? '';
+  const actualLongTakeIdentifier = shot.longTakeIdentifier ?? '';
 
   if (plannedDialogueGroupId !== actualDialogueGroupId) {
     issues.push(
       plannedDialogueGroupId
         ? `dialogueIdentifier.groupId 必须为 ${plannedDialogueGroupId}，当前为 ${actualDialogueGroupId || '空'}`
         : `当前镜头不应输出 dialogueIdentifier，当前为 ${actualDialogueGroupId}`
+    );
+  }
+
+  if (plannedLongTakeIdentifier !== actualLongTakeIdentifier) {
+    issues.push(
+      plannedLongTakeIdentifier
+        ? `longTakeIdentifier 必须为 ${plannedLongTakeIdentifier}，当前为 ${actualLongTakeIdentifier || '空'}`
+        : `当前镜头不应输出 longTakeIdentifier，当前为 ${actualLongTakeIdentifier}`
     );
   }
 
@@ -1695,18 +1887,20 @@ ${sceneRules}
 12. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
 13. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
 14. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
-15. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
-16. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
-17. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-18. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
-19. 如果一个镜头属于同一段连续对白、接话反打、双人来回或以对白反应为核心的连续切镜，必须额外输出 dialogueIdentifier；同一段连续对白里的镜头使用同一个 groupId，例如 scene-2-dialogue-1。非对白镜头或不承担连续对白切换功能的镜头，dialogueIdentifier 输出 null
-20. dialogueIdentifier 目前只需要输出 groupId；系统会根据镜头顺序自动补全 sequenceIndex、sequenceLength 和 flowRole。因此不要为同一段连续对白随意改 groupId，也不要把不同对白段混成同一个 groupId
-21. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头在参考帧/视频生成时要加载哪些参考资产。你必须结合下方“可用参考资产列表”中的名称、类别、摘要和细节判断该镜头实际要用哪些资产，不能只看 ID 猜测
-22. referenceAssetIds 只能使用“可用参考资产列表”里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
-23. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
-24. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
-25. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-26. 第 1 轮只输出总镜头数和所有镜头概况，不要提前输出完整镜头字段；后续每一轮只输出当前指定的单个完整镜头 JSON，不能提前生成其他镜头，也不要重复已完成镜头
+15. 如果多个相邻镜头本质上属于同一条连续长镜头，只是为了分段生成或拆分时长才切成多个镜头，必须为这些连续镜头输出相同的 longTakeIdentifier，例如 scene-2-longtake-1；没有这种连续长镜头关系时输出 null
+16. 当某个镜头与前一个镜头的 longTakeIdentifier 相同，系统会直接复用前一个镜头视频的尾帧作为当前镜头首帧，不再单独生成当前镜头的起始参考帧；因此只有在画面、机位、动作和空间关系都应连续承接时，才能复用同一个 longTakeIdentifier
+17. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
+18. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
+19. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
+20. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
+21. 如果一个镜头属于同一段连续对白、接话反打、双人来回或以对白反应为核心的连续切镜，必须额外输出 dialogueIdentifier；同一段连续对白里的镜头使用同一个 groupId，例如 scene-2-dialogue-1。非对白镜头或不承担连续对白切换功能的镜头，dialogueIdentifier 输出 null
+22. dialogueIdentifier 目前只需要输出 groupId；系统会根据镜头顺序自动补全 sequenceIndex、sequenceLength 和 flowRole。因此不要为同一段连续对白随意改 groupId，也不要把不同对白段混成同一个 groupId
+23. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头在参考帧/视频生成时要加载哪些参考资产。你必须结合下方“可用参考资产列表”中的名称、类别、摘要和细节判断该镜头实际要用哪些资产，不能只看 ID 猜测
+24. referenceAssetIds 只能使用“可用参考资产列表”里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
+25. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
+26. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
+27. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
+28. 第 1 轮只输出总镜头数和所有镜头概况，不要提前输出完整镜头字段；后续每一轮只输出当前指定的单个完整镜头 JSON，不能提前生成其他镜头，也不要重复已完成镜头
 
 剧本 JSON：
 ${JSON.stringify(script, null, 2)}
@@ -1730,7 +1924,7 @@ function buildStoryboardSceneContext(script: ScriptPackage, targetScene: ScriptS
     .filter((scene): scene is ScriptScene => Boolean(scene))
     .map(
       (scene) =>
-        `- 场景 ${scene.sceneNumber}｜${scene.location}｜${scene.timeOfDay}｜${scene.summary}｜情绪：${scene.emotionalBeat}`
+        `- 场景 ${scene.sceneNumber}｜${scene.sceneHeading || buildFallbackSceneHeading(scene.location, scene.timeOfDay)}｜推进：${scene.summary}｜冲突：${scene.conflict || scene.emotionalBeat}`
     )
     .join('\n');
 
@@ -1744,14 +1938,16 @@ ${characters || '无'}
 
 目标场景：
 - 场景 ${targetScene.sceneNumber}
+- 场景标头：${targetScene.sceneHeading || buildFallbackSceneHeading(targetScene.location, targetScene.timeOfDay)}
 - 地点：${targetScene.location}
 - 时间：${targetScene.timeOfDay}
 - 时长：${targetScene.durationSeconds}s
-- 剧情：${targetScene.summary}
+- 核心推进：${targetScene.summary}
+- 核心冲突：${targetScene.conflict || '冲突未说明'}
 - 情绪推进：${targetScene.emotionalBeat}
-- 画外音：${targetScene.voiceover || '无'}
-- 对白：
-${formatDialogue(targetScene.dialogue)
+- 场尾转折：${targetScene.turningPoint || '转折未说明'}
+- 剧本正文：
+${formatSceneBody(targetScene)
   .split('\n')
   .map((line) => `  ${line}`)
   .join('\n')}
@@ -1796,7 +1992,9 @@ ${sceneRules}
 13. shotNumber 必须在每个 scene 内从 1 开始连续递增
 14. 如果一个规划镜头属于同一段连续对白、接话反打、双人来回或以对白反应为核心的连续切镜，必须输出 dialogueIdentifier，并为这段连续对白保持稳定的 groupId，例如 scene-1-dialogue-1；非此类镜头输出 null
 15. 这一轮的 dialogueIdentifier 只需要输出 groupId；系统会根据镜头顺序自动补全 sequenceIndex、sequenceLength 和 flowRole
-16. 输出结构：
+16. 如果多个相邻镜头本质上属于同一条连续长镜头，只是为了分段生成、拆时长或控制模型稳定性才拆开，必须输出相同的 longTakeIdentifier，例如 scene-1-longtake-1；没有这种关系时输出 null
+17. 只有当前镜头与前一个镜头应该无缝连续承接、并且系统需要直接复用前一个视频尾帧作为当前首帧时，才允许复用同一个 longTakeIdentifier；不要把普通切镜误标成长镜头组
+18. 输出结构：
 {
   "totalShots": ${recommendedMinimumShotCount},
   "shots": [
@@ -1807,6 +2005,7 @@ ${sceneRules}
       "purpose": "镜头作用",
       "durationSeconds": ${getStoryboardShotFallbackDurationSeconds(settings)},
       "dialogueIdentifier": { "groupId": "scene-1-dialogue-1" },
+      "longTakeIdentifier": "scene-1-longtake-1",
       "overview": "这个镜头的画面焦点、动作/对白推进和情绪/转场概况"
     }
   ]
@@ -1831,7 +2030,7 @@ function buildStoryboardScenePlanContext(planShots: StoryboardPlanShot[], sceneN
   return scenePlanShots
     .map(
       (shot) =>
-        `- shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s｜对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}｜概况：${shot.overview}`
+        `- shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s｜对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}｜长镜头组：${shot.longTakeIdentifier || '无'}｜概况：${shot.overview}`
     )
     .join('\n');
 }
@@ -1841,7 +2040,7 @@ function buildStoryboardAdjacentPlanContext(planShots: StoryboardPlanShot[], sho
     .filter((shot): shot is StoryboardPlanShot => Boolean(shot))
     .map(
       (shot) =>
-        `- scene ${shot.sceneNumber} shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s｜对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}｜概况：${shot.overview}`
+        `- scene ${shot.sceneNumber} shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s｜对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}｜长镜头组：${shot.longTakeIdentifier || '无'}｜概况：${shot.overview}`
     )
     .join('\n');
 }
@@ -1869,6 +2068,7 @@ function formatGeneratedStoryboardShotContext(shot: StoryboardShot): string {
   return [
     `- scene ${shot.sceneNumber} shot ${shot.shotNumber}｜${shot.title}｜作用：${shot.purpose}｜时长：${shot.durationSeconds}s`,
     `  对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}`,
+    `  长镜头组：${shot.longTakeIdentifier || '无'}`,
     `  对白：${shot.dialogue || '无'}｜画外音：${shot.voiceover || '无'}`,
     `  结束参考帧：${shot.useLastFrameReference ? truncateStoryboardPromptText(shot.lastFramePrompt, 140) : '无'}`,
     `  转场：${shot.transitionHint}`
@@ -2161,6 +2361,7 @@ function buildStoryboardShotTurnPrompt(
   const dialogueIdentifierOutput = shotPlan.dialogueIdentifier?.groupId
     ? JSON.stringify({ groupId: shotPlan.dialogueIdentifier.groupId })
     : 'null';
+  const longTakeIdentifierOutput = shotPlan.longTakeIdentifier ? JSON.stringify(shotPlan.longTakeIdentifier) : 'null';
   const dialogueSequenceNotice = dialogueSequenceContext
     ? `连续对白补充约束：
 - 当前镜头属于对白组 ${dialogueSequenceContext.group.groupId}，组内位置 ${shotPlan.dialogueIdentifier?.sequenceIndex ?? 1}/${shotPlan.dialogueIdentifier?.sequenceLength ?? 1}
@@ -2176,6 +2377,9 @@ function buildStoryboardShotTurnPrompt(
   const dialogueIdentifierRequirement = shotPlan.dialogueIdentifier?.groupId
     ? `当前镜头是对白标识镜头，dialogueIdentifier 必须输出为 ${dialogueIdentifierOutput}，不能改写 groupId，也不要输出其他额外字段。`
     : '当前镜头不是对白标识镜头，dialogueIdentifier 必须输出 null。';
+  const longTakeIdentifierRequirement = shotPlan.longTakeIdentifier
+    ? `当前镜头是长镜头组镜头，longTakeIdentifier 必须输出为 ${longTakeIdentifierOutput}，不能改写或省略。`
+    : '当前镜头不属于长镜头组，longTakeIdentifier 必须输出 null。';
 
   return `现在生成第 ${shotIndex + 1}/${planShots.length} 个镜头的完整分镜 JSON。${retryNotice}
 
@@ -2189,6 +2393,7 @@ ${continuityNotice}
   "purpose": ${JSON.stringify(shotPlan.purpose)},
   "durationSeconds": ${shotPlan.durationSeconds},
   "dialogueIdentifier": ${dialogueIdentifierOutput},
+  "longTakeIdentifier": ${longTakeIdentifierOutput},
   "overview": ${JSON.stringify(shotPlan.overview)}
 }
 
@@ -2208,26 +2413,28 @@ ${dialogueSequenceNotice}
 2. sceneNumber 必须是 ${shotPlan.sceneNumber}，shotNumber 必须是 ${shotPlan.shotNumber}，title 必须保持为 ${JSON.stringify(shotPlan.title)}，purpose 必须保持为 ${JSON.stringify(shotPlan.purpose)}，durationSeconds 必须保持为 ${shotPlan.durationSeconds}
 3. 必须把当前规划里的 overview 展开成完整可执行分镜，但不能偏离该镜头承担的戏剧功能
 4. ${dialogueIdentifierRequirement}
-5. 如果上方存在“连续对白补充约束”，你必须把其中的对白分配、轴线、视线、站位、接话点、反应点和切换节奏吸收到 dialogue、camera、composition、transitionHint、videoPrompt 和 speechPrompt 中，让镜头切换自然顺滑
-6. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
-7. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
-8. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
-9. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
-10. ${shotSplitGuideline} 当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
-11. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
-12. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
-13. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
-14. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
-15. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
-16. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
-17. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
-18. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-19. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
-20. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-21. 你必须结合上文“可用参考资产列表”里的名称、摘要和细节判断这个镜头该用哪些资产，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义
-22. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
-23. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
-24. 输出结构：
+5. ${longTakeIdentifierRequirement}
+6. 如果上方存在“连续对白补充约束”，你必须把其中的对白分配、轴线、视线、站位、接话点、反应点和切换节奏吸收到 dialogue、camera、composition、transitionHint、videoPrompt 和 speechPrompt 中，让镜头切换自然顺滑
+7. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
+8. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
+9. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
+10. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
+11. ${shotSplitGuideline} 当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
+12. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
+13. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
+14. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
+15. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
+16. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
+17. 如果当前镜头与前一个镜头使用同一个 longTakeIdentifier，你仍然要给出完整的 firstFramePrompt 作为连续性描述，但系统会直接复用前一个视频尾帧作为当前首帧，不会单独生图；因此这类 longTakeIdentifier 只能用于真正无缝承接的长镜头拆段
+18. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容
+19. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
+20. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
+21. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
+22. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
+23. 你必须结合上文“可用参考资产列表”里的名称、摘要和细节判断这个镜头该用哪些资产，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义
+24. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
+25. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
+26. 输出结构：
 {
   "shot": {
     "id": "scene-${shotPlan.sceneNumber}-shot-${shotPlan.shotNumber}",
@@ -2237,6 +2444,7 @@ ${dialogueSequenceNotice}
     "purpose": ${JSON.stringify(shotPlan.purpose)},
     "durationSeconds": ${shotPlan.durationSeconds},
     "dialogueIdentifier": ${dialogueIdentifierOutput},
+    "longTakeIdentifier": ${longTakeIdentifierOutput},
     "dialogue": "本镜头核心台词，必须使用${spokenLanguageLabel}，没有可留空",
     "voiceover": "本镜头画外音，必须使用${spokenLanguageLabel}，没有可留空",
     "camera": "镜头语言",
@@ -2271,6 +2479,7 @@ function buildStoryboardPlanAssistantMessage(planShots: StoryboardPlanShot[]): s
               groupId: shot.dialogueIdentifier.groupId
             }
           : null,
+        longTakeIdentifier: shot.longTakeIdentifier,
         overview: shot.overview
       }))
     },
@@ -2436,17 +2645,33 @@ function buildScriptOutputSchema(settings: ProjectSettings): string {
   "scenes": [
     {
       "sceneNumber": 1,
+      "sceneHeading": "内景，老宅客厅，夜",
       "location": "地点",
       "timeOfDay": "时间",
-      "summary": "本场剧情",
+      "summary": "本场核心推进",
       "emotionalBeat": "情绪推进",
-      "voiceover": "画外音，没有则留空",
+      "conflict": "本场直接冲突",
+      "turningPoint": "本场结尾转折或钩子",
       "durationSeconds": ${defaultSceneDurationExample(settings)},
-      "dialogue": [
+      "scriptBlocks": [
         {
+          "type": "action",
+          "text": "看得见、拍得到的动作、表情、空间变化和道具状态"
+        },
+        {
+          "type": "dialogue",
           "character": "角色名",
-          "line": "台词",
-          "performanceNote": "表演说明，没有则留空"
+          "parenthetical": "表演说明，没有则留空",
+          "text": "台词"
+        },
+        {
+          "type": "voiceover",
+          "character": "旁白或角色名，没有则写旁白",
+          "text": "必要时才写画外音，没有则可以省略这个块"
+        },
+        {
+          "type": "transition",
+          "text": "必要时才写场尾转场提示，没有则可以省略这个块"
         }
       ]
     }
@@ -2463,11 +2688,15 @@ function buildScriptPromptContext(settings: ProjectSettings): string {
 3. 视觉调性：${settings.visualStyle}
 4. 输出语言：${settings.language}
 5. 项目篇幅为${STORY_LENGTH_LABELS[settings.storyLength]}；这是强约束，不是参考值。整体控制在 ${target.minimumScenes} 到 ${target.maximumScenes} 场、总时长约 ${target.minimumTotalDurationSeconds} 到 ${target.maximumTotalDurationSeconds} 秒。${target.pacingInstruction}
-6. 每场应具备明确冲突、推进、情绪变化和可分镜化动作
-7. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定；所有场次相加后的总时长必须落在上面的篇幅区间内
-8. 人物外观和身份要稳定，便于后续持续生成画面
-9. 如果输入素材很多，优先压缩、合并和聚焦主线，不要为了“写全”而突破当前篇幅上限
-10. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
+6. 每场必须写成真正可拍的剧本，而不是只有 summary、dialogue 列表的场景大纲；sceneHeading、conflict、turningPoint 和 scriptBlocks 都是硬约束
+7. scriptBlocks 必须按实际发生顺序排列，至少包含 action；需要对白时再写 dialogue，需要画外音时再写 voiceover；只有必要时才写 transition
+8. action 只能写看得见、拍得到的动作、表情、调度、空间变化和道具状态，不要写作者点评、主题说明或空泛总结
+9. dialogue 要口语化、短促、带潜台词；parenthetical 只写必要表演提示，不要每句都加
+10. 每场内部都要在 scriptBlocks 中体现起势、对抗、转折和收束，不能只写 2 到 3 条概括性交代
+11. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定；所有场次相加后的总时长必须落在上面的篇幅区间内
+12. 人物外观和身份要稳定，便于后续持续生成画面
+13. 如果输入素材很多，优先压缩、合并和聚焦主线，不要为了“写全”而突破当前篇幅上限
+14. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
 }
 
 function buildScriptMessages(
@@ -2500,12 +2729,13 @@ ${retryNotice}
 2. 优先修复开场不够抓人、冲突不够集中、情绪不够陡、场次重复、对白拖沓的问题
 3. 第一场必须尽快给出强钩子、悬念、威胁或利益冲突
 4. 每一场都要有明确目标、阻碍、转折或信息增量，避免空转
-5. 对白要口语化、短促、利于表演，不要写成长篇讲述
-6. 画外音只在必要时使用，避免重复解释画面已经表达的信息
-7. 如果原文结构混乱，可以重组场次顺序，但不要丢失关键剧情信息
-8. 如果原文缺少必要细节，可以补足角色动机、场景信息和情绪推进，使其成为完整可拍的短剧
-9. 必须严格遵守上面的篇幅范围，宁可压缩和合并，也不要生成超出当前篇幅约束的长剧本
-10. 返回结构必须严格符合以下 JSON：
+5. 每场都必须写成连续剧本块 scriptBlocks，至少要让读者看到人物动作、表情反应、对白来回和场尾转折，不能只给几句概要
+6. 对白要口语化、短促、利于表演，不要写成长篇讲述
+7. 画外音只在必要时使用，避免重复解释画面已经表达的信息
+8. 如果原文结构混乱，可以重组场次顺序，但不要丢失关键剧情信息
+9. 如果原文缺少必要细节，可以补足角色动机、场景信息和情绪推进，使其成为完整可拍的短剧
+10. 必须严格遵守上面的篇幅范围，宁可压缩和合并，也不要生成超出当前篇幅约束的长剧本
+11. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
 待优化文本：
@@ -2533,10 +2763,11 @@ ${retryNotice}
 3. 全剧要有持续升级的冲突链路，避免平铺直叙
 4. 每场都要服务于主线推进，并给出清晰的情绪变化
 5. 角色数量控制在必要范围内，每个核心角色都要有鲜明身份、稳定外观和清晰动机
-6. 场景信息要具体到地点、时间和动作状态，方便后续直接拆分镜
-7. 对白要短、准、狠，符合短剧节奏，尽量避免大段说明性台词
-8. 必须严格遵守上面的篇幅范围，宁可压缩和合并情节，也不要生成超出当前篇幅约束的长剧本
-9. 返回结构必须严格符合以下 JSON：
+6. 每场都必须写成连续剧本块 scriptBlocks，让动作、对白、反应和转折按顺序发生，不能退化成“场景介绍 + 几句台词”
+7. 场景信息要具体到地点、时间和动作状态，方便后续直接拆分镜
+8. 对白要短、准、狠，符合短剧节奏，尽量避免大段说明性台词
+9. 必须严格遵守上面的篇幅范围，宁可压缩和合并情节，也不要生成超出当前篇幅约束的长剧本
+10. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
 输入素材：
@@ -2577,6 +2808,40 @@ function validateGeneratedScriptAgainstLength(
     issues.push(`总时长过长：当前约 ${totalDurationSeconds} 秒，最多只能 ${target.maximumTotalDurationSeconds} 秒。`);
   }
 
+  for (const scene of script.scenes) {
+    const minimumBlockCount = Math.max(4, Math.ceil(scene.durationSeconds / 8));
+    const actionBlockCount = scene.scriptBlocks.filter((block) => block.type === 'action').length;
+    const spokenBlockCount = scene.scriptBlocks.filter(
+      (block) => block.type === 'dialogue' || block.type === 'voiceover'
+    ).length;
+
+    if (!scene.sceneHeading.trim()) {
+      issues.push(`场景 ${scene.sceneNumber} 缺少 sceneHeading。`);
+    }
+
+    if (!scene.conflict.trim()) {
+      issues.push(`场景 ${scene.sceneNumber} 缺少 conflict。`);
+    }
+
+    if (!scene.turningPoint.trim()) {
+      issues.push(`场景 ${scene.sceneNumber} 缺少 turningPoint。`);
+    }
+
+    if (scene.scriptBlocks.length < minimumBlockCount) {
+      issues.push(
+        `场景 ${scene.sceneNumber} 的 scriptBlocks 过少：当前 ${scene.scriptBlocks.length} 条，至少需要 ${minimumBlockCount} 条，不能只写场景概述。`
+      );
+    }
+
+    if (!actionBlockCount) {
+      issues.push(`场景 ${scene.sceneNumber} 缺少 action 块，无法形成真正可拍的剧本调度。`);
+    }
+
+    if (!spokenBlockCount && actionBlockCount < 2) {
+      issues.push(`场景 ${scene.sceneNumber} 缺少足够的动作或语音剧本块，内容仍然偏大纲。`);
+    }
+  }
+
   return {
     ok: issues.length === 0,
     feedback: issues.join('；')
@@ -2606,15 +2871,26 @@ export async function generateScriptFromText(
       }>;
       scenes?: Array<{
         sceneNumber?: number;
+        sceneHeading?: string;
         location?: string;
         timeOfDay?: string;
         summary?: string;
         emotionalBeat?: string;
+        conflict?: string;
+        turningPoint?: string;
         voiceover?: string;
         durationSeconds?: number;
         dialogue?: Array<{
           character?: string;
           line?: string;
+          performanceNote?: string;
+        }>;
+        scriptBlocks?: Array<{
+          type?: string;
+          text?: string;
+          line?: string;
+          character?: string;
+          parenthetical?: string;
           performanceNote?: string;
         }>;
       }>;
@@ -2630,20 +2906,35 @@ export async function generateScriptFromText(
       signal: options?.signal
     });
 
-    const scenes: ScriptScene[] = (payload.scenes ?? []).map((scene, index) => ({
-      sceneNumber: index + 1,
-      location: normalizeString(scene.location, `场景 ${index + 1}`),
-      timeOfDay: normalizeString(scene.timeOfDay, '未说明'),
-      summary: normalizeString(scene.summary, '暂无剧情描述'),
-      emotionalBeat: normalizeString(scene.emotionalBeat, '情绪持续推进'),
-      voiceover: normalizeString(scene.voiceover, ''),
-      durationSeconds: normalizeDuration(scene.durationSeconds, defaultSceneDurationExample(settings)),
-      dialogue: (scene.dialogue ?? []).map((line) => ({
-        character: normalizeString(line.character, '旁白'),
-        line: normalizeString(line.line, ''),
-        performanceNote: normalizeString(line.performanceNote, '')
-      }))
-    }));
+    const scenes: ScriptScene[] = (payload.scenes ?? []).map((scene, index) => {
+      const location = normalizeString(scene.location, `场景 ${index + 1}`);
+      const timeOfDay = normalizeString(scene.timeOfDay, '未说明');
+      const normalizedDialogue = (scene.dialogue ?? [])
+        .map((line) => ({
+          character: normalizeString(line.character, '角色'),
+          line: normalizeString(line.line, ''),
+          performanceNote: normalizeString(line.performanceNote, '')
+        }))
+        .filter((line) => Boolean(line.line));
+      const scriptBlocks = normalizeScriptSceneBlocks(scene.scriptBlocks);
+      const derivedDialogue = normalizedDialogue.length ? normalizedDialogue : deriveSceneDialogueFromBlocks(scriptBlocks);
+      const normalizedVoiceover = normalizeOptionalString(scene.voiceover) || deriveSceneVoiceoverFromBlocks(scriptBlocks);
+
+      return {
+        sceneNumber: index + 1,
+        sceneHeading: normalizeString(scene.sceneHeading, buildFallbackSceneHeading(location, timeOfDay)),
+        location,
+        timeOfDay,
+        summary: normalizeString(scene.summary, '暂无剧情描述'),
+        emotionalBeat: normalizeString(scene.emotionalBeat, '情绪持续推进'),
+        conflict: normalizeString(scene.conflict, '冲突待补充'),
+        turningPoint: normalizeString(scene.turningPoint, '转折待补充'),
+        voiceover: normalizedVoiceover,
+        durationSeconds: normalizeDuration(scene.durationSeconds, defaultSceneDurationExample(settings)),
+        dialogue: derivedDialogue,
+        scriptBlocks
+      };
+    });
 
     const scriptCore = {
       title: normalizeString(payload.title, '未命名短剧'),

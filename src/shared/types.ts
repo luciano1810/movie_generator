@@ -1,4 +1,4 @@
-export const STAGES = ['script', 'assets', 'storyboard', 'images', 'videos', 'edit'] as const;
+export const STAGES = ['script', 'storyboard', 'assets', 'shots', 'edit'] as const;
 export const COMFYUI_WORKFLOW_TYPES = [
   'character_asset',
   'storyboard_image',
@@ -109,15 +109,50 @@ export interface ScriptDialogueLine {
   performanceNote: string;
 }
 
+export type ScriptSceneBlockType = 'action' | 'dialogue' | 'voiceover' | 'transition';
+
+export interface ScriptSceneActionBlock {
+  type: 'action';
+  text: string;
+}
+
+export interface ScriptSceneDialogueBlock {
+  type: 'dialogue';
+  character: string;
+  text: string;
+  parenthetical: string;
+}
+
+export interface ScriptSceneVoiceoverBlock {
+  type: 'voiceover';
+  character: string;
+  text: string;
+}
+
+export interface ScriptSceneTransitionBlock {
+  type: 'transition';
+  text: string;
+}
+
+export type ScriptSceneBlock =
+  | ScriptSceneActionBlock
+  | ScriptSceneDialogueBlock
+  | ScriptSceneVoiceoverBlock
+  | ScriptSceneTransitionBlock;
+
 export interface ScriptScene {
   sceneNumber: number;
+  sceneHeading: string;
   location: string;
   timeOfDay: string;
   summary: string;
   emotionalBeat: string;
+  conflict: string;
+  turningPoint: string;
   voiceover: string;
   durationSeconds: number;
   dialogue: ScriptDialogueLine[];
+  scriptBlocks: ScriptSceneBlock[];
 }
 
 export interface ScriptPackage {
@@ -151,6 +186,7 @@ export interface StoryboardShot {
   startTimecode: string;
   endTimecode: string;
   dialogueIdentifier: StoryboardDialogueIdentifier | null;
+  longTakeIdentifier: string | null;
   dialogue: string;
   voiceover: string;
   camera: string;
@@ -281,6 +317,19 @@ function normalizeDialogueIdentifierGroupId(value: unknown): string {
     .replace(/^-+|-+$/g, '');
 }
 
+function normalizeLongTakeIdentifier(value: unknown): string {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 function normalizeStoryboardDialogueFlowRole(
   value: unknown,
   fallback: StoryboardDialogueFlowRole
@@ -376,12 +425,26 @@ function buildSceneReferenceSearchTexts(scene: ScriptScene | null): string[] {
   }
 
   return [
+    scene.sceneHeading,
     scene.location,
     scene.timeOfDay,
     scene.summary,
     scene.emotionalBeat,
+    scene.conflict,
+    scene.turningPoint,
     scene.voiceover,
-    ...scene.dialogue.flatMap((line) => [line.character, line.line, line.performanceNote])
+    ...scene.dialogue.flatMap((line) => [line.character, line.line, line.performanceNote]),
+    ...(scene.scriptBlocks ?? []).flatMap((block) => {
+      if (block.type === 'dialogue') {
+        return [block.character, block.parenthetical, block.text];
+      }
+
+      if (block.type === 'voiceover') {
+        return [block.character, block.text];
+      }
+
+      return [block.text];
+    })
   ].filter(Boolean);
 }
 
@@ -502,10 +565,9 @@ export function getGenerationReferenceLibraryForShot(
 
 export const STAGE_LABELS: Record<StageId, string> = {
   script: '剧本生成',
-  assets: '资产生成',
   storyboard: '分镜生成',
-  images: '参考帧生成',
-  videos: '视频生成',
+  assets: '资产生成',
+  shots: '镜头生成',
   edit: '视频剪辑'
 };
 
@@ -910,6 +972,7 @@ export function normalizeStoryboardShot(
     Boolean(typeof input?.lastFramePrompt === 'string' && input.lastFramePrompt.trim())
   );
   const dialogueIdentifier = normalizeStoryboardDialogueIdentifier(input?.dialogueIdentifier);
+  const longTakeIdentifier = normalizeLongTakeIdentifier(input?.longTakeIdentifier);
 
   return {
     id,
@@ -923,6 +986,7 @@ export function normalizeStoryboardShot(
     startTimecode: '00:00',
     endTimecode: '00:00',
     dialogueIdentifier,
+    longTakeIdentifier: longTakeIdentifier || null,
     dialogue,
     voiceover,
     camera: normalizeString(input?.camera, '中近景，稳定推进'),
@@ -1045,10 +1109,9 @@ export function createEmptyStageState(): StageState {
 export function createStageStateMap(): Record<StageId, StageState> {
   return {
     script: createEmptyStageState(),
-    assets: createEmptyStageState(),
     storyboard: createEmptyStageState(),
-    images: createEmptyStageState(),
-    videos: createEmptyStageState(),
+    assets: createEmptyStageState(),
+    shots: createEmptyStageState(),
     edit: createEmptyStageState()
   };
 }

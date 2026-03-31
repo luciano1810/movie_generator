@@ -64,6 +64,11 @@ export const WORKFLOW_TEMPLATE_OPTIONS: Record<ComfyWorkflowType, WorkflowTempla
   ],
   image_edit: [
     {
+      path: 'config/workflows/qwen-rapid-aio-image-edit.template.json',
+      label: 'Qwen Rapid GGUF Image Edit',
+      description: '基于 Qwen-Rapid-NSFW-v23_Q4_K.gguf 的三参考图图片编辑模板，使用 GGUF UNet 加载节点。'
+    },
+    {
       path: 'config/workflows/firered-image-edit-1.1_api.template.json',
       label: 'FireRed Image Edit 1.1 API',
       description: '当前图片编辑默认模板，适合局部重绘、修图与二次加工。'

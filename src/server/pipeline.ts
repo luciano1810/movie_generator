@@ -1,7 +1,7 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import {
   type AppSettings,
   type GeneratedAsset,
@@ -392,6 +392,7 @@ async function persistStoryboard(project: Project, planShots: StoryboardPlanShot
                       groupId: shot.dialogueIdentifier.groupId
                     }
                   : null,
+                longTakeIdentifier: shot.longTakeIdentifier,
                 overview: shot.overview
               }))
             }
@@ -629,8 +630,7 @@ function invalidateGeneratedMediaFromReferenceLibrary(project: Project): void {
   clearAllShotAssetHistory(project, 'audios');
   clearAllShotAssetHistory(project, 'videos');
   project.assets.finalVideo = null;
-  resetStage(project, 'images');
-  resetStage(project, 'videos');
+  resetStage(project, 'shots');
   resetStage(project, 'edit');
 }
 
@@ -649,8 +649,7 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
     project.artifacts.referenceLibraryJson = null;
     resetStage(project, 'assets');
     resetStage(project, 'storyboard');
-    resetStage(project, 'images');
-    resetStage(project, 'videos');
+    resetStage(project, 'shots');
     resetStage(project, 'edit');
     return;
   }
@@ -669,22 +668,13 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
     clearAllShotAssetHistory(project, 'videos');
     project.assets.finalVideo = null;
     project.artifacts.storyboardJson = null;
-    resetStage(project, 'images');
-    resetStage(project, 'videos');
+    resetStage(project, 'shots');
     resetStage(project, 'edit');
     return;
   }
 
-  if (stage === 'images') {
+  if (stage === 'shots') {
     archiveAllActiveReferenceFrameAssets(project);
-    archiveAllActiveShotAssets(project, 'videos');
-    project.assets.finalVideo = null;
-    resetStage(project, 'videos');
-    resetStage(project, 'edit');
-    return;
-  }
-
-  if (stage === 'videos') {
     archiveAllActiveShotAssets(project, 'videos');
     project.assets.finalVideo = null;
     resetStage(project, 'edit');
@@ -738,6 +728,59 @@ function getStoryboardShot(project: Project, shotId: string): Project['storyboar
   return shot;
 }
 
+function getStoryboardShotIndex(project: Project, shotId: string): number {
+  return project.storyboard.findIndex((item) => item.id === shotId);
+}
+
+function getPreviousStoryboardShot(
+  project: Project,
+  shotOrId: Project['storyboard'][number] | string
+): Project['storyboard'][number] | null {
+  const shotId = typeof shotOrId === 'string' ? shotOrId : shotOrId.id;
+  const index = getStoryboardShotIndex(project, shotId);
+
+  if (index <= 0) {
+    return null;
+  }
+
+  return project.storyboard[index - 1] ?? null;
+}
+
+function shareSameLongTakeIdentifier(
+  left: Pick<Project['storyboard'][number], 'longTakeIdentifier'> | null | undefined,
+  right: Pick<Project['storyboard'][number], 'longTakeIdentifier'> | null | undefined
+): boolean {
+  return Boolean(left?.longTakeIdentifier && right?.longTakeIdentifier && left.longTakeIdentifier === right.longTakeIdentifier);
+}
+
+function isLongTakeContinuationShot(project: Project, shot: Project['storyboard'][number]): boolean {
+  return shareSameLongTakeIdentifier(getPreviousStoryboardShot(project, shot), shot);
+}
+
+function getDownstreamLongTakeDependentShotIds(project: Project, shotId: string): string[] {
+  const index = getStoryboardShotIndex(project, shotId);
+
+  if (index === -1) {
+    return [];
+  }
+
+  const dependentShotIds: string[] = [];
+  let previousShot = project.storyboard[index] ?? null;
+
+  for (let cursor = index + 1; cursor < project.storyboard.length; cursor += 1) {
+    const nextShot = project.storyboard[cursor];
+
+    if (!previousShot || !shareSameLongTakeIdentifier(previousShot, nextShot)) {
+      break;
+    }
+
+    dependentShotIds.push(nextShot.id);
+    previousShot = nextShot;
+  }
+
+  return dependentShotIds;
+}
+
 function getGenerationReferenceSelectionIds(
   project: Project,
   shot: Project['storyboard'][number]
@@ -776,7 +819,9 @@ function invalidateGeneratedMediaFromStoryboardShotReferenceChange(
   hadLastImageOutput: boolean;
   hadVideoOutput: boolean;
   hadFinalVideo: boolean;
+  downstreamDependentShotIds: string[];
 } {
+  const downstreamDependentShotIds = getDownstreamLongTakeDependentShotIds(project, shotId);
   const hadImageOutput = Boolean(getActiveShotAsset(project, 'images', shotId));
   const hadLastImageOutput = Boolean(getActiveShotAsset(project, 'lastImages', shotId));
   const hadVideoOutput = Boolean(getActiveShotAsset(project, 'videos', shotId));
@@ -785,16 +830,20 @@ function invalidateGeneratedMediaFromStoryboardShotReferenceChange(
   clearActiveShotAsset(project, 'images', shotId);
   clearActiveShotAsset(project, 'lastImages', shotId);
   clearActiveShotAsset(project, 'videos', shotId);
+  for (const dependentShotId of downstreamDependentShotIds) {
+    clearActiveShotAsset(project, 'images', dependentShotId);
+    clearActiveShotAsset(project, 'videos', dependentShotId);
+  }
   project.assets.finalVideo = null;
-  resetStage(project, 'images');
-  resetStage(project, 'videos');
+  resetStage(project, 'shots');
   resetStage(project, 'edit');
 
   return {
     hadImageOutput,
     hadLastImageOutput,
     hadVideoOutput,
-    hadFinalVideo
+    hadFinalVideo,
+    downstreamDependentShotIds
   };
 }
 
@@ -2405,33 +2454,26 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
   const appSettings = getAppSettings();
   const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
 
-  if (stage === 'images') {
+  if (stage === 'shots') {
     if (!project.storyboard.length) {
-      throw new Error('请先生成分镜，再生成图片。');
+      throw new Error('请先生成分镜，再生成镜头。');
     }
 
+    if (!hasConfiguredImageToVideoWorkflow(appSettings)) {
+      throw new Error('系统设置中未配置 ComfyUI 视频生成工作流路径，请至少配置首帧视频或首尾帧视频。');
+    }
+
+    const requiresReferenceFrameGeneration = project.storyboard.some(
+      (shot) => !isLongTakeContinuationShot(project, shot) || shot.useLastFrameReference
+    );
+
     if (
+      requiresReferenceFrameGeneration &&
       !appSettings.comfyui.workflows.storyboard_image.workflowPath &&
       !appSettings.comfyui.workflows.image_edit.workflowPath &&
       !appSettings.comfyui.workflows.text_to_image.workflowPath
     ) {
       throw new Error('系统设置中未配置 ComfyUI 参考帧生成工作流或文生图工作流路径。');
-    }
-
-    return;
-  }
-
-  if (stage === 'videos') {
-    if (!project.storyboard.length) {
-      throw new Error('请先生成分镜，再生成视频片段。');
-    }
-
-    if (!project.assets.images.length) {
-      throw new Error('请先生成图片，再生成视频片段。');
-    }
-
-    if (!hasConfiguredImageToVideoWorkflow(appSettings)) {
-      throw new Error('系统设置中未配置 ComfyUI 视频生成工作流路径，请至少配置首帧视频或首尾帧视频。');
     }
 
     if (!useTtsWorkflow && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
@@ -2746,7 +2788,7 @@ function invalidateAudioDrivenOutputsFromReferenceAudio(project: Project): {
   clearAllShotAssetHistory(project, 'audios');
   archiveAllActiveShotAssets(project, 'videos');
   project.assets.finalVideo = null;
-  resetStage(project, 'videos');
+  resetStage(project, 'shots');
   resetStage(project, 'edit');
   return {
     hadVideoOutputs,
@@ -3338,7 +3380,7 @@ async function generateVideoAssetForShot(
   let uploadedTargetLastFrameImage = '';
 
   for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
-    await throwIfRunInterrupted(project.id, 'videos');
+    await throwIfRunInterrupted(project.id, 'shots');
 
     const segmentDuration = segmentDurations[segmentIndex];
     const uploadedImage = await uploadImageToComfy(currentInputImagePath, { signal });
@@ -3440,24 +3482,58 @@ async function generateVideoAssetForShot(
   );
 }
 
-async function runImageStage(project: Project): Promise<void> {
-  if (!project.storyboard.length) {
-    throw new Error('请先生成分镜，再生成图片。');
+async function generateStartFrameFromPreviousShotVideo(
+  project: Project,
+  shot: Project['storyboard'][number]
+): Promise<GeneratedAsset> {
+  const previousShot = getPreviousStoryboardShot(project, shot);
+  const previousVideoAsset = previousShot ? getActiveShotAsset(project, 'videos', previousShot.id) : null;
+
+  if (!previousShot || !previousVideoAsset) {
+    throw new Error(`镜头 ${shot.title} 标记为长镜头续接，但前一个镜头还没有可用视频片段。`);
   }
 
-  const appSettings = getAppSettings();
-  const referenceUploadCache = new Map<string, string>();
+  const signal = getProjectAbortSignal(project.id);
+  const temporaryFramePath = resolveProjectPath(project.id, '.video-stage', shot.id, 'reused-start-frame.png');
+  await rm(temporaryFramePath, { force: true });
+  await rm(path.dirname(temporaryFramePath), { recursive: true, force: true });
+  await mkdir(path.dirname(temporaryFramePath), { recursive: true });
+  await extractLastFrame(fromStorageRelative(previousVideoAsset.relativePath), temporaryFramePath, { signal });
+  const buffer = await readFile(temporaryFramePath);
+  const saved = await writeProjectFile(project.id, buildShotAssetOutputPath('images', shot.id, '.png'), buffer);
 
-  for (let index = 0; index < project.storyboard.length; index += 1) {
-    await throwIfRunInterrupted(project.id, 'images');
+  return buildAsset(
+    saved.relativePath,
+    `复用上一镜头 ${previousShot.title} 的视频尾帧作为当前镜头起始参考帧。`,
+    shot.sceneNumber,
+    shot.id
+  );
+}
 
-    const shot = project.storyboard[index];
-    const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
-    const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
-    appendLog(project, `参考帧生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
+async function generateShotMedia(
+  project: Project,
+  shot: Project['storyboard'][number],
+  appSettings: AppSettings,
+  referenceUploadCache: Map<string, string>,
+  ttsReferenceAudioUploadCache: Map<string, string>
+): Promise<void> {
+  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
+  const isLongTakeContinuation = isLongTakeContinuationShot(project, shot);
+  let selectedWorkflow: SelectedImageStageWorkflow | null = null;
+
+  if (isLongTakeContinuation) {
+    const previousShot = getPreviousStoryboardShot(project, shot);
+    appendLog(
+      project,
+      `镜头 ${shot.title} 与上一镜头共享长镜头标识 ${shot.longTakeIdentifier}，起始参考帧将直接复用 ${previousShot?.title ?? '上一镜头'} 视频尾帧。`
+    );
+    await saveProject(project);
+    const startFrameAsset = await generateStartFrameFromPreviousShotVideo(project, shot);
+    setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
+  } else {
+    selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
     appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
     await saveProject(project);
-
     const startFrameAsset = await generateReferenceFrameAssetForShot(
       project,
       shot,
@@ -3467,36 +3543,50 @@ async function runImageStage(project: Project): Promise<void> {
       'start'
     );
     setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
+  }
 
-    if (shot.useLastFrameReference) {
-      appendLog(project, `镜头 ${shot.title} 需要结束参考帧，开始补生成结束参考帧。`);
-      await saveProject(project);
-      const endFrameAsset = await generateReferenceFrameAssetForShot(
-        project,
-        shot,
-        appSettings,
-        selectedWorkflow,
-        generationReferenceInputs,
-        'end'
-      );
-      setActiveShotAsset(project, 'lastImages', shot.id, endFrameAsset);
-    } else {
-      clearActiveShotAsset(project, 'lastImages', shot.id);
+  if (shot.useLastFrameReference) {
+    if (!selectedWorkflow) {
+      selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
+      appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
     }
 
+    appendLog(project, `镜头 ${shot.title} 需要结束参考帧，开始补生成结束参考帧。`);
     await saveProject(project);
+    const endFrameAsset = await generateReferenceFrameAssetForShot(
+      project,
+      shot,
+      appSettings,
+      selectedWorkflow,
+      generationReferenceInputs,
+      'end'
+    );
+    setActiveShotAsset(project, 'lastImages', shot.id, endFrameAsset);
+  } else {
+    clearActiveShotAsset(project, 'lastImages', shot.id);
   }
 
-  appendLog(project, '全部镜头参考帧生成完成。');
+  appendLog(
+    project,
+    generationReferenceInputs.referenceCount
+      ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
+      : `当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和${shot.useLastFrameReference ? '参考帧' : isLongTakeContinuation ? '上一镜头尾帧' : '起始参考帧'}。`,
+    generationReferenceInputs.referenceCount ? 'info' : 'warn'
+  );
+  await saveProject(project);
+  const videoAsset = await generateVideoAssetForShot(
+    project,
+    shot,
+    appSettings,
+    generationReferenceInputs,
+    ttsReferenceAudioUploadCache
+  );
+  setActiveShotAsset(project, 'videos', shot.id, videoAsset);
 }
 
-async function runVideoStage(project: Project): Promise<void> {
+async function runShotsStage(project: Project): Promise<void> {
   if (!project.storyboard.length) {
-    throw new Error('请先生成分镜，再生成视频片段。');
-  }
-
-  if (!project.assets.images.length) {
-    throw new Error('请先生成图片，再生成视频片段。');
+    throw new Error('请先生成分镜，再生成镜头。');
   }
 
   const appSettings = getAppSettings();
@@ -3511,11 +3601,7 @@ async function runVideoStage(project: Project): Promise<void> {
     appendLog(project, '未配置独立 TTS 工作流，背景声音和台词 Prompt 将合并到视频工作流 Prompt。');
   }
 
-  if (
-    !useTtsWorkflow &&
-    requiresVideoStageFfmpeg(project) &&
-    !appSettings.ffmpeg.binaryPath
-  ) {
+  if (!useTtsWorkflow && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
     throw new Error('存在长镜头分段生成需求，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
   }
 
@@ -3523,32 +3609,16 @@ async function runVideoStage(project: Project): Promise<void> {
   const ttsReferenceAudioUploadCache = new Map<string, string>();
 
   for (let index = 0; index < project.storyboard.length; index += 1) {
-    await throwIfRunInterrupted(project.id, 'videos');
+    await throwIfRunInterrupted(project.id, 'shots');
 
     const shot = project.storyboard[index];
-    const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
-
-    appendLog(project, `视频生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
-    appendLog(
-      project,
-      generationReferenceInputs.referenceCount
-        ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
-        : `当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和${shot.useLastFrameReference ? '参考帧' : '起始参考帧'}。`,
-      generationReferenceInputs.referenceCount ? 'info' : 'warn'
-    );
+    appendLog(project, `镜头生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
     await saveProject(project);
-    const videoAsset = await generateVideoAssetForShot(
-      project,
-      shot,
-      appSettings,
-      generationReferenceInputs,
-      ttsReferenceAudioUploadCache
-    );
-    setActiveShotAsset(project, 'videos', shot.id, videoAsset);
+    await generateShotMedia(project, shot, appSettings, referenceUploadCache, ttsReferenceAudioUploadCache);
     await saveProject(project);
   }
 
-  appendLog(project, '全部视频片段生成完成。');
+  appendLog(project, '全部镜头参考帧与视频片段生成完成。');
 }
 
 async function runEditStage(project: Project): Promise<void> {
@@ -3677,10 +3747,8 @@ async function executeStage(projectId: string, stage: StageId): Promise<void> {
       await runAssetStage(project);
     } else if (stage === 'storyboard') {
       await runStoryboardStage(project);
-    } else if (stage === 'images') {
-      await runImageStage(project);
-    } else if (stage === 'videos') {
-      await runVideoStage(project);
+    } else if (stage === 'shots') {
+      await runShotsStage(project);
     } else {
       await runEditStage(project);
     }
@@ -4023,6 +4091,32 @@ export async function enqueueReferenceGeneration(
   await Promise.resolve();
 }
 
+function invalidateDownstreamLongTakeDependentOutputs(
+  project: Project,
+  shotId: string
+): {
+  dependentShotIds: string[];
+  hadImageOutput: boolean;
+  hadVideoOutput: boolean;
+} {
+  const dependentShotIds = getDownstreamLongTakeDependentShotIds(project, shotId);
+  let hadImageOutput = false;
+  let hadVideoOutput = false;
+
+  for (const dependentShotId of dependentShotIds) {
+    hadImageOutput = Boolean(getActiveShotAsset(project, 'images', dependentShotId)) || hadImageOutput;
+    hadVideoOutput = Boolean(getActiveShotAsset(project, 'videos', dependentShotId)) || hadVideoOutput;
+    clearActiveShotAsset(project, 'images', dependentShotId);
+    clearActiveShotAsset(project, 'videos', dependentShotId);
+  }
+
+  return {
+    dependentShotIds,
+    hadImageOutput,
+    hadVideoOutput
+  };
+}
+
 async function executeStoryboardShotImageGeneration(projectId: string, shotId: string): Promise<void> {
   const project = await readProject(projectId);
   const shot = project.storyboard.find((item) => item.id === shotId);
@@ -4032,53 +4126,26 @@ async function executeStoryboardShotImageGeneration(projectId: string, shotId: s
   }
 
   if (!project.storyboard.length) {
-    throw new Error('请先生成分镜，再生成图片。');
+    throw new Error('请先生成分镜，再生成镜头。');
   }
 
   const appSettings = getAppSettings();
   const referenceUploadCache = new Map<string, string>();
-  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
-  const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
-  appendLog(project, `开始为镜头 ${shot.title} 单独执行参考帧生成。`);
-  appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
+  const ttsReferenceAudioUploadCache = new Map<string, string>();
+  appendLog(project, `开始为镜头 ${shot.title} 单独执行镜头生成（参考帧 + 视频片段）。`);
   await saveProject(project);
 
-  const startFrameAsset = await generateReferenceFrameAssetForShot(
-    project,
-    shot,
-    appSettings,
-    selectedWorkflow,
-    generationReferenceInputs,
-    'start'
-  );
-  setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
-
-  if (shot.useLastFrameReference) {
-    appendLog(project, `镜头 ${shot.title} 需要结束参考帧，开始补生成结束参考帧。`);
-    await saveProject(project);
-    const endFrameAsset = await generateReferenceFrameAssetForShot(
-      project,
-      shot,
-      appSettings,
-      selectedWorkflow,
-      generationReferenceInputs,
-      'end'
-    );
-    setActiveShotAsset(project, 'lastImages', shot.id, endFrameAsset);
-  } else {
-    clearActiveShotAsset(project, 'lastImages', shot.id);
-  }
-
-  const replacedVideoAsset = clearActiveShotAsset(project, 'videos', shot.id);
+  await generateShotMedia(project, shot, appSettings, referenceUploadCache, ttsReferenceAudioUploadCache);
+  const downstreamInvalidation = invalidateDownstreamLongTakeDependentOutputs(project, shot.id);
   project.assets.finalVideo = null;
-  resetStage(project, 'videos');
+  resetStage(project, 'shots');
   resetStage(project, 'edit');
 
   appendLog(
     project,
-    replacedVideoAsset
-      ? `镜头 ${shot.title} 的参考帧已更新，原视频片段已移入历史版本，请重新生成或重新选择视频版本。`
-      : `镜头 ${shot.title} 的参考帧已更新，历史版本已保留。`
+    downstreamInvalidation.dependentShotIds.length
+      ? `镜头 ${shot.title} 已完成重新生成；受长镜头续接影响，后续镜头 ${downstreamInvalidation.dependentShotIds.join(', ')} 的首帧和视频已失效，请按顺序重新生成。`
+      : `镜头 ${shot.title} 的参考帧与视频片段已更新，历史版本已保留。`
   );
   await saveProject(project);
 }
@@ -4093,6 +4160,11 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
 
   if (!project.storyboard.length) {
     throw new Error('请先生成分镜，再生成视频片段。');
+  }
+
+  if (isLongTakeContinuationShot(project, shot) && !getActiveShotAsset(project, 'images', shot.id)) {
+    const startFrameAsset = await generateStartFrameFromPreviousShotVideo(project, shot);
+    setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
   }
 
   if (!getActiveShotAsset(project, 'images', shot.id)) {
@@ -4140,9 +4212,16 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
     ttsReferenceAudioUploadCache
   );
   setActiveShotAsset(project, 'videos', shot.id, videoAsset);
+  const downstreamInvalidation = invalidateDownstreamLongTakeDependentOutputs(project, shot.id);
   project.assets.finalVideo = null;
+  resetStage(project, 'shots');
   resetStage(project, 'edit');
-  appendLog(project, `镜头 ${shot.title} 的视频片段已更新，历史版本已保留。`);
+  appendLog(
+    project,
+    downstreamInvalidation.dependentShotIds.length
+      ? `镜头 ${shot.title} 的视频片段已更新；受长镜头续接影响，后续镜头 ${downstreamInvalidation.dependentShotIds.join(', ')} 的首帧和视频已失效，请按顺序重新生成。`
+      : `镜头 ${shot.title} 的视频片段已更新，历史版本已保留。`
+  );
   await saveProject(project);
 }
 
@@ -4189,14 +4268,27 @@ async function selectStoryboardShotAssetVersion(
 
   if (stage === 'images') {
     clearActiveShotAsset(project, 'videos', shotId);
+    const downstreamInvalidation = invalidateDownstreamLongTakeDependentOutputs(project, shotId);
     project.assets.finalVideo = null;
-    resetStage(project, 'videos');
+    resetStage(project, 'shots');
     resetStage(project, 'edit');
-    appendLog(project, `镜头 ${shot.title} 已切换到指定起始参考帧版本；当前视频片段已失效，请重新生成或重新选择视频版本。`);
+    appendLog(
+      project,
+      downstreamInvalidation.dependentShotIds.length
+        ? `镜头 ${shot.title} 已切换到指定起始参考帧版本；当前镜头以及后续长镜头续接镜头 ${downstreamInvalidation.dependentShotIds.join(', ')} 的视频已失效，请按顺序重新生成。`
+        : `镜头 ${shot.title} 已切换到指定起始参考帧版本；当前视频片段已失效，请重新生成或重新选择视频版本。`
+    );
   } else {
+    const downstreamInvalidation = invalidateDownstreamLongTakeDependentOutputs(project, shotId);
     project.assets.finalVideo = null;
+    resetStage(project, 'shots');
     resetStage(project, 'edit');
-    appendLog(project, `镜头 ${shot.title} 已切换到指定视频版本，请重新执行视频剪辑。`);
+    appendLog(
+      project,
+      downstreamInvalidation.dependentShotIds.length
+        ? `镜头 ${shot.title} 已切换到指定视频版本；后续长镜头续接镜头 ${downstreamInvalidation.dependentShotIds.join(', ')} 的首帧和视频已失效，请按顺序重新生成。`
+        : `镜头 ${shot.title} 已切换到指定视频版本，请重新执行视频剪辑。`
+    );
   }
 
   await saveProject(project);
@@ -4206,7 +4298,7 @@ async function selectStoryboardShotAssetVersion(
 export async function enqueueStoryboardShotImageGeneration(projectId: string, shotId: string): Promise<void> {
   await enqueueStageScopedProjectTask(
     projectId,
-    'images',
+    'shots',
     async () => {
       await executeStoryboardShotImageGeneration(projectId, shotId);
     },
@@ -4217,7 +4309,7 @@ export async function enqueueStoryboardShotImageGeneration(projectId: string, sh
 export async function enqueueStoryboardShotVideoGeneration(projectId: string, shotId: string): Promise<void> {
   await enqueueStageScopedProjectTask(
     projectId,
-    'videos',
+    'shots',
     async () => {
       await executeStoryboardShotVideoGeneration(projectId, shotId);
     },
@@ -4275,7 +4367,9 @@ export async function addReferenceAssetToStoryboardShot(
   appendLog(
     project,
     invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
-      ? `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
+      ? invalidation.downstreamDependentShotIds.length
+        ? `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；当前镜头及后续长镜头续接镜头 ${invalidation.downstreamDependentShotIds.join(', ')} 的参考帧、视频片段和最终成片已失效，请重新生成。`
+        : `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
       : `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；后续参考帧与视频生成会注入这张参考图。`,
     invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
       ? 'warn'
@@ -4325,7 +4419,9 @@ export async function removeReferenceAssetFromStoryboardShot(
   appendLog(
     project,
     invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
-      ? `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
+      ? invalidation.downstreamDependentShotIds.length
+        ? `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”；当前镜头及后续长镜头续接镜头 ${invalidation.downstreamDependentShotIds.join(', ')} 的参考帧、视频片段和最终成片已失效，请重新生成。`
+        : `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
       : `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”。`,
     invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
       ? 'warn'
@@ -4475,6 +4571,15 @@ export async function updateStoryboardShotPrompts(
     project.storyboard = normalizeStoryboardShots(project.storyboard, project.settings);
   }
 
+  const downstreamInvalidation =
+    shouldInvalidateStartFrameOutputs || shouldInvalidateLastFrameOutputs || shouldInvalidateVideoOutputs
+      ? invalidateDownstreamLongTakeDependentOutputs(project, shotId)
+      : {
+          dependentShotIds: [] as string[],
+          hadImageOutput: false,
+          hadVideoOutput: false
+        };
+
   if (shouldInvalidateStartFrameOutputs || shouldInvalidateLastFrameOutputs) {
     if (shouldInvalidateStartFrameOutputs) {
       clearActiveShotAsset(project, 'images', shotId);
@@ -4488,8 +4593,7 @@ export async function updateStoryboardShotPrompts(
     }
     clearActiveShotAsset(project, 'videos', shotId);
     project.assets.finalVideo = null;
-    resetStage(project, 'images');
-    resetStage(project, 'videos');
+    resetStage(project, 'shots');
     resetStage(project, 'edit');
   } else if (shouldInvalidateVideoOutputs) {
     if (shouldInvalidateAudioOutputs) {
@@ -4498,7 +4602,7 @@ export async function updateStoryboardShotPrompts(
     }
     clearActiveShotAsset(project, 'videos', shotId);
     project.assets.finalVideo = null;
-    resetStage(project, 'videos');
+    resetStage(project, 'shots');
     resetStage(project, 'edit');
   } else if (shouldInvalidateAudioOutputs) {
     clearActiveShotAsset(project, 'audios', shotId, { archive: false });
@@ -4513,9 +4617,13 @@ export async function updateStoryboardShotPrompts(
   appendLog(
     project,
     shouldInvalidateStartFrameOutputs || shouldInvalidateLastFrameOutputs
-      ? `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新生成相关参考帧、视频片段和最终成片。`
+      ? downstreamInvalidation.dependentShotIds.length
+        ? `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新生成当前镜头及后续长镜头续接镜头 ${downstreamInvalidation.dependentShotIds.join(', ')} 的参考帧、视频片段和最终成片。`
+        : `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新生成相关参考帧、视频片段和最终成片。`
       : shouldInvalidateVideoOutputs
-      ? `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新生成相关视频片段和最终成片。`
+      ? downstreamInvalidation.dependentShotIds.length
+        ? `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新生成当前镜头及后续长镜头续接镜头 ${downstreamInvalidation.dependentShotIds.join(', ')} 的视频片段和最终成片。`
+        : `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新生成相关视频片段和最终成片。`
       : shouldInvalidateEditOutput
         ? `镜头 ${shot.title} 的${changes.join('、')}已更新，请重新执行视频剪辑以更新配音。`
       : `镜头 ${shot.title} 的${changes.join('、')}已更新。`
