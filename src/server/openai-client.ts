@@ -7,6 +7,7 @@ import type {
   ReferenceAssetKind,
   ScriptDialogueLine,
   ScriptPackage,
+  ScriptReferenceAssetLibrary,
   ScriptScene,
   ScriptSceneBlock,
   StoryboardDialogueIdentifier,
@@ -522,44 +523,6 @@ function createReferenceItem(
   };
 }
 
-const SCENE_REFERENCE_ANGLE_VARIANTS = [
-  {
-    label: '主视角',
-    promptInstruction:
-      '作为同一场景的第 1 个参考角度，以更完整的 establishing 视角呈现空间全貌、主结构和主要纵深关系，保持空镜环境，不要出现人物或剧情瞬间。'
-  },
-  {
-    label: '第二视角',
-    promptInstruction:
-      '作为同一场景的第 2 个参考角度，从同一空间的另一侧或斜对角重新观察，必须与第 1 个角度明显不同，但保持同一时间、光线、材质与氛围设定；仍然保持空镜环境，不要出现人物或剧情瞬间。'
-  }
-] as const;
-
-function expandSceneReferenceItems(
-  items: Array<{
-    name: string;
-    summary: string;
-    generationPrompt: string;
-  }>,
-  settings: ProjectSettings
-): ReferenceAssetItem[] {
-  return items.flatMap((item, index) =>
-    SCENE_REFERENCE_ANGLE_VARIANTS.map((variant, variantIndex) =>
-      createReferenceItem(
-        'scene',
-        `${item.name}（${variant.label}）`,
-        `${variant.label}：${item.summary}`,
-        normalizeSceneReferencePrompt(
-          `${item.generationPrompt}。${variant.promptInstruction}`,
-          settings,
-          item.name
-        ),
-        index * SCENE_REFERENCE_ANGLE_VARIANTS.length + variantIndex
-      )
-    )
-  );
-}
-
 function normalizeSceneReferencePrompt(
   value: unknown,
   settings: ProjectSettings,
@@ -576,6 +539,97 @@ function normalizeSceneReferencePrompt(
   }
 
   return `${base}。场景参考图要求：空镜环境，无人物，无剧情行为，无事件瞬间，仅表现可复用的空间结构、材质、灯光与氛围。`;
+}
+
+function normalizeScriptReferenceAssets(
+  value: unknown,
+  settings: ProjectSettings
+): ScriptReferenceAssetLibrary {
+  const input =
+    value && typeof value === 'object'
+      ? (value as {
+          characters?: Array<{
+            name?: string;
+            summary?: string;
+            genderHint?: string;
+            ageHint?: string;
+            ethnicityHint?: string;
+            generationPrompt?: string;
+          }>;
+          scenes?: Array<{
+            name?: string;
+            summary?: string;
+            generationPrompt?: string;
+          }>;
+          objects?: Array<{
+            name?: string;
+            summary?: string;
+            generationPrompt?: string;
+          }>;
+        })
+      : {};
+
+  return {
+    characters: (input.characters ?? []).map((item, index) => ({
+      name: normalizeString(item.name, `角色${index + 1}`),
+      summary: normalizeString(item.summary, '核心角色设定'),
+      genderHint: normalizeOptionalString(item.genderHint),
+      ageHint: normalizeOptionalString(item.ageHint),
+      ethnicityHint: normalizeOptionalString(item.ethnicityHint),
+      generationPrompt: normalizeString(
+        item.generationPrompt,
+        normalizeString(item.summary, `${settings.visualStyle}，人物外观与服装特征稳定设定`)
+      )
+    })),
+    scenes: (input.scenes ?? []).map((item, index) => ({
+      name: normalizeString(item.name, `场景${index + 1}`),
+      summary: normalizeString(item.summary, '核心场景设定'),
+      generationPrompt: normalizeSceneReferencePrompt(
+        item.generationPrompt,
+        settings,
+        normalizeString(item.name, `场景${index + 1}`)
+      )
+    })),
+    objects: (input.objects ?? []).map((item, index) => ({
+      name: normalizeString(item.name, `物品${index + 1}`),
+      summary: normalizeString(item.summary, '关键剧情道具'),
+      generationPrompt: normalizeString(item.generationPrompt, `${settings.visualStyle}，关键道具特写`)
+    }))
+  };
+}
+
+function buildReferenceLibraryFromScriptReferenceAssets(
+  referenceAssets: ScriptReferenceAssetLibrary | undefined,
+  settings: ProjectSettings
+): ProjectReferenceLibrary | null {
+  const normalized = normalizeScriptReferenceAssets(referenceAssets, settings);
+  const hasItems =
+    normalized.characters.length > 0 || normalized.scenes.length > 0 || normalized.objects.length > 0;
+
+  if (!hasItems) {
+    return null;
+  }
+
+  return {
+    characters: normalized.characters.map((item, index) =>
+      createReferenceItem(
+        'character',
+        item.name,
+        item.summary,
+        item.generationPrompt,
+        index,
+        item.ethnicityHint,
+        item.genderHint,
+        item.ageHint
+      )
+    ),
+    scenes: normalized.scenes.map((item, index) =>
+      createReferenceItem('scene', item.name, item.summary, item.generationPrompt, index)
+    ),
+    objects: normalized.objects.map((item, index) =>
+      createReferenceItem('object', item.name, item.summary, item.generationPrompt, index)
+    )
+  };
 }
 
 function supportsJsonResponseFormatFallback(error: unknown): boolean {
@@ -686,6 +740,12 @@ export async function extractReferenceLibraryFromScript(
     signal?: AbortSignal;
   }
 ): Promise<ProjectReferenceLibrary> {
+  const embeddedReferenceLibrary = buildReferenceLibraryFromScriptReferenceAssets(script.referenceAssets, settings);
+
+  if (embeddedReferenceLibrary) {
+    return embeddedReferenceLibrary;
+  }
+
   const payload = await requestJson<{
     characters?: Array<{
       name?: string;
@@ -730,7 +790,7 @@ export async function extractReferenceLibraryFromScript(
 7. scenes.generationPrompt 和 objects.generationPrompt 必须适合直接用于 AI 生图，描述清晰、具体、统一，并体现视觉风格：${settings.visualStyle}
 8. scenes 这里只提取“基础场景母版”，也就是同一空间在同一时间与氛围设定下可复用的环境本体；不要为它直接写剧情瞬间、人物动作或某个镜头事件
 9. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
-10. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版；后续系统会基于同一个场景母版自动扩成两个不同角度的场景资产，所以这里要先把空间描述写稳定、写完整
+10. 场景 prompt 要强调空间结构、时间、光线、氛围、材质和可复用性，把剧情场面抽象成稳定的环境母版；一个基础场景只需要输出一个可复用角度，所以这里要把空间描述写稳定、写完整
 11. scenes 的 summary 也必须描述空间用途和氛围，不要写剧情作用、事件经过或角色行为
 12. 物品 prompt 要强调材质、状态、摆放方式、特写形式
 13. 只输出 JSON，结构如下：
@@ -784,17 +844,18 @@ ${JSON.stringify(script, null, 2)}`
     )
   );
 
-  const scenes = expandSceneReferenceItems(
-    (payload.scenes ?? []).map((item, index) => ({
-      name: normalizeString(item.name, `场景${index + 1}`),
-      summary: normalizeString(item.summary, '核心场景设定'),
-      generationPrompt: normalizeSceneReferencePrompt(
+  const scenes = (payload.scenes ?? []).map((item, index) =>
+    createReferenceItem(
+      'scene',
+      normalizeString(item.name, `场景${index + 1}`),
+      normalizeString(item.summary, '核心场景设定'),
+      normalizeSceneReferencePrompt(
         item.generationPrompt,
         settings,
         normalizeString(item.name, `场景${index + 1}`)
-      )
-    })),
-    settings
+      ),
+      index
+    )
   );
 
   const objects = (payload.objects ?? []).map((item, index) =>
@@ -1004,6 +1065,16 @@ function formatScriptMarkdown(script: Omit<ScriptPackage, 'markdown'>): string {
         `- ${character.name}｜${character.identity}\n  外观：${character.visualTraits}\n  动机：${character.motivation}`
     )
     .join('\n');
+  const referenceAssets = script.referenceAssets
+    ? ([
+        ['角色资产', script.referenceAssets.characters.map((item) => `- ${item.name}｜${item.summary}`)],
+        ['场景资产', script.referenceAssets.scenes.map((item) => `- ${item.name}｜${item.summary}`)],
+        ['物品资产', script.referenceAssets.objects.map((item) => `- ${item.name}｜${item.summary}`)]
+      ] as const)
+        .filter(([, items]) => items.length)
+        .map(([label, items]) => `### ${label}\n${items.join('\n')}`)
+        .join('\n\n')
+    : '';
 
   const scenes = script.scenes
     .map(
@@ -1027,7 +1098,7 @@ function formatScriptMarkdown(script: Omit<ScriptPackage, 'markdown'>): string {
 ## 角色设定
 ${characters}
 
-## 分场剧本
+${referenceAssets ? `## 资产列表\n${referenceAssets}\n\n` : ''}## 分场剧本
 ${scenes}
 `;
 }
@@ -1232,15 +1303,13 @@ function buildAvailableStoryboardReferenceAssets(referenceLibrary: ProjectRefere
     ['scene', referenceLibrary.scenes],
     ['object', referenceLibrary.objects]
   ] as Array<[ReferenceAssetKind, ReferenceAssetItem[]]>).flatMap(([kind, items]) =>
-    items
-      .filter((item) => item.asset)
-      .map((item) => ({
-        id: buildStoryboardReferenceSelectionId(kind, item.id),
-        kind,
-        name: item.name.trim(),
-        summary: item.summary.trim(),
-        detail: buildStoryboardReferenceItemDetail(item, kind)
-      }))
+    items.map((item) => ({
+      id: buildStoryboardReferenceSelectionId(kind, item.id),
+      kind,
+      name: item.name.trim(),
+      summary: item.summary.trim(),
+      detail: buildStoryboardReferenceItemDetail(item, kind)
+    }))
   );
 }
 
@@ -1895,17 +1964,17 @@ ${sceneRules}
 20. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
 21. 如果一个镜头属于同一段连续对白、接话反打、双人来回或以对白反应为核心的连续切镜，必须额外输出 dialogueIdentifier；同一段连续对白里的镜头使用同一个 groupId，例如 scene-2-dialogue-1。非对白镜头或不承担连续对白切换功能的镜头，dialogueIdentifier 输出 null
 22. dialogueIdentifier 目前只需要输出 groupId；系统会根据镜头顺序自动补全 sequenceIndex、sequenceLength 和 flowRole。因此不要为同一段连续对白随意改 groupId，也不要把不同对白段混成同一个 groupId
-23. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头在参考帧/视频生成时要加载哪些参考资产。你必须结合下方“可用参考资产列表”中的名称、类别、摘要和细节判断该镜头实际要用哪些资产，不能只看 ID 猜测
-24. referenceAssetIds 只能使用“可用参考资产列表”里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
+23. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头后续需要哪些参考图。下方资产列表会在资产阶段统一生成成参考图；你现在要先根据名称、类别、摘要和细节选出这个镜头实际需要依赖的项，不能只看 ID 猜测
+24. referenceAssetIds 只能使用下方资产列表里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
 25. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
-26. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
+26. referenceAssetIds 至少要覆盖当前镜头的核心场景和主要出镜角色；关键道具在构图、动作或剧情推进中重要时也要补入
 27. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
 28. 第 1 轮只输出总镜头数和所有镜头概况，不要提前输出完整镜头字段；后续每一轮只输出当前指定的单个完整镜头 JSON，不能提前生成其他镜头，也不要重复已完成镜头
 
 剧本 JSON：
 ${JSON.stringify(script, null, 2)}
 
-可用参考资产列表：
+资产列表（资产阶段会统一生成参考图）：
 ${buildStoryboardReferenceLibraryPrompt(referenceLibrary)}`
     }
   ];
@@ -2431,9 +2500,9 @@ ${dialogueSequenceNotice}
 20. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
 21. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
 22. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-23. 你必须结合上文“可用参考资产列表”里的名称、摘要和细节判断这个镜头该用哪些资产，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义
+23. 你必须结合上文资产列表里的名称、摘要和细节判断这个镜头后续该用哪些参考图，并把对应 id 写进 referenceAssetIds；资产阶段会统一把这些资产生成成参考图，不能只看 id 猜测含义
 24. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
-25. 如果同一场景存在多个不同角度的场景资产，只要这些角度都能帮助锁定空间关系、机位方向或环境细节，可以同时选入 referenceAssetIds
+25. referenceAssetIds 至少要覆盖当前镜头的核心场景和主要出镜角色；关键道具在构图、动作或剧情推进中重要时也要补入
 26. 输出结构：
 {
   "shot": {
@@ -2642,6 +2711,32 @@ function buildScriptOutputSchema(settings: ProjectSettings): string {
       "motivation": "核心动机"
     }
   ],
+  "referenceAssets": {
+    "characters": [
+      {
+        "name": "角色名（年龄段）",
+        "summary": "该年龄段角色作用和外观摘要",
+        "genderHint": "简短的性别提示",
+        "ageHint": "简短的年龄阶段提示",
+        "ethnicityHint": "简短的人种/族裔提示",
+        "generationPrompt": "该年龄段的人物外貌特点提示词，只写稳定外观和身份特征"
+      }
+    ],
+    "scenes": [
+      {
+        "name": "场景名",
+        "summary": "空间用途和核心氛围",
+        "generationPrompt": "用于单角度空镜场景参考图生成的详细提示词"
+      }
+    ],
+    "objects": [
+      {
+        "name": "物品名",
+        "summary": "物品的重要性和状态",
+        "generationPrompt": "用于物品参考图生成的详细提示词"
+      }
+    ]
+  },
   "scenes": [
     {
       "sceneNumber": 1,
@@ -2695,8 +2790,13 @@ function buildScriptPromptContext(settings: ProjectSettings): string {
 10. 每场内部都要在 scriptBlocks 中体现起势、对抗、转折和收束，不能只写 2 到 3 条概括性交代
 11. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定；所有场次相加后的总时长必须落在上面的篇幅区间内
 12. 人物外观和身份要稳定，便于后续持续生成画面
-13. 如果输入素材很多，优先压缩、合并和聚焦主线，不要为了“写全”而突破当前篇幅上限
-14. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
+13. referenceAssets 是硬约束，必须在剧本阶段一次性输出完整资产列表；后续资产阶段会直接按这个列表生成，不会再单独向模型二次提取
+14. referenceAssets.characters 只保留核心角色，并直接写出稳定的人物外观生成提示；如果同一人物在剧本里以明显不同年龄段出场，必须拆成多个独立资产，name 要直接带上年龄段标记
+15. referenceAssets.characters 的 generationPrompt 只写稳定的人物外观与身份特征，重点描述年龄感、脸型五官、发型、体型、服装、气质、常态表情，不要写三视图、镜头运动或具体剧情动作
+16. referenceAssets.scenes 只提取可复用的基础场景母版，每个场景只输出一个角度；必须是空镜环境、无人物、无剧情动作，强调空间结构、时间、光线、材质和氛围
+17. referenceAssets.objects 只保留推动剧情的重要物件，prompt 要强调材质、状态、摆放方式和特写可读性
+18. 如果输入素材很多，优先压缩、合并和聚焦主线，不要为了“写全”而突破当前篇幅上限
+19. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
 }
 
 function buildScriptMessages(
@@ -2734,8 +2834,9 @@ ${retryNotice}
 7. 画外音只在必要时使用，避免重复解释画面已经表达的信息
 8. 如果原文结构混乱，可以重组场次顺序，但不要丢失关键剧情信息
 9. 如果原文缺少必要细节，可以补足角色动机、场景信息和情绪推进，使其成为完整可拍的短剧
-10. 必须严格遵守上面的篇幅范围，宁可压缩和合并，也不要生成超出当前篇幅约束的长剧本
-11. 返回结构必须严格符合以下 JSON：
+10. 必须在同一次输出里同步给出 referenceAssets 资产列表，供后续资产阶段直接生成
+11. 必须严格遵守上面的篇幅范围，宁可压缩和合并，也不要生成超出当前篇幅约束的长剧本
+12. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
 待优化文本：
@@ -2766,8 +2867,9 @@ ${retryNotice}
 6. 每场都必须写成连续剧本块 scriptBlocks，让动作、对白、反应和转折按顺序发生，不能退化成“场景介绍 + 几句台词”
 7. 场景信息要具体到地点、时间和动作状态，方便后续直接拆分镜
 8. 对白要短、准、狠，符合短剧节奏，尽量避免大段说明性台词
-9. 必须严格遵守上面的篇幅范围，宁可压缩和合并情节，也不要生成超出当前篇幅约束的长剧本
-10. 返回结构必须严格符合以下 JSON：
+9. 必须在同一次输出里同步给出 referenceAssets 资产列表，供后续资产阶段直接生成
+10. 必须严格遵守上面的篇幅范围，宁可压缩和合并情节，也不要生成超出当前篇幅约束的长剧本
+11. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
 输入素材：
@@ -2777,7 +2879,7 @@ ${sourceText}`
 }
 
 function validateGeneratedScriptAgainstLength(
-  script: Pick<ScriptPackage, 'scenes'>,
+  script: Pick<ScriptPackage, 'scenes' | 'referenceAssets'>,
   settings: ProjectSettings
 ): {
   ok: boolean;
@@ -2806,6 +2908,14 @@ function validateGeneratedScriptAgainstLength(
 
   if (totalDurationSeconds > target.maximumTotalDurationSeconds) {
     issues.push(`总时长过长：当前约 ${totalDurationSeconds} 秒，最多只能 ${target.maximumTotalDurationSeconds} 秒。`);
+  }
+
+  if (!script.referenceAssets?.characters.length) {
+    issues.push('referenceAssets.characters 不能为空，至少要有核心角色资产。');
+  }
+
+  if (!script.referenceAssets?.scenes.length) {
+    issues.push('referenceAssets.scenes 不能为空，至少要有核心场景资产。');
   }
 
   for (const scene of script.scenes) {
@@ -2869,6 +2979,26 @@ export async function generateScriptFromText(
         visualTraits?: string;
         motivation?: string;
       }>;
+      referenceAssets?: {
+        characters?: Array<{
+          name?: string;
+          summary?: string;
+          genderHint?: string;
+          ageHint?: string;
+          ethnicityHint?: string;
+          generationPrompt?: string;
+        }>;
+        scenes?: Array<{
+          name?: string;
+          summary?: string;
+          generationPrompt?: string;
+        }>;
+        objects?: Array<{
+          name?: string;
+          summary?: string;
+          generationPrompt?: string;
+        }>;
+      };
       scenes?: Array<{
         sceneNumber?: number;
         sceneHeading?: string;
@@ -2947,6 +3077,7 @@ export async function generateScriptFromText(
         visualTraits: normalizeString(character.visualTraits, '外观统一、利于连续生成'),
         motivation: normalizeString(character.motivation, '推动剧情发展')
       })),
+      referenceAssets: normalizeScriptReferenceAssets(payload.referenceAssets, settings),
       scenes
     };
     const validation = validateGeneratedScriptAgainstLength(scriptCore, settings);

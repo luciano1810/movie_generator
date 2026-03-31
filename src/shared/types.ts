@@ -155,6 +155,33 @@ export interface ScriptScene {
   scriptBlocks: ScriptSceneBlock[];
 }
 
+export interface ScriptReferenceAssetCharacter {
+  name: string;
+  summary: string;
+  genderHint: string;
+  ageHint: string;
+  ethnicityHint: string;
+  generationPrompt: string;
+}
+
+export interface ScriptReferenceAssetScene {
+  name: string;
+  summary: string;
+  generationPrompt: string;
+}
+
+export interface ScriptReferenceAssetObject {
+  name: string;
+  summary: string;
+  generationPrompt: string;
+}
+
+export interface ScriptReferenceAssetLibrary {
+  characters: ScriptReferenceAssetCharacter[];
+  scenes: ScriptReferenceAssetScene[];
+  objects: ScriptReferenceAssetObject[];
+}
+
 export interface ScriptPackage {
   title: string;
   tagline: string;
@@ -162,6 +189,7 @@ export interface ScriptPackage {
   styleNotes: string;
   characters: ScriptCharacter[];
   scenes: ScriptScene[];
+  referenceAssets?: ScriptReferenceAssetLibrary;
   markdown: string;
 }
 

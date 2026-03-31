@@ -635,6 +635,14 @@ function invalidateGeneratedMediaFromReferenceLibrary(project: Project): void {
   resetStage(project, 'edit');
 }
 
+function hasReferenceLibraryItems(referenceLibrary: Project['referenceLibrary']): boolean {
+  return (
+    referenceLibrary.characters.length > 0 ||
+    referenceLibrary.scenes.length > 0 ||
+    referenceLibrary.objects.length > 0
+  );
+}
+
 function resetDownstreamArtifacts(project: Project, stage: StageId): void {
   if (stage === 'script') {
     project.script = null;
@@ -656,8 +664,6 @@ function resetDownstreamArtifacts(project: Project, stage: StageId): void {
   }
 
   if (stage === 'assets') {
-    project.referenceLibrary = createEmptyReferenceLibrary();
-    project.artifacts.referenceLibraryJson = null;
     invalidateGeneratedMediaFromReferenceLibrary(project);
     return;
   }
@@ -2546,22 +2552,29 @@ async function runScriptStage(project: Project): Promise<void> {
     signal: getProjectAbortSignal(project.id)
   });
   project.script = script;
+  project.referenceLibrary = await extractReferenceLibraryFromScript(script, project.settings, {
+    signal: getProjectAbortSignal(project.id)
+  });
 
   const markdownFile = await writeProjectFile(project.id, 'script/script.md', script.markdown);
   const jsonFile = await writeProjectFile(project.id, 'script/script.json', JSON.stringify(script, null, 2));
 
   project.artifacts.scriptMarkdown = markdownFile.relativePath;
   project.artifacts.scriptJson = jsonFile.relativePath;
+  await persistReferenceLibrary(project);
 
-  appendLog(project, `剧本生成完成，共 ${script.scenes.length} 场戏。`);
+  appendLog(
+    project,
+    `剧本生成完成，共 ${script.scenes.length} 场戏；已同步生成资产列表：角色 ${project.referenceLibrary.characters.length} 个，场景 ${project.referenceLibrary.scenes.length} 个，物品 ${project.referenceLibrary.objects.length} 个。`
+  );
 }
 
 async function extractReferenceLibraryForProject(project: Project): Promise<void> {
   if (!project.script) {
-    throw new Error('请先生成剧本，再提取资产候选。');
+    throw new Error('请先生成剧本，再初始化资产列表。');
   }
 
-  appendLog(project, '开始提取角色、场景和关键物品候选。');
+  appendLog(project, '当前项目缺少资产列表，开始根据剧本初始化角色、场景和关键物品。');
   await saveProject(project);
 
   project.referenceLibrary = await extractReferenceLibraryFromScript(project.script, project.settings, {
@@ -2571,7 +2584,7 @@ async function extractReferenceLibraryForProject(project: Project): Promise<void
 
   appendLog(
     project,
-    `资产候选提取完成：角色 ${project.referenceLibrary.characters.length} 个，场景 ${project.referenceLibrary.scenes.length} 个，物品 ${project.referenceLibrary.objects.length} 个。`
+    `资产列表初始化完成：角色 ${project.referenceLibrary.characters.length} 个，场景 ${project.referenceLibrary.scenes.length} 个，物品 ${project.referenceLibrary.objects.length} 个。`
   );
 }
 
@@ -3096,7 +3109,15 @@ export async function selectLibraryAssetForReferenceItem(
 }
 
 async function runAssetStage(project: Project): Promise<void> {
-  await extractReferenceLibraryForProject(project);
+  if (!hasReferenceLibraryItems(project.referenceLibrary)) {
+    await extractReferenceLibraryForProject(project);
+  } else {
+    if (!project.artifacts.referenceLibraryJson) {
+      await persistReferenceLibrary(project);
+    }
+    appendLog(project, '开始根据剧本阶段生成的资产列表批量生成参考资产。');
+    await saveProject(project);
+  }
 
   const appSettings = getAppSettings();
   const referenceGroups: Array<[ReferenceAssetKind, ReferenceAssetItem[]]> = [
