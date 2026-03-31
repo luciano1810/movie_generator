@@ -17,7 +17,7 @@ export function resolveMaybeRelative(value: string | undefined, fallbackRelative
 export const appConfig = {
   cwd,
   port: Number(process.env.PORT ?? 3001),
-  host: process.env.HOST ?? '127.0.0.1',
+  host: process.env.HOST ?? '0.0.0.0',
   storageRoot: path.resolve(cwd, 'storage'),
   uiOrigin: process.env.UI_ORIGIN ?? 'http://127.0.0.1:5173',
   settingsFile: path.resolve(cwd, '.shortdrama-generator.settings.json')

@@ -249,8 +249,8 @@
   },
   "443": {
     "inputs": {
-      "width": 640,
-      "height": 960,
+      "width": "{{image_width}}",
+      "height": "{{image_height}}",
       "batch_size": 1
     },
     "class_type": "EmptyLatentImage",
