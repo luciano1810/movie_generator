@@ -7,6 +7,16 @@ interface FfmpegRunOptions {
   signal?: AbortSignal;
 }
 
+interface VideoDimensions {
+  width: number;
+  height: number;
+}
+
+interface StitchVideoOptions extends FfmpegRunOptions {
+  targetWidth?: number;
+  targetHeight?: number;
+}
+
 const DURATION_REGEX = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/;
 const AUDIO_SYNC_TOLERANCE_SECONDS = 0.05;
 
@@ -26,6 +36,31 @@ function parseDurationMatch(stderr: string): number | null {
   }
 
   return hours * 3600 + minutes * 60 + seconds;
+}
+
+function parseVideoDimensionsMatch(stderr: string): VideoDimensions | null {
+  const videoLine = stderr
+    .split(/\r?\n/)
+    .find((line) => line.includes('Video:'));
+
+  if (!videoLine) {
+    return null;
+  }
+
+  const matched = videoLine.match(/,\s*(\d{2,5})x(\d{2,5})(?:[\s,\[]|$)/);
+
+  if (!matched) {
+    return null;
+  }
+
+  const width = Number(matched[1]);
+  const height = Number(matched[2]);
+
+  if (![width, height].every(Number.isFinite)) {
+    return null;
+  }
+
+  return { width, height };
 }
 
 function createAbortError(): Error {
@@ -51,6 +86,14 @@ function buildAtempoFilterChain(tempo: number): string {
 
   filters.push(`atempo=${remainingTempo.toFixed(6)}`);
   return filters.join(',');
+}
+
+function buildVideoCropFilter(target: VideoDimensions): string {
+  return [
+    `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
+    `crop=${target.width}:${target.height}`,
+    'setsar=1'
+  ].join(',');
 }
 
 async function runFfmpeg(args: string[], options: FfmpegRunOptions = {}): Promise<void> {
@@ -194,17 +237,94 @@ async function hasAudioStream(inputPath: string, options: FfmpegRunOptions = {})
   });
 }
 
+async function getVideoDimensions(
+  inputPath: string,
+  options: FfmpegRunOptions = {}
+): Promise<VideoDimensions> {
+  const settings = getAppSettings();
+
+  if (!settings.ffmpeg.binaryPath) {
+    throw new Error('未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定可执行文件路径。');
+  }
+
+  if (options.signal?.aborted) {
+    throw createAbortError();
+  }
+
+  return await new Promise<VideoDimensions>((resolve, reject) => {
+    const child = spawn(settings.ffmpeg.binaryPath, ['-hide_banner', '-i', inputPath]);
+    let aborted = false;
+    let stderr = '';
+
+    const handleAbort = () => {
+      aborted = true;
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (!child.killed) {
+          child.kill('SIGKILL');
+        }
+      }, 1000).unref();
+    };
+
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+
+    child.on('error', reject);
+    child.on('close', () => {
+      options.signal?.removeEventListener('abort', handleAbort);
+
+      if (aborted) {
+        reject(createAbortError());
+        return;
+      }
+
+      const dimensions = parseVideoDimensionsMatch(stderr);
+      if (!dimensions) {
+        reject(new Error(`无法读取视频尺寸: ${inputPath}`));
+        return;
+      }
+
+      resolve(dimensions);
+    });
+  });
+}
+
+async function resolveTargetVideoDimensions(
+  videoPaths: string[],
+  options: StitchVideoOptions
+): Promise<VideoDimensions> {
+  if (options.targetWidth && options.targetHeight) {
+    return {
+      width: Math.max(2, Math.round(options.targetWidth)),
+      height: Math.max(2, Math.round(options.targetHeight))
+    };
+  }
+
+  const dimensions = await Promise.all(videoPaths.map((videoPath) => getVideoDimensions(videoPath, options)));
+
+  return dimensions.reduce<VideoDimensions>(
+    (target, current) => ({
+      width: Math.max(target.width, current.width),
+      height: Math.max(target.height, current.height)
+    }),
+    { width: 2, height: 2 }
+  );
+}
+
 async function normalizeSegmentsWithAudio(
   videoPaths: string[],
   audioPaths: Array<string | null>,
   outputPath: string,
   fps: number,
-  options: FfmpegRunOptions = {}
+  options: StitchVideoOptions = {}
 ): Promise<string[]> {
   const segmentsDir = path.join(path.dirname(outputPath), '.segments');
   await mkdir(segmentsDir, { recursive: true });
 
   const prepared: string[] = [];
+  const targetDimensions = await resolveTargetVideoDimensions(videoPaths, options);
 
   for (let index = 0; index < videoPaths.length; index += 1) {
     const videoPath = videoPaths[index];
@@ -215,6 +335,7 @@ async function normalizeSegmentsWithAudio(
     let targetDurationSeconds: number | null = null;
     let audioMap = '';
     let sourceAudioFilter = '[0:a]aresample=48000';
+    const videoFilters = [buildVideoCropFilter(targetDimensions)];
 
     if (audioPath) {
       const [videoDurationSeconds, audioDurationSeconds] = await Promise.all([
@@ -224,7 +345,7 @@ async function normalizeSegmentsWithAudio(
 
       if (videoDurationSeconds > 0 && audioDurationSeconds > videoDurationSeconds + AUDIO_SYNC_TOLERANCE_SECONDS) {
         const stretchRatio = audioDurationSeconds / videoDurationSeconds;
-        args.push('-vf', `setpts=${stretchRatio.toFixed(6)}*PTS`);
+        videoFilters.unshift(`setpts=${stretchRatio.toFixed(6)}*PTS`);
         sourceAudioFilter = `${sourceAudioFilter},${buildAtempoFilterChain(1 / stretchRatio)}`;
         targetDurationSeconds = audioDurationSeconds;
       }
@@ -247,6 +368,7 @@ async function normalizeSegmentsWithAudio(
       audioMap = '1:a:0';
     }
 
+    args.push('-vf', videoFilters.join(','));
     args.push('-map', '0:v:0', '-map', audioMap);
     args.push(
       '-c:v',
@@ -356,7 +478,7 @@ export async function stitchVideos(
   outputPath: string,
   fps: number,
   audioPaths: Array<string | null> = [],
-  options: FfmpegRunOptions = {}
+  options: StitchVideoOptions = {}
 ): Promise<void> {
   if (!videoPaths.length) {
     throw new Error('没有可用于拼接的视频片段。');

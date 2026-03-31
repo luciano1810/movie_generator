@@ -3536,7 +3536,11 @@ async function generateVideoAssetForShot(
     const outputPath = resolveProjectPath(project.id, outputRelativePath);
     appendLog(project, `镜头 ${shot.title} 分段生成完成，开始拼接 ${segmentCount} 段视频。`);
     await saveProject(project);
-    await stitchVideos(segmentVideoPaths, outputPath, project.settings.fps, [], { signal });
+    await stitchVideos(segmentVideoPaths, outputPath, project.settings.fps, [], {
+      signal,
+      targetWidth: project.settings.videoWidth,
+      targetHeight: project.settings.videoHeight
+    });
     savedVideoRelativePath = toStorageRelative(outputPath);
   }
 
@@ -3784,7 +3788,9 @@ async function runEditStage(project: Project): Promise<void> {
     project.settings.fps,
     orderedAudioPaths,
     {
-      signal
+      signal,
+      targetWidth: project.settings.videoWidth,
+      targetHeight: project.settings.videoHeight
     }
   );
 
