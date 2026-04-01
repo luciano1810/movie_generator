@@ -16,6 +16,7 @@ import type {
 import {
   DEFAULT_SETTINGS,
   STORY_LENGTH_LABELS,
+  filterReferenceLibraryForShot,
   getStoryboardShotFallbackDurationSeconds,
   getStoryLengthReference,
   normalizeStoryboardDialogueIdentifier,
@@ -1508,6 +1509,44 @@ function buildStoryboardReferenceLibraryPrompt(referenceLibrary?: ProjectReferen
   return sections.join('\n\n');
 }
 
+function buildStoryboardFallbackReferenceAssetIds(
+  shot: StoryboardShot,
+  script: ScriptPackage,
+  referenceLibrary?: ProjectReferenceLibrary
+): string[] {
+  if (!referenceLibrary) {
+    return [];
+  }
+
+  const matchedReferenceLibrary = filterReferenceLibraryForShot(referenceLibrary, shot, script);
+
+  return [
+    ...matchedReferenceLibrary.characters.map((item) => buildStoryboardReferenceSelectionId('character', item.id)),
+    ...matchedReferenceLibrary.scenes.map((item) => buildStoryboardReferenceSelectionId('scene', item.id)),
+    ...matchedReferenceLibrary.objects.map((item) => buildStoryboardReferenceSelectionId('object', item.id))
+  ];
+}
+
+function applyStoryboardReferenceAssetFallback(
+  shot: StoryboardShot,
+  script: ScriptPackage,
+  referenceLibrary?: ProjectReferenceLibrary
+): StoryboardShot {
+  if (shot.referenceAssetIds.length) {
+    return shot;
+  }
+
+  const fallbackReferenceAssetIds = buildStoryboardFallbackReferenceAssetIds(shot, script, referenceLibrary);
+  if (!fallbackReferenceAssetIds.length) {
+    return shot;
+  }
+
+  return {
+    ...shot,
+    referenceAssetIds: [...new Set(fallbackReferenceAssetIds)]
+  };
+}
+
 function normalizeStoryboardReferenceAssetIds(
   value: unknown,
   availableReferenceAssetIds?: Set<string>
@@ -2808,8 +2847,10 @@ async function generateStoryboardShot(
       continue;
     }
 
+    const resolvedShot = applyStoryboardReferenceAssetFallback(normalizedShot, script, options?.referenceLibrary);
+
     const validation = validateStoryboardShotAgainstPlan(
-      normalizedShot,
+      resolvedShot,
       shotPlan,
       settings,
       availableReferenceAssetIds
@@ -2818,7 +2859,7 @@ async function generateStoryboardShot(
     if (validation.ok) {
       return {
         requestPrompt,
-        shot: normalizedShot
+        shot: resolvedShot
       };
     }
 
