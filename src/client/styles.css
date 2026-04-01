@@ -1833,6 +1833,17 @@ select:focus {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  align-items: stretch;
+}
+
+.final-video-preview {
+  width: 100%;
+  max-width: 100%;
+  max-height: min(72vh, 960px);
+  display: block;
+  border-radius: 18px;
+  background: #000;
+  object-fit: contain;
 }
 
 .final-video-actions {

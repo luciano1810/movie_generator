@@ -2727,6 +2727,7 @@ export function App() {
     const requiresSegmentedTailFrame = shot.durationSeconds > effectiveMaxVideoSegmentDurationSeconds;
     const supportsLastFrameGeneration =
       shot.useLastFrameReference || requiresSegmentedTailFrame || Boolean(lastImageAsset) || lastImageVersions.length > 0;
+    const showTailFramePanel = group.shots.length > 1;
     const groupCardContext =
       group.shots.length > 1 ? `长镜头第 ${groupIndex + 1}/${group.shots.length} 段 · ${formatShotBrowserGroupRange(group)}` : null;
 
@@ -2863,16 +2864,18 @@ export function App() {
             placeholder="输入这个镜头的起始参考帧 Prompt"
           />
         </div>
-        <div className="prompt-block">
-          <h5>结束参考帧策略</h5>
-          <p>
-            {shot.useLastFrameReference
-              ? '该镜头会额外生成结束参考帧，并自动注入后续视频工作流。'
-              : requiresSegmentedTailFrame
-                ? `该镜头时长超过单段上限 ${effectiveMaxVideoSegmentDurationSeconds} 秒；系统会为长镜头分段生成额外补尾帧。`
-                : '该镜头仅生成起始参考帧，结束画面由视频工作流自然收束。'}
-          </p>
-        </div>
+        {showTailFramePanel ? (
+          <div className="prompt-block">
+            <h5>结束参考帧策略</h5>
+            <p>
+              {shot.useLastFrameReference
+                ? '该镜头会额外生成结束参考帧，并自动注入后续视频工作流。'
+                : requiresSegmentedTailFrame
+                  ? `该镜头时长超过单段上限 ${effectiveMaxVideoSegmentDurationSeconds} 秒；系统会为长镜头分段生成额外补尾帧。`
+                  : '该镜头仅生成起始参考帧，结束画面由视频工作流自然收束。'}
+            </p>
+          </div>
+        ) : null}
         <div className="prompt-block">
           <h5>长镜头承接</h5>
           <p>
@@ -2940,42 +2943,44 @@ export function App() {
               <small>当前镜头还没有起始参考帧图片。</small>
             )}
           </div>
-          <div className="asset-box">
-            <span>结束参考帧</span>
-            {lastImageAsset ? (
-              <>
-                <img src={assetUrl(lastImageAsset.relativePath)} alt={`${shot.title} 尾帧`} />
-                <a href={assetUrl(lastImageAsset.relativePath)} target="_blank" rel="noreferrer">
-                  打开尾帧
-                </a>
+          {showTailFramePanel ? (
+            <div className="asset-box">
+              <span>结束参考帧</span>
+              {lastImageAsset ? (
+                <>
+                  <img src={assetUrl(lastImageAsset.relativePath)} alt={`${shot.title} 尾帧`} />
+                  <a href={assetUrl(lastImageAsset.relativePath)} target="_blank" rel="noreferrer">
+                    打开尾帧
+                  </a>
+                  <small>
+                    {lastImageVersions.length > 1
+                      ? `已保留 ${lastImageVersions.length} 个尾帧版本`
+                      : `生成于 ${formatTime(lastImageAsset.createdAt)}`}
+                  </small>
+                </>
+              ) : (
                 <small>
-                  {lastImageVersions.length > 1
-                    ? `已保留 ${lastImageVersions.length} 个尾帧版本`
-                    : `生成于 ${formatTime(lastImageAsset.createdAt)}`}
+                  {supportsLastFrameGeneration ? '当前镜头还没有结束参考帧图片。' : '当前镜头暂不需要独立结束参考帧。'}
                 </small>
-              </>
-            ) : (
-              <small>
-                {supportsLastFrameGeneration ? '当前镜头还没有结束参考帧图片。' : '当前镜头暂不需要独立结束参考帧。'}
-              </small>
-            )}
-            {supportsLastFrameGeneration ? (
-              <button
-                className="button ghost mini-button"
-                disabled={
-                  Boolean(project.runState.isRunning) ||
-                  lastImageGeneratePending ||
-                  imagePromptPending ||
-                  lastFramePromptDirty ||
-                  (shot.useLastFrameReference && !lastFramePromptValue.trim())
-                }
-                onClick={() => void handleGenerateShotLastImage(shot.id)}
-                type="button"
-              >
-                {lastImageGeneratePending ? '重生中...' : lastImageAsset ? '重新生成尾帧' : '生成尾帧'}
-              </button>
-            ) : null}
-          </div>
+              )}
+              {supportsLastFrameGeneration ? (
+                <button
+                  className="button ghost mini-button"
+                  disabled={
+                    Boolean(project.runState.isRunning) ||
+                    lastImageGeneratePending ||
+                    imagePromptPending ||
+                    lastFramePromptDirty ||
+                    (shot.useLastFrameReference && !lastFramePromptValue.trim())
+                  }
+                  onClick={() => void handleGenerateShotLastImage(shot.id)}
+                  type="button"
+                >
+                  {lastImageGeneratePending ? '重生中...' : lastImageAsset ? '重新生成尾帧' : '生成尾帧'}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         <button
           className="button secondary"
@@ -4229,7 +4234,7 @@ export function App() {
                     </div>
                     {project.assets.finalVideo ? (
                       <div className="final-video">
-                        <video src={assetUrl(project.assets.finalVideo.relativePath)} controls playsInline />
+                        <video className="final-video-preview" src={assetUrl(project.assets.finalVideo.relativePath)} controls playsInline />
                         <div className="final-video-actions">
                           <a className="button secondary button-link" href={finalVideoDownloadUrl(project.id)}>
                             下载视频
