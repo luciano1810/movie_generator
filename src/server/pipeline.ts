@@ -1040,6 +1040,15 @@ function buildVideoShotDirectivePromptWithDuration(
     .join('\n');
 }
 
+function buildVideoSingleTakeGuardPrompt(): string {
+  return [
+    '单镜头硬约束：',
+    '- 整段视频必须始终保持为同一个连续镜头，只允许通过人物运动和镜头内运镜推进画面，不允许出现任何形式的镜头切换。',
+    '- 不要切到另一个机位、另一个景别、另一个构图、另一个时间点或另一处空间；不要插入反打、插镜、特写补切、蒙太奇、闪回、黑场、分屏或重新起镜。',
+    '- 即使需要为下一镜或下一段预留衔接，也只能通过当前单镜头里的动作、视线、节奏和运镜自然收束，不能直接把下一镜画面生成出来。'
+  ].join('\n');
+}
+
 function buildVideoContinuityPrompt(): string {
   return [
     '连贯性要求：',
@@ -1286,6 +1295,7 @@ function buildMergedVideoPrompt(
   const parts = [
     buildVideoShotDirectivePromptWithDuration(shot, options.durationSeconds ?? shot.durationSeconds),
     videoPrompt,
+    buildVideoSingleTakeGuardPrompt(),
     buildVideoContinuityPrompt(),
     buildVideoQualityGuardPrompt(hasDialogueContent)
   ];
@@ -1347,14 +1357,18 @@ function buildMergedVideoPrompt(
   return parts.filter(Boolean).join('\n\n');
 }
 
+function isGenericCutTransitionHint(transitionHint: string): boolean {
+  return /^(cut|切|硬切|直接切|普通切|切镜|切换|转场)$/i.test(transitionHint.trim());
+}
+
 function appendTransitionHint(prompt: string, shot: Project['storyboard'][number]): string {
   const transitionHint = sanitizeVideoPromptText(shot.transitionHint);
 
-  if (!transitionHint) {
+  if (!transitionHint || isGenericCutTransitionHint(transitionHint)) {
     return prompt;
   }
 
-  return `${prompt}\n\n镜头衔接要求：${transitionHint}。优先通过动作延续、视线延续、空间方向延续或情绪延续自然进入下一镜，避免突兀跳切。`;
+  return `${prompt}\n\n段尾衔接预留：${transitionHint}。这只用于控制当前单镜头结尾如何给下一镜或下一段留出动作、视线、空间方向和情绪上的承接空间；不允许在当前视频里真正切镜、换机位、换景别、插入反打或提前展示下一镜画面。`;
 }
 
 function getVideoWorkflowPrompt(
@@ -1378,7 +1392,7 @@ function getVideoWorkflowPrompt(
 
 function buildVideoNegativePrompt(baseNegativePrompt: string): string {
   const extraNegativePrompt =
-    'subtitle, text overlay, logo, identity drift, face drift, temporal inconsistency, flickering, duplicate person, extra limbs, wrong mouth movement';
+    'subtitle, text overlay, logo, identity drift, face drift, temporal inconsistency, flickering, duplicate person, extra limbs, wrong mouth movement, camera cut, shot change, jump cut, cutaway, montage, split screen, flashback';
 
   return baseNegativePrompt.trim() ? `${baseNegativePrompt}, ${extraNegativePrompt}` : extraNegativePrompt;
 }
@@ -1975,6 +1989,35 @@ function isZimageTextToImageWorkflowPath(workflowPath: string | undefined): bool
   return path.basename(workflowPath).toLowerCase() === ZIMAGE_TEXT_TO_IMAGE_WORKFLOW_BASENAME;
 }
 
+function resolveReferenceCountWorkflowPath(workflowPath: string | undefined, referenceImageCount: number): string {
+  if (!workflowPath?.trim() || referenceImageCount >= 3 || referenceImageCount <= 0) {
+    return workflowPath ?? '';
+  }
+
+  const targetSuffix = `${Math.max(1, referenceImageCount)}ref`;
+  const dirname = path.dirname(workflowPath);
+  const basename = path.basename(workflowPath);
+  const candidates = new Set<string>();
+  const numberedVariantBasename = basename.replace(
+    /([_-])?[123]ref(?=\.template\.json$)/i,
+    (_match, separator: string | undefined) => `${separator ?? '-'}${targetSuffix}`
+  );
+
+  if (numberedVariantBasename !== basename) {
+    candidates.add(path.join(dirname, numberedVariantBasename));
+  }
+
+  candidates.add(path.join(dirname, basename.replace(/\.template\.json$/i, `-${targetSuffix}.template.json`)));
+
+  for (const candidate of candidates) {
+    if (candidate !== workflowPath && existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return workflowPath;
+}
+
 function resolveWorkflowImageDimensions(
   workflowPath: string | undefined,
   width: number,
@@ -2172,12 +2215,14 @@ async function runStoryboardImageWorkflowForShot(
     );
     await saveProject(project);
 
+    const effectiveWorkflowPath = resolveReferenceCountWorkflowPath(workflowPath, effectiveInputImages.length);
+
     const outputFiles = await runProjectComfyWorkflow(
       project,
-      workflowPath,
+      effectiveWorkflowPath,
       buildComfyVariables(project, shot, appSettings, 'storyboard_image', {
         frameKind,
-        workflowPath,
+        workflowPath: effectiveWorkflowPath,
         outputPrefix: `${project.id}_${shot.id}_${frameKind}_storyboard_image_pass_${passIndex + 1}`,
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: buildStoryboardReferencePassVariables(
@@ -2247,6 +2292,34 @@ function getShotVideoSegmentDurations(project: Project, shot: Project['storyboar
   return getVideoSegmentDurations(project, shot.durationSeconds);
 }
 
+function buildAutoLastFramePrompt(shot: Project['storyboard'][number]): string {
+  const camera = sanitizeVideoPromptText(shot.camera);
+  const composition = sanitizeVideoPromptText(shot.composition);
+  const videoPrompt = sanitizeVideoPromptText(shot.videoPrompt);
+  const detailLines = [
+    `- 镜头标题与作用：${shot.title.trim()}，${shot.purpose.trim()}`,
+    camera ? `- 延续同一镜头语言的景别与机位：${camera}` : '',
+    composition ? `- 延续同一镜头语言的构图与主体：${composition}` : '',
+    videoPrompt ? `- 根据整段动作描述推导镜头结束瞬间：${videoPrompt}` : '',
+    '- 定格要求：这是整段视频最后一帧的静态画面，要明确主体最终位置、朝向、视线方向、眼神焦点、眼神状态、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次。',
+    '- 画面要求：必须保持同一场景、同一机位逻辑和同一镜头语言，只表现动作自然收束后的最终瞬间；不要切镜、换景别、换构图、换空间，也不要把下一镜画面提前生成出来。'
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return `结束参考帧画面要求：\n${detailLines}`;
+}
+
+function resolveEffectiveLastFramePrompt(shot: Project['storyboard'][number], requireTerminalFrame: boolean): string {
+  const explicitPrompt = sanitizeVideoPromptText(shot.lastFramePrompt);
+
+  if (explicitPrompt) {
+    return explicitPrompt;
+  }
+
+  return requireTerminalFrame ? buildAutoLastFramePrompt(shot) : '';
+}
+
 function requiresVideoStageFfmpeg(project: Project): boolean {
   return project.storyboard.some((shot) => getShotVideoSegmentDurations(project, shot).length > 1);
 }
@@ -2258,14 +2331,14 @@ function buildSegmentVideoPrompt(
   segmentIndex: number,
   segmentCount: number,
   segmentDurationSeconds: number,
-  useLastFrameReference: boolean
+  terminalFramePrompt: string
 ): string {
   const basePrompt = getVideoWorkflowPrompt(project, shot, appSettings, {
     durationSeconds: segmentDurationSeconds
   });
-  const lastFramePrompt = sanitizeVideoPromptText(shot.lastFramePrompt);
+  const lastFramePrompt = sanitizeVideoPromptText(terminalFramePrompt);
 
-  if (!useLastFrameReference) {
+  if (!lastFramePrompt) {
     return basePrompt;
   }
 
@@ -2279,7 +2352,7 @@ function buildSegmentVideoPrompt(
     return `${basePrompt}\n\n本段是长镜头的收尾段，动作、表演和运镜必须自然减速并收束到以下尾帧描述，不要突然停帧或骤然切换：${lastFramePrompt}`;
   }
 
-  return `${basePrompt}\n\n本段是长镜头的第 ${segmentIndex + 1}/${segmentCount} 段，保持人物、机位、动作、表演与光线连续，让动作自然延续并留出下一段承接空间，暂时不要提前收束到最终尾帧，也不要突然切断当前动作。`;
+  return `${basePrompt}\n\n本段是长镜头的第 ${segmentIndex + 1}/${segmentCount} 段，整段最终尾帧已单独锁定；当前只需要保持人物、机位、动作、表演与光线连续，让动作自然延续并留出下一段承接空间，暂时不要提前收束到最终尾帧，也不要突然切断当前动作。`;
 }
 
 function pickOutputFile(files: ComfyOutputFile[], kind: 'image' | 'video' | 'audio'): ComfyOutputFile {
@@ -2651,9 +2724,9 @@ async function generateReferenceAssetForProject(
       kind === 'character' && shouldUseReferenceImage && existsSync(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
         ? await uploadImageToComfy(DEFAULT_CHARACTER_POSE_REFERENCE_PATH, { signal })
         : '';
-    const editImage1 = uploadedReferenceImage;
-    const editImage2 = uploadedCharacterPoseImage || uploadedReferenceImage;
-    const editImage3 = uploadedCharacterPoseImage || uploadedReferenceImage;
+    const referenceImages = [uploadedReferenceImage, uploadedCharacterPoseImage].filter(Boolean);
+    const referenceImageVariables = buildEditImageSlotVariables(referenceImages);
+    const resolvedWorkflowPath = resolveReferenceCountWorkflowPath(workflow.workflowPath, referenceImages.length);
     const workflowPrompt =
       kind === 'character'
         ? buildCharacterAssetWorkflowPrompt(
@@ -2665,14 +2738,14 @@ async function generateReferenceAssetForProject(
           )
         : generationPrompt;
     const resolvedImageDimensions = resolveWorkflowImageDimensions(
-      workflow.workflowPath,
+      resolvedWorkflowPath,
       project.settings.imageWidth,
       project.settings.imageHeight
     );
 
     const outputFiles = await runProjectComfyWorkflow(
       project,
-      workflow.workflowPath,
+      resolvedWorkflowPath,
       {
         prompt: workflowPrompt,
         negative_prompt: project.settings.negativePrompt,
@@ -2685,10 +2758,8 @@ async function generateReferenceAssetForProject(
         fps: project.settings.fps,
         input_image: uploadedReferenceImage,
         reference_image: uploadedReferenceImage,
-        reference_images: [uploadedReferenceImage, uploadedCharacterPoseImage].filter(Boolean),
-        edit_image_1: editImage1,
-        edit_image_2: editImage2,
-        edit_image_3: editImage3,
+        reference_images: referenceImages,
+        ...referenceImageVariables,
         scene_number: 0,
         shot_number: 0,
         seed: Math.floor(Math.random() * 9_000_000_000)
@@ -3313,11 +3384,21 @@ async function generateReferenceFrameAssetForShot(
   appSettings: AppSettings,
   selectedWorkflow: SelectedImageStageWorkflow,
   generationReferenceInputs: GenerationReferenceInputs,
-  frameKind: ReferenceFrameKind
+  frameKind: ReferenceFrameKind,
+  options: {
+    promptOverride?: string;
+  } = {}
 ): Promise<GeneratedAsset> {
   const signal = getProjectAbortSignal(project.id);
+  const effectiveShot =
+    frameKind === 'start' || !options.promptOverride
+      ? shot
+      : {
+          ...shot,
+          lastFramePrompt: options.promptOverride
+        };
   const generationPrompt = appendReferenceContext(
-    buildReferenceFrameWorkflowPrompt(project, shot, selectedWorkflow.type, frameKind),
+    buildReferenceFrameWorkflowPrompt(project, effectiveShot, selectedWorkflow.type, frameKind),
     generationReferenceInputs.referenceContext
   );
   let buffer: Buffer;
@@ -3326,7 +3407,7 @@ async function generateReferenceFrameAssetForShot(
   if (selectedWorkflow.type === 'storyboard_image' || selectedWorkflow.type === 'image_edit') {
     const result = await runStoryboardImageWorkflowForShot(
       project,
-      shot,
+      effectiveShot,
       appSettings,
       selectedWorkflow.workflowPath,
       generationReferenceInputs,
@@ -3346,7 +3427,7 @@ async function generateReferenceFrameAssetForShot(
     const outputFiles = await runProjectComfyWorkflow(
       project,
       selectedWorkflow.workflowPath,
-      buildComfyVariables(project, shot, appSettings, selectedWorkflow.type, {
+      buildComfyVariables(project, effectiveShot, appSettings, selectedWorkflow.type, {
         frameKind,
         workflowPath: selectedWorkflow.workflowPath,
         referenceContext: generationReferenceInputs.referenceContext,
@@ -3381,20 +3462,9 @@ async function generateVideoAssetForShot(
 ): Promise<GeneratedAsset> {
   const signal = getProjectAbortSignal(project.id);
   const imageAsset = getActiveShotAsset(project, 'images', shot.id);
-  const lastImageAsset = shot.useLastFrameReference ? getActiveShotAsset(project, 'lastImages', shot.id) : null;
 
   if (!imageAsset) {
     throw new Error(`镜头 ${shot.id} 缺少起始参考帧，无法生成视频。`);
-  }
-
-  if (shot.useLastFrameReference && !lastImageAsset) {
-    throw new Error(`镜头 ${shot.id} 需要结束参考帧，但当前未生成结束参考帧图片。`);
-  }
-
-  const workflowPath = resolveVideoWorkflowPath(appSettings, Boolean(lastImageAsset));
-
-  if (!workflowPath) {
-    throw new Error('系统设置中未配置当前镜头可用的视频工作流路径，请检查首帧视频和首尾帧视频设定。');
   }
 
   const preparedTtsAudio = await ensureShotTtsAudio(project, shot, appSettings, ttsUploadCache);
@@ -3403,9 +3473,41 @@ async function generateVideoAssetForShot(
   const segmentDurations = getVideoSegmentDurations(project, effectiveDurationSeconds);
   const segmentCount = segmentDurations.length;
   const shotSeed = Math.floor(Math.random() * 9_000_000_000);
+  const requireTerminalFrame = shot.useLastFrameReference || segmentCount > 1;
+  const effectiveLastFramePrompt = resolveEffectiveLastFramePrompt(shot, requireTerminalFrame);
+  let lastImageAsset = requireTerminalFrame ? getActiveShotAsset(project, 'lastImages', shot.id) : null;
 
   if (segmentCount > 1 && !appSettings.ffmpeg.binaryPath) {
     throw new Error('当前镜头按“原镜头时长与语音时长中的较大值”计算后需要长镜头分段生成，但未找到 ffmpeg。请安装 ffmpeg 或通过 FFMPEG_PATH 指定路径。');
+  }
+
+  if (requireTerminalFrame && !lastImageAsset) {
+    const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
+    appendLog(
+      project,
+      segmentCount > 1
+        ? `镜头 ${shot.title} 需要分段生成，先为整段视频补生成结束参考帧，再按“首帧续接、尾段收束”的方式依次生成各段视频。`
+        : `镜头 ${shot.title} 需要结束参考帧，开始补生成结束参考帧。`
+    );
+    await saveProject(project);
+
+    const endFrameAsset = await generateReferenceFrameAssetForShot(
+      project,
+      shot,
+      appSettings,
+      selectedWorkflow,
+      generationReferenceInputs,
+      'end',
+      {
+        promptOverride: effectiveLastFramePrompt
+      }
+    );
+    setActiveShotAsset(project, 'lastImages', shot.id, endFrameAsset);
+    lastImageAsset = endFrameAsset;
+  }
+
+  if (requireTerminalFrame && !lastImageAsset) {
+    throw new Error(`镜头 ${shot.id} 需要结束参考帧，但当前未生成结束参考帧图片。`);
   }
 
   if (preparedTtsAudio.asset) {
@@ -3439,7 +3541,7 @@ async function generateVideoAssetForShot(
     appendLog(
       project,
       `镜头 ${shot.title} 为长镜头，将拆成 ${segmentCount} 段生成（总时长 ${effectiveDurationSeconds}s，每段最长 ${getMaxVideoSegmentDurationSeconds(project)}s）${
-        lastImageAsset ? '，并在最后一段使用结束参考帧收束画面。' : '。'
+        lastImageAsset ? '，最后一段会使用整段结束参考帧收束画面。' : '。'
       }`
     );
     await saveProject(project);
@@ -3457,6 +3559,12 @@ async function generateVideoAssetForShot(
     const segmentDuration = segmentDurations[segmentIndex];
     const uploadedImage = await uploadImageToComfy(currentInputImagePath, { signal });
     const isFinalSegment = segmentIndex === segmentCount - 1;
+    const useLastFrameReferenceForSegment = isFinalSegment && Boolean(targetLastFrameImagePath);
+    const workflowPath = resolveVideoWorkflowPath(appSettings, useLastFrameReferenceForSegment);
+
+    if (!workflowPath) {
+      throw new Error('系统设置中未配置当前分段可用的视频工作流路径，请检查首帧视频和首尾帧视频设定。');
+    }
 
     if (isFinalSegment && targetLastFrameImagePath && !uploadedTargetLastFrameImage) {
       uploadedTargetLastFrameImage = await uploadImageToComfy(targetLastFrameImagePath, { signal });
@@ -3469,7 +3577,7 @@ async function generateVideoAssetForShot(
         durationSeconds: segmentDuration,
         inputImage: uploadedImage,
         lastFrameImage: isFinalSegment ? uploadedTargetLastFrameImage : '',
-        lastFramePrompt: shot.useLastFrameReference ? shot.lastFramePrompt : '',
+        lastFramePrompt: useLastFrameReferenceForSegment ? effectiveLastFramePrompt : '',
         outputPrefix:
           segmentCount === 1
             ? `${project.id}_${shot.id}_video`
@@ -3481,7 +3589,7 @@ async function generateVideoAssetForShot(
           segmentIndex,
           segmentCount,
           segmentDuration,
-          Boolean(targetLastFrameImagePath)
+          useLastFrameReferenceForSegment ? effectiveLastFramePrompt : ''
         ),
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables,

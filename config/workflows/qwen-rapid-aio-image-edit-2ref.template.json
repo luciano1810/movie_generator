@@ -1,0 +1,178 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "Qwen-Rapid-NSFW-v23_Q4_K.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Load Qwen Rapid GGUF UNet"
+    }
+  },
+  "2": {
+    "inputs": {
+      "seed": "{{seed}}",
+      "steps": 4,
+      "cfg": 1,
+      "sampler_name": "sa_solver",
+      "scheduler": "beta",
+      "denoise": 1,
+      "model": [
+        "1",
+        0
+      ],
+      "positive": [
+        "3",
+        0
+      ],
+      "negative": [
+        "4",
+        0
+      ],
+      "latent_image": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "Qwen Rapid Sampler"
+    }
+  },
+  "3": {
+    "inputs": {
+      "prompt": "{{prompt}}",
+      "clip": [
+        "11",
+        0
+      ],
+      "vae": [
+        "12",
+        0
+      ],
+      "image1": [
+        "7",
+        0
+      ],
+      "image2": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "Qwen Rapid Positive"
+    }
+  },
+  "4": {
+    "inputs": {
+      "prompt": "{{negative_prompt}}",
+      "clip": [
+        "11",
+        0
+      ],
+      "vae": [
+        "12",
+        0
+      ],
+      "image1": [
+        "7",
+        0
+      ],
+      "image2": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "Qwen Rapid Negative"
+    }
+  },
+  "5": {
+    "inputs": {
+      "samples": [
+        "2",
+        0
+      ],
+      "vae": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "Decode Image"
+    }
+  },
+  "7": {
+    "inputs": {
+      "image": "{{edit_image_1}}"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Primary Edit Image"
+    }
+  },
+  "8": {
+    "inputs": {
+      "image": "{{edit_image_2}}"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Secondary Edit Image"
+    }
+  },
+  "9": {
+    "inputs": {
+      "width": "{{image_width}}",
+      "height": "{{image_height}}",
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Final Image Size"
+    }
+  },
+  "10": {
+    "inputs": {
+      "filename_prefix": "{{output_prefix}}",
+      "images": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "13": {
+    "inputs": {
+      "image": "{{edit_image_3}}"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Tertiary Edit Image"
+    }
+  },
+  "11": {
+    "inputs": {
+      "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load Qwen Image CLIP"
+    }
+  },
+  "12": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load Qwen Image VAE"
+    }
+  }
+}

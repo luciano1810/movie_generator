@@ -178,11 +178,13 @@ npm start
 
 `config/workflows/qwen-rapid-aio-image-edit.template.json` 是当前默认的参考图生图 / 图片编辑模板，默认映射 `{{prompt}}`、`{{negative_prompt}}`、`{{output_prefix}}`、`{{seed}}` 和 `{{edit_image_1}}` ~ `{{edit_image_3}}`。
 
+当工作流实际只拿到 1 张或 2 张参考图时，后端现在会优先自动切换到同目录下的 `-1ref` / `-2ref` 模板变体，避免为了凑满 3 个输入位而重复注入同一张图片。仓库内置的 Qwen Rapid、Storyboard 3ref 和 FireRed 3ref 模板都已经补齐了这些变体；如果你使用自定义三参考图模板，也可以按同样命名规则提供同目录兄弟文件，让系统自动切换。
+
 人物资产、参考帧生成、参考图生图和图片编辑现在都默认使用这套模板；仓库内置的姿态参考图路径是 `config/reference-images/character-pose-three-view.png`。当角色资产未单独上传参考图时，系统会把这张三视图作为默认姿态输入；如果角色资产上传了参考图并选择“参考图 + Prompt”，该角色参考图会作为主参考输入，三视图仍会继续作为姿态约束。
 
 ### 分镜图片模板
 
-图片阶段默认同样复用 `config/workflows/qwen-rapid-aio-image-edit.template.json`。系统会自动把资产库里的场景、角色、物品参考图按优先级注入三个输入位；如果参考图超过 3 张，后端会自动把参考图拆成多批次运行，并把上一轮生成结果继续作为下一轮 `edit_image_1` 输入。
+图片阶段默认同样复用 `config/workflows/qwen-rapid-aio-image-edit.template.json`。系统会自动把资产库里的场景、角色、物品参考图按优先级注入参考图输入；当实际参考图只有 1 张或 2 张时，会自动切到对应的 `1ref` / `2ref` 模板；如果参考图超过 3 张，后端会自动把参考图拆成多批次运行，并把上一轮生成结果继续作为下一轮 `edit_image_1` 输入。
 
 ### 生视频模板
 
