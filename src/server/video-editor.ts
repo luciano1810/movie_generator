@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { getAppSettings } from './app-settings.js';
 
@@ -13,8 +13,8 @@ interface VideoDimensions {
 }
 
 interface StitchVideoOptions extends FfmpegRunOptions {
-  targetWidth?: number;
-  targetHeight?: number;
+  expectedWidth?: number;
+  expectedHeight?: number;
 }
 
 const DURATION_REGEX = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/;
@@ -67,33 +67,6 @@ function createAbortError(): Error {
   const error = new Error('操作已中止。');
   error.name = 'AbortError';
   return error;
-}
-
-function buildAtempoFilterChain(tempo: number): string {
-  const safeTempo = Number.isFinite(tempo) && tempo > 0 ? tempo : 1;
-  const filters: string[] = [];
-  let remainingTempo = safeTempo;
-
-  while (remainingTempo < 0.5) {
-    filters.push('atempo=0.5');
-    remainingTempo /= 0.5;
-  }
-
-  while (remainingTempo > 2) {
-    filters.push('atempo=2');
-    remainingTempo /= 2;
-  }
-
-  filters.push(`atempo=${remainingTempo.toFixed(6)}`);
-  return filters.join(',');
-}
-
-function buildVideoCropFilter(target: VideoDimensions): string {
-  return [
-    `scale=${target.width}:${target.height}:force_original_aspect_ratio=increase`,
-    `crop=${target.width}:${target.height}`,
-    'setsar=1'
-  ].join(',');
 }
 
 async function runFfmpeg(args: string[], options: FfmpegRunOptions = {}): Promise<void> {
@@ -291,25 +264,69 @@ async function getVideoDimensions(
   });
 }
 
-async function resolveTargetVideoDimensions(
+function formatVideoDimensions(dimensions: VideoDimensions): string {
+  return `${dimensions.width}x${dimensions.height}`;
+}
+
+async function assertConsistentVideoDimensions(
   videoPaths: string[],
-  options: StitchVideoOptions
+  options: StitchVideoOptions = {}
 ): Promise<VideoDimensions> {
-  if (options.targetWidth && options.targetHeight) {
-    return {
-      width: Math.max(2, Math.round(options.targetWidth)),
-      height: Math.max(2, Math.round(options.targetHeight))
-    };
+  const resolved = await Promise.all(
+    videoPaths.map(async (videoPath) => ({
+      videoPath,
+      dimensions: await getVideoDimensions(videoPath, options)
+    }))
+  );
+  const uniqueDimensions = new Set(resolved.map(({ dimensions }) => formatVideoDimensions(dimensions)));
+  const expectedDimensions =
+    options.expectedWidth && options.expectedHeight
+      ? {
+          width: Math.max(2, Math.round(options.expectedWidth)),
+          height: Math.max(2, Math.round(options.expectedHeight))
+        }
+      : null;
+
+  if (expectedDimensions) {
+    const hasUnexpectedDimensions = resolved.some(
+      ({ dimensions }) =>
+        dimensions.width !== expectedDimensions.width || dimensions.height !== expectedDimensions.height
+    );
+
+    if (hasUnexpectedDimensions) {
+      throw new Error(
+        `待拼接视频分辨率与项目设置不一致：期望 ${formatVideoDimensions(expectedDimensions)}，实际包含 ${[
+          ...uniqueDimensions
+        ].join('、')}。已取消自动裁切，请重新生成视频片段并确保视频工作流固定输出该分辨率。`
+      );
+    }
   }
 
-  const dimensions = await Promise.all(videoPaths.map((videoPath) => getVideoDimensions(videoPath, options)));
+  if (uniqueDimensions.size > 1) {
+    throw new Error(
+      `待拼接视频分辨率不一致：${[...uniqueDimensions].join('、')}。已取消自动裁切，请重新生成视频片段并确保所有片段输出相同分辨率。`
+    );
+  }
 
-  return dimensions.reduce<VideoDimensions>(
-    (target, current) => ({
-      width: Math.max(target.width, current.width),
-      height: Math.max(target.height, current.height)
-    }),
-    { width: 2, height: 2 }
+  return resolved[0].dimensions;
+}
+
+function escapeConcatPath(inputPath: string): string {
+  return inputPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function concatVideosWithCopy(
+  videoPaths: string[],
+  outputPath: string,
+  options: FfmpegRunOptions = {}
+): Promise<void> {
+  const concatListPath = path.join(path.dirname(outputPath), 'concat.txt');
+  const concatList = `${videoPaths.map((videoPath) => `file '${escapeConcatPath(videoPath)}'`).join('\n')}\n`;
+
+  await writeFile(concatListPath, concatList, 'utf8');
+  await runFfmpeg(
+    ['-y', '-f', 'concat', '-safe', '0', '-i', concatListPath, '-c', 'copy', '-movflags', '+faststart', outputPath],
+    options
   );
 }
 
@@ -317,25 +334,32 @@ async function normalizeSegmentsWithAudio(
   videoPaths: string[],
   audioPaths: Array<string | null>,
   outputPath: string,
-  fps: number,
+  _fps: number,
   options: StitchVideoOptions = {}
 ): Promise<string[]> {
   const segmentsDir = path.join(path.dirname(outputPath), '.segments');
   await mkdir(segmentsDir, { recursive: true });
 
   const prepared: string[] = [];
-  const targetDimensions = await resolveTargetVideoDimensions(videoPaths, options);
 
   for (let index = 0; index < videoPaths.length; index += 1) {
     const videoPath = videoPaths[index];
     const audioPath = audioPaths[index];
     const sourceHasAudio = await hasAudioStream(videoPath, options);
+    const needsExternalAudioMix = Boolean(audioPath);
+    const needsSyntheticAudioTrack = !audioPath && !sourceHasAudio;
+
+    if (!needsExternalAudioMix && !needsSyntheticAudioTrack) {
+      prepared.push(videoPath);
+      continue;
+    }
+
     const segmentPath = path.join(segmentsDir, `segment-${String(index + 1).padStart(3, '0')}.mp4`);
     const args = ['-y', '-i', videoPath];
     let targetDurationSeconds: number | null = null;
     let audioMap = '';
     let sourceAudioFilter = '[0:a]aresample=48000';
-    const videoFilters = [buildVideoCropFilter(targetDimensions)];
+    const videoFilters: string[] = [];
 
     if (audioPath) {
       const [videoDurationSeconds, audioDurationSeconds] = await Promise.all([
@@ -344,9 +368,8 @@ async function normalizeSegmentsWithAudio(
       ]);
 
       if (videoDurationSeconds > 0 && audioDurationSeconds > videoDurationSeconds + AUDIO_SYNC_TOLERANCE_SECONDS) {
-        const stretchRatio = audioDurationSeconds / videoDurationSeconds;
-        videoFilters.unshift(`setpts=${stretchRatio.toFixed(6)}*PTS`);
-        sourceAudioFilter = `${sourceAudioFilter},${buildAtempoFilterChain(1 / stretchRatio)}`;
+        const extensionSeconds = audioDurationSeconds - videoDurationSeconds;
+        videoFilters.unshift(`tpad=stop_mode=clone:stop_duration=${extensionSeconds.toFixed(6)}`);
         targetDurationSeconds = audioDurationSeconds;
       }
 
@@ -368,15 +391,14 @@ async function normalizeSegmentsWithAudio(
       audioMap = '1:a:0';
     }
 
-    args.push('-vf', videoFilters.join(','));
+    if (videoFilters.length) {
+      args.push('-vf', videoFilters.join(','));
+    }
     args.push('-map', '0:v:0', '-map', audioMap);
     args.push(
       '-c:v',
-      'libx264',
-      '-pix_fmt',
-      'yuv420p',
-      '-r',
-      String(fps),
+      videoFilters.length ? 'libx264' : 'copy',
+      ...(videoFilters.length ? ['-pix_fmt', 'yuv420p'] : []),
       '-c:a',
       'aac',
       '-ar',
@@ -489,6 +511,7 @@ export async function stitchVideos(
   }
 
   await mkdir(path.dirname(outputPath), { recursive: true });
+  await assertConsistentVideoDimensions(videoPaths, options);
 
   const normalizedAudioPaths = audioPaths.length ? audioPaths : Array(videoPaths.length).fill(null);
   const sourceVideoPaths = await normalizeSegmentsWithAudio(videoPaths, normalizedAudioPaths, outputPath, fps, options);
@@ -498,37 +521,5 @@ export async function stitchVideos(
     return;
   }
 
-  const args = ['-y'];
-
-  for (const videoPath of sourceVideoPaths) {
-    args.push('-i', videoPath);
-  }
-
-  const concatInputs = sourceVideoPaths.map((_, index) => `[${index}:v:0][${index}:a:0]`).join('');
-
-  args.push(
-    '-filter_complex',
-    `${concatInputs}concat=n=${sourceVideoPaths.length}:v=1:a=1[vout][aout]`,
-    '-map',
-    '[vout]',
-    '-map',
-    '[aout]',
-    '-c:v',
-    'libx264',
-    '-pix_fmt',
-    'yuv420p',
-    '-r',
-    String(fps),
-    '-c:a',
-    'aac',
-    '-ar',
-    '48000',
-    '-ac',
-    '2',
-    '-movflags',
-    '+faststart',
-    outputPath
-  );
-
-  await runFfmpeg(args, options);
+  await concatVideosWithCopy(sourceVideoPaths, outputPath, options);
 }

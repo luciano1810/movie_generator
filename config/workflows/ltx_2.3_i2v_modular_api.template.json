@@ -332,14 +332,8 @@
       "crop_methods": "disabled",
       "img_size": "{{video_conditioning_long_side}}",
       "GCD": 64,
-      "width": [
-        "242",
-        3
-      ],
-      "height": [
-        "242",
-        4
-      ]
+      "width": "{{video_conditioning_width}}",
+      "height": "{{video_conditioning_height}}"
     },
     "class_type": "Reimgsize"
   },
@@ -369,14 +363,8 @@
         "98",
         0
       ],
-      "width": [
-        "239",
-        3
-      ],
-      "height": [
-        "239",
-        4
-      ],
+      "width": "{{video_width}}",
+      "height": "{{video_height}}",
       "upscale_method": "lanczos",
       "crop_methods": "center",
       "img_size": "{{video_long_side}}",

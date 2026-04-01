@@ -2007,6 +2007,8 @@ function buildVideoWorkflowDerivedVariables(
   const safeFps = Math.max(1, Math.round(fps));
   const longSide = Math.max(safeWidth, safeHeight);
   const shortSide = Math.min(safeWidth, safeHeight);
+  const conditioningLongSide = Math.max(longSide, 1920);
+  const conditioningScale = conditioningLongSide / longSide;
 
   return {
     frame_count: Math.max(2, Math.round(durationSeconds * safeFps) + 1),
@@ -2014,7 +2016,9 @@ function buildVideoWorkflowDerivedVariables(
     latent_video_height: roundDownToMultiple(safeHeight, 16),
     video_long_side: longSide,
     video_short_side: shortSide,
-    video_conditioning_long_side: Math.max(longSide, 1920)
+    video_conditioning_long_side: conditioningLongSide,
+    video_conditioning_width: roundDownToMultiple(Math.max(8, Math.round(safeWidth * conditioningScale)), 8),
+    video_conditioning_height: roundDownToMultiple(Math.max(8, Math.round(safeHeight * conditioningScale)), 8)
   };
 }
 
@@ -3538,8 +3542,8 @@ async function generateVideoAssetForShot(
     await saveProject(project);
     await stitchVideos(segmentVideoPaths, outputPath, project.settings.fps, [], {
       signal,
-      targetWidth: project.settings.videoWidth,
-      targetHeight: project.settings.videoHeight
+      expectedWidth: project.settings.videoWidth,
+      expectedHeight: project.settings.videoHeight
     });
     savedVideoRelativePath = toStorageRelative(outputPath);
   }
@@ -3789,8 +3793,8 @@ async function runEditStage(project: Project): Promise<void> {
     orderedAudioPaths,
     {
       signal,
-      targetWidth: project.settings.videoWidth,
-      targetHeight: project.settings.videoHeight
+      expectedWidth: project.settings.videoWidth,
+      expectedHeight: project.settings.videoHeight
     }
   );
 
