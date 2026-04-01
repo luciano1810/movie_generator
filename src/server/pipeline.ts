@@ -3329,12 +3329,17 @@ export async function selectLibraryAssetForReferenceItem(
   const selectedAsset = {
     ...sourceItem.asset
   };
+  const selectedGenerationPrompt =
+    sourceItem.generationPrompt.trim() ||
+    (kind === 'character' ? currentItem.generationPrompt : selectedAsset.prompt.trim()) ||
+    currentItem.generationPrompt;
 
   updateReferenceItem(project, kind, itemId, (item) => ({
     ...item,
     status: 'success',
     error: null,
     updatedAt: now(),
+    generationPrompt: selectedGenerationPrompt,
     asset: selectedAsset,
     assetHistory: item.asset
       ? [

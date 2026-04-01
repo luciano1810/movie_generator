@@ -62,6 +62,7 @@ interface ReferenceLibraryAssetItem {
   createdAt: string;
   relativePath: string;
   prompt: string;
+  generationPrompt: string;
   name: string;
   summary: string;
 }
@@ -912,6 +913,7 @@ function buildReferenceLibraryAssets(
           createdAt: item.asset!.createdAt,
           relativePath: item.asset!.relativePath,
           prompt: item.asset!.prompt || item.generationPrompt,
+          generationPrompt: item.generationPrompt,
           name: item.name,
           summary: item.summary
         }))
@@ -1996,11 +1998,18 @@ export function App() {
     kind: ReferenceAssetKind,
     item: ReferenceAssetItem,
     sourceProjectId: string,
-    sourceItemId: string
+    sourceItemId: string,
+    sourceAsset: ReferenceLibraryAssetItem
   ) {
     if (!selectedId) {
       return;
     }
+
+    const key = referenceDraftKey(kind, item.id);
+    const nextPrompt =
+      sourceAsset.generationPrompt.trim() ||
+      (kind === 'character' ? item.generationPrompt : sourceAsset.prompt.trim()) ||
+      item.generationPrompt;
 
     try {
       setPending(`reference-library:${kind}:${item.id}`);
@@ -2016,6 +2025,10 @@ export function App() {
         }
       );
       setProject(updated);
+      setReferencePromptDrafts((current) => ({
+        ...current,
+        [key]: nextPrompt
+      }));
       setReferenceAssetVersionIndices((current) => ({
         ...current,
         [referenceDraftKey(kind, item.id)]: 0
@@ -2745,7 +2758,7 @@ export function App() {
                     return;
                   }
 
-                  void handleSelectLibraryReferenceAsset(kind, item, sourceProjectId, sourceItemId);
+                  void handleSelectLibraryReferenceAsset(kind, item, sourceProjectId, sourceItemId, selectedLibraryAsset);
                 }}
                 type="button"
               >
