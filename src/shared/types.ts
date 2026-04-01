@@ -13,12 +13,14 @@ export const COMFYUI_WORKFLOW_TYPES = [
 export const ASPECT_RATIOS = ['21:9', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4', '9:16'] as const;
 export const SCRIPT_MODES = ['generate', 'optimize'] as const;
 export const STORY_LENGTHS = ['test', 'short', 'medium', 'long'] as const;
+export const VIDEO_FPS_OPTIONS = [24, 30, 60] as const;
 
 export type StageId = (typeof STAGES)[number];
 export type ComfyWorkflowType = (typeof COMFYUI_WORKFLOW_TYPES)[number];
 export type AspectRatio = (typeof ASPECT_RATIOS)[number];
 export type ScriptMode = (typeof SCRIPT_MODES)[number];
 export type StoryLength = (typeof STORY_LENGTHS)[number];
+export type VideoFps = (typeof VIDEO_FPS_OPTIONS)[number];
 export type RunStage = StageId | 'all';
 export type StageStatus = 'idle' | 'running' | 'success' | 'error';
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -666,7 +668,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   storyLength: 'medium',
   language: 'zh-CN',
   tone: '高情绪、高反转、强钩子',
-  audience: '短剧平台用户',
+  audience: '电影观众',
   visualStyle: '电影感写实光影，人物统一，镜头具有戏剧张力',
   negativePrompt: 'low quality, blurry, watermark, subtitle, deformed hands, extra fingers',
   aspectRatio: '9:16',
@@ -674,10 +676,10 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   imageHeight: 1280,
   videoWidth: 720,
   videoHeight: 1280,
-  fps: 24,
+  fps: VIDEO_FPS_OPTIONS[0],
   maxVideoSegmentDurationSeconds: 4,
   maxShotsPerScene: 3,
-  useTtsWorkflow: true
+  useTtsWorkflow: false
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -729,6 +731,16 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
 function normalizePositiveInteger(value: unknown, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
+}
+
+export function normalizeVideoFps(value: unknown, fallback: number): VideoFps {
+  const parsed = Number(value);
+
+  if (VIDEO_FPS_OPTIONS.includes(parsed as VideoFps)) {
+    return parsed as VideoFps;
+  }
+
+  return VIDEO_FPS_OPTIONS.includes(fallback as VideoFps) ? (fallback as VideoFps) : VIDEO_FPS_OPTIONS[0];
 }
 
 function normalizeString(value: unknown, fallback: string): string {
@@ -845,7 +857,7 @@ export function normalizeSettings(input?: Partial<ProjectSettings>): ProjectSett
     imageHeight: normalizePositiveInteger(merged.imageHeight, DEFAULT_SETTINGS.imageHeight),
     videoWidth: normalizePositiveInteger(merged.videoWidth, DEFAULT_SETTINGS.videoWidth),
     videoHeight: normalizePositiveInteger(merged.videoHeight, DEFAULT_SETTINGS.videoHeight),
-    fps: normalizePositiveInteger(merged.fps, DEFAULT_SETTINGS.fps),
+    fps: normalizeVideoFps(merged.fps, DEFAULT_SETTINGS.fps),
     maxVideoSegmentDurationSeconds: normalizePositiveInteger(
       merged.maxVideoSegmentDurationSeconds,
       DEFAULT_SETTINGS.maxVideoSegmentDurationSeconds

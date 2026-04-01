@@ -32,6 +32,7 @@ import {
   enqueueProjectRun,
   enqueueReferenceGeneration,
   enqueueStoryboardShotImageGeneration,
+  enqueueStoryboardShotLastImageGeneration,
   enqueueStoryboardShotVideoGeneration,
   isProjectRunning,
   isReferenceGenerationRunning,
@@ -185,7 +186,7 @@ function formatDownloadTimestamp(iso: string | null | undefined): string {
 }
 
 function buildFinalVideoDownloadName(project: Project): string {
-  const title = sanitizeDownloadFilenamePart(project.title) || '短剧项目';
+  const title = sanitizeDownloadFilenamePart(project.title) || '电影项目';
   const extension = path.extname(project.assets.finalVideo?.relativePath ?? '') || '.mp4';
   const timestamp = formatDownloadTimestamp(project.assets.finalVideo?.createdAt ?? project.updatedAt);
   return `${title}-最终成片-${timestamp}${extension}`;
@@ -869,6 +870,40 @@ async function main(): Promise<void> {
       }
 
       await enqueueStoryboardShotImageGeneration(id, shotId);
+      response.status(202).json({ ok: true });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/projects/:id/storyboard/:shotId/last-image/generate', async (request, response, next) => {
+    try {
+      const { id, shotId } = request.params;
+
+      let project: Project;
+      try {
+        project = await readProject(id);
+      } catch {
+        response.status(404).json({ message: '项目不存在。' });
+        return;
+      }
+
+      if (!project.storyboard.some((shot) => shot.id === shotId)) {
+        response.status(404).json({ message: '镜头不存在。' });
+        return;
+      }
+
+      if (isProjectRunning(id)) {
+        response.status(409).json({ message: '该项目已有阶段任务在运行。' });
+        return;
+      }
+
+      if (isReferenceGenerationRunning(id)) {
+        response.status(409).json({ message: '该项目有参考资产正在生成，请稍后再试。' });
+        return;
+      }
+
+      await enqueueStoryboardShotLastImageGeneration(id, shotId);
       response.status(202).json({ ok: true });
     } catch (error) {
       next(error);

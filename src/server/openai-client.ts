@@ -1164,7 +1164,7 @@ function getStoryLengthScriptGenerationTarget(settings: ProjectSettings): {
       maximumScenes: 12,
       minimumTotalDurationSeconds: 600,
       maximumTotalDurationSeconds: 1200,
-      pacingInstruction: '允许做多轮升级和更完整的铺垫，但仍然要保持短剧节奏，不要写成传统长剧慢热结构。'
+      pacingInstruction: '允许做更完整的铺垫、关系递进和主题回响，但仍要保持电影叙事密度，避免节奏松散或铺陈失焦。'
     };
   }
 
@@ -1934,11 +1934,11 @@ function buildStoryboardConversationPrelude(
     {
       role: 'system',
       content:
-        '你是一名影视分镜导演，负责把短剧剧本拆成适合 AI 生图和 AI 视频的镜头。接下来会通过多轮对话先完成全局拆镜规划，再逐轮生成单个完整镜头。每一轮都只输出当前要求的 JSON，不要输出任何额外说明。'
+        '你是一名专业电影分镜导演，负责把电影剧本拆成适合 AI 生图和 AI 视频生成的镜头。接下来会通过多轮对话先完成全局拆镜规划，再逐轮生成单个完整镜头。每一轮都只输出当前要求的 JSON，不要输出任何额外说明。'
     },
     {
       role: 'user',
-      content: `我们将通过多轮对话完成整部短剧分镜。第 1 轮先输出整部剧的分镜规划，必须给出总镜头数和每个镜头的概况；从第 2 轮开始，我会按规划顺序逐轮向你索取单个完整镜头，你必须在连续多轮中保持人物外观、服装、道具、空间关系和情绪推进一致。
+      content: `我们将通过多轮对话完成整部影片的分镜设计。第 1 轮先输出整部影片的分镜规划，必须给出总镜头数和每个镜头的概况；从第 2 轮开始，我会按规划顺序逐轮向你索取单个完整镜头，你必须在连续多轮中保持人物外观、服装、道具、空间关系和情绪推进一致。
 
 全局要求：
 1. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
@@ -2042,7 +2042,7 @@ function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectS
     )
     .join('\n');
 
-  return `现在进行第 1 轮：先生成整部短剧的分镜规划。${retryNotice}
+  return `现在进行第 1 轮：先生成整部影片的分镜规划。${retryNotice}
 
 要求：
 1. 这一轮只能输出整部剧的分镜规划 JSON，必须先明确 totalShots，并给出全部镜头的概况；不要输出 firstFramePrompt、lastFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt、camera、composition、transitionHint 等完整镜头字段
@@ -2426,7 +2426,7 @@ function buildStoryboardShotTurnPrompt(
   const continuityNotice =
     shotIndex > 0
       ? `前面已经完成了 ${shotIndex}/${planShots.length} 个镜头。你必须延续已建立的人物外观、服装、道具状态、空间关系和情绪推进。`
-      : '这是第一个完整镜头，需要为整部短剧建立稳定的人物与视觉基调。';
+      : '这是第一个完整镜头，需要为整部影片建立稳定的人物与视觉基调。';
   const dialogueIdentifierOutput = shotPlan.dialogueIdentifier?.groupId
     ? JSON.stringify({ groupId: shotPlan.dialogueIdentifier.groupId })
     : 'null';
@@ -2782,20 +2782,20 @@ function buildScriptPromptContext(settings: ProjectSettings): string {
 2. 语气风格：${settings.tone}
 3. 视觉调性：${settings.visualStyle}
 4. 输出语言：${settings.language}
-5. 项目篇幅为${STORY_LENGTH_LABELS[settings.storyLength]}；这是强约束，不是参考值。整体控制在 ${target.minimumScenes} 到 ${target.maximumScenes} 场、总时长约 ${target.minimumTotalDurationSeconds} 到 ${target.maximumTotalDurationSeconds} 秒。${target.pacingInstruction}
+5. 项目篇幅档位为${STORY_LENGTH_LABELS[settings.storyLength]}；系统会通过调整生成 prompt 来影响剧本目标长度与节奏，请把它当作体量建议而不是机械报数约束。优先保证戏剧结构完整、人物弧线成立和场次功能清晰，再尽量贴近 ${target.minimumScenes} 到 ${target.maximumScenes} 场、总时长约 ${target.minimumTotalDurationSeconds} 到 ${target.maximumTotalDurationSeconds} 秒的建议范围。${target.pacingInstruction}
 6. 每场必须写成真正可拍的剧本，而不是只有 summary、dialogue 列表的场景大纲；sceneHeading、conflict、turningPoint 和 scriptBlocks 都是硬约束
 7. scriptBlocks 必须按实际发生顺序排列，至少包含 action；需要对白时再写 dialogue，需要画外音时再写 voiceover；只有必要时才写 transition
 8. action 只能写看得见、拍得到的动作、表情、调度、空间变化和道具状态，不要写作者点评、主题说明或空泛总结
 9. dialogue 要口语化、短促、带潜台词；parenthetical 只写必要表演提示，不要每句都加
 10. 每场内部都要在 scriptBlocks 中体现起势、对抗、转折和收束，不能只写 2 到 3 条概括性交代
-11. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定；所有场次相加后的总时长必须落在上面的篇幅区间内
+11. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定；如果素材不足，不要为了凑总时长重复同类桥段；如果素材过多，优先压缩、合并和聚焦主线
 12. 人物外观和身份要稳定，便于后续持续生成画面
 13. referenceAssets 是硬约束，必须在剧本阶段一次性输出完整资产列表；后续资产阶段会直接按这个列表生成，不会再单独向模型二次提取
 14. referenceAssets.characters 只保留核心角色，并直接写出稳定的人物外观生成提示；如果同一人物在剧本里以明显不同年龄段出场，必须拆成多个独立资产，name 要直接带上年龄段标记
 15. referenceAssets.characters 的 generationPrompt 只写稳定的人物外观与身份特征，重点描述年龄感、脸型五官、发型、体型、服装、气质、常态表情，不要写三视图、镜头运动或具体剧情动作
 16. referenceAssets.scenes 只提取可复用的基础场景母版，每个场景只输出一个角度；必须是空镜环境、无人物、无剧情动作，强调空间结构、时间、光线、材质和氛围
 17. referenceAssets.objects 只保留推动剧情的重要物件，prompt 要强调材质、状态、摆放方式和特写可读性
-18. 如果输入素材很多，优先压缩、合并和聚焦主线，不要为了“写全”而突破当前篇幅上限
+18. 如果输入素材很多，优先压缩、合并和聚焦主线；如果输入素材有限，也不要为了“凑够篇幅”硬塞重复桥段、解释性对白或无效过场
 19. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
 }
 
@@ -2815,11 +2815,11 @@ function buildScriptMessages(
       {
         role: 'system',
         content:
-          '你是一名资深中文短剧剧本医生和总编剧，擅长在保留核心卖点的前提下修复节奏、增强钩子、压缩废戏、强化反转，并把粗稿整理成可直接进入分镜阶段的短剧剧本。只输出 JSON，不要输出任何额外说明。'
+          '你是一名资深中文电影剧本医生和总编剧，擅长在保留核心卖点的前提下修复节奏、增强戏剧张力、压缩废戏、强化转折，并把粗稿整理成可直接进入分镜阶段的专业电影剧本。只输出 JSON，不要输出任何额外说明。'
       },
       {
         role: 'user',
-        content: `请优化下面的短剧文本，使其更适合短视频连载和 AI 分镜生产。
+        content: `请优化下面的影视文本，使其更适合专业电影叙事和 AI 分镜生产。
 
 ${sharedContext}
 ${retryNotice}
@@ -2827,15 +2827,15 @@ ${retryNotice}
 优化目标：
 1. 保留原文中可成立的核心设定、人物关系、主要事件和情绪走向，不要无故推翻故事根基
 2. 优先修复开场不够抓人、冲突不够集中、情绪不够陡、场次重复、对白拖沓的问题
-3. 第一场必须尽快给出强钩子、悬念、威胁或利益冲突
+3. 开场必须尽快建立强悬念、威胁、欲望目标或核心利益冲突
 4. 每一场都要有明确目标、阻碍、转折或信息增量，避免空转
 5. 每场都必须写成连续剧本块 scriptBlocks，至少要让读者看到人物动作、表情反应、对白来回和场尾转折，不能只给几句概要
 6. 对白要口语化、短促、利于表演，不要写成长篇讲述
 7. 画外音只在必要时使用，避免重复解释画面已经表达的信息
 8. 如果原文结构混乱，可以重组场次顺序，但不要丢失关键剧情信息
-9. 如果原文缺少必要细节，可以补足角色动机、场景信息和情绪推进，使其成为完整可拍的短剧
+9. 如果原文缺少必要细节，可以补足角色动机、场景信息和情绪推进，使其成为完整可拍的电影剧本
 10. 必须在同一次输出里同步给出 referenceAssets 资产列表，供后续资产阶段直接生成
-11. 必须严格遵守上面的篇幅范围，宁可压缩和合并，也不要生成超出当前篇幅约束的长剧本
+11. 请尽量贴近上面的建议篇幅范围；如果素材不足，不要为了凑时长硬塞重复桥段；如果素材过多，优先压缩和合并，不要牺牲主线清晰度
 12. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
@@ -2849,26 +2849,26 @@ ${sourceText}`
     {
       role: 'system',
       content:
-        '你是一名资深中文短剧总编剧和项目主笔，擅长把梗概、设定、文案和零散想法发展成高钩子、强反转、强情绪推进、适合短视频连载的成型剧本。只输出 JSON，不要输出任何额外说明。'
+        '你是一名资深中文电影编剧和项目主笔，擅长把梗概、设定、文案和零散想法发展成具有电影感、戏剧张力、情绪推进和视听可执行性的成型剧本。只输出 JSON，不要输出任何额外说明。'
     },
     {
       role: 'user',
-      content: `请根据下面的素材生成一版完整的短剧剧本。
+      content: `请根据下面的素材生成一版完整的电影剧本。
 
 ${sharedContext}
 ${retryNotice}
 
 生成目标：
-1. 将输入素材扩写为完整短剧，而不是复述原文
-2. 第一场必须快速建立人物关系、危机、悬念或利益冲突，让用户愿意继续看
+1. 将输入素材扩写为完整电影剧本，而不是复述原文
+2. 开场必须尽快建立人物关系、处境、危机、悬念或利益冲突，让观众迅速进入故事
 3. 全剧要有持续升级的冲突链路，避免平铺直叙
 4. 每场都要服务于主线推进，并给出清晰的情绪变化
 5. 角色数量控制在必要范围内，每个核心角色都要有鲜明身份、稳定外观和清晰动机
 6. 每场都必须写成连续剧本块 scriptBlocks，让动作、对白、反应和转折按顺序发生，不能退化成“场景介绍 + 几句台词”
 7. 场景信息要具体到地点、时间和动作状态，方便后续直接拆分镜
-8. 对白要短、准、狠，符合短剧节奏，尽量避免大段说明性台词
+8. 对白要简洁、准确、利于表演，尽量避免大段说明性台词和直白解释
 9. 必须在同一次输出里同步给出 referenceAssets 资产列表，供后续资产阶段直接生成
-10. 必须严格遵守上面的篇幅范围，宁可压缩和合并情节，也不要生成超出当前篇幅约束的长剧本
+10. 请尽量贴近上面的建议篇幅范围；如果素材不足，不要为了凑体量重复同类桥段；如果素材过多，优先压缩和合并情节，不要牺牲叙事清晰度
 11. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
@@ -2878,36 +2878,16 @@ ${sourceText}`
   ];
 }
 
-function validateGeneratedScriptAgainstLength(
-  script: Pick<ScriptPackage, 'scenes' | 'referenceAssets'>,
-  settings: ProjectSettings
+function validateGeneratedScriptStructure(
+  script: Pick<ScriptPackage, 'scenes' | 'referenceAssets'>
 ): {
   ok: boolean;
   feedback: string;
 } {
-  const target = getStoryLengthScriptGenerationTarget(settings);
-  const sceneCount = script.scenes.length;
-  const totalDurationSeconds = script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0);
   const issues: string[] = [];
 
-  if (!sceneCount) {
+  if (!script.scenes.length) {
     issues.push('必须至少生成 1 场戏。');
-  }
-
-  if (sceneCount < target.minimumScenes) {
-    issues.push(`场景数过少：当前 ${sceneCount} 场，至少需要 ${target.minimumScenes} 场。`);
-  }
-
-  if (sceneCount > target.maximumScenes) {
-    issues.push(`场景数过多：当前 ${sceneCount} 场，最多只能 ${target.maximumScenes} 场。`);
-  }
-
-  if (totalDurationSeconds < target.minimumTotalDurationSeconds) {
-    issues.push(`总时长过短：当前约 ${totalDurationSeconds} 秒，至少需要 ${target.minimumTotalDurationSeconds} 秒。`);
-  }
-
-  if (totalDurationSeconds > target.maximumTotalDurationSeconds) {
-    issues.push(`总时长过长：当前约 ${totalDurationSeconds} 秒，最多只能 ${target.maximumTotalDurationSeconds} 秒。`);
   }
 
   if (!script.referenceAssets?.characters.length) {
@@ -3067,8 +3047,8 @@ export async function generateScriptFromText(
     });
 
     const scriptCore = {
-      title: normalizeString(payload.title, '未命名短剧'),
-      tagline: normalizeString(payload.tagline, '高钩子短剧'),
+      title: normalizeString(payload.title, '未命名电影'),
+      tagline: normalizeString(payload.tagline, '电影级戏剧故事'),
       synopsis: normalizeString(payload.synopsis, '暂无梗概'),
       styleNotes: normalizeString(payload.styleNotes, settings.visualStyle),
       characters: (payload.characters ?? []).map((character, index) => ({
@@ -3080,7 +3060,7 @@ export async function generateScriptFromText(
       referenceAssets: normalizeScriptReferenceAssets(payload.referenceAssets, settings),
       scenes
     };
-    const validation = validateGeneratedScriptAgainstLength(scriptCore, settings);
+    const validation = validateGeneratedScriptStructure(scriptCore);
 
     if (validation.ok) {
       return {
@@ -3092,7 +3072,7 @@ export async function generateScriptFromText(
     retryFeedback = validation.feedback;
   }
 
-  throw new Error(`剧本生成失败：连续多次输出仍不符合${STORY_LENGTH_LABELS[settings.storyLength]}篇幅约束。${retryFeedback}`);
+  throw new Error(`剧本生成失败：连续多次输出仍不满足结构化电影剧本要求。${retryFeedback}`);
 }
 
 export async function generateStoryboardFromScript(

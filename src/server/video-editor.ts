@@ -17,6 +17,18 @@ interface StitchVideoOptions extends FfmpegRunOptions {
   expectedHeight?: number;
 }
 
+interface MaterializedVideoResult {
+  outputPath: string;
+  originalDimensions: VideoDimensions;
+  normalized: boolean;
+}
+
+interface MaterializedImageResult {
+  outputPath: string;
+  originalDimensions: VideoDimensions;
+  normalized: boolean;
+}
+
 const DURATION_REGEX = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/;
 const AUDIO_SYNC_TOLERANCE_SECONDS = 0.05;
 
@@ -268,6 +280,135 @@ function formatVideoDimensions(dimensions: VideoDimensions): string {
   return `${dimensions.width}x${dimensions.height}`;
 }
 
+function buildExpectedVideoDimensions(expectedWidth: number, expectedHeight: number): VideoDimensions {
+  return {
+    width: Math.max(2, Math.round(expectedWidth)),
+    height: Math.max(2, Math.round(expectedHeight))
+  };
+}
+
+function buildDimensionNormalizationFilter(expectedDimensions: VideoDimensions): string {
+  return [
+    `scale=${expectedDimensions.width}:${expectedDimensions.height}:force_original_aspect_ratio=decrease`,
+    `pad=${expectedDimensions.width}:${expectedDimensions.height}:(ow-iw)/2:(oh-ih)/2:black`,
+    'setsar=1'
+  ].join(',');
+}
+
+export async function materializeImageAtPath(
+  inputPath: string,
+  outputPath: string,
+  expectedWidth: number,
+  expectedHeight: number,
+  options: FfmpegRunOptions = {}
+): Promise<MaterializedImageResult> {
+  const expectedDimensions = buildExpectedVideoDimensions(expectedWidth, expectedHeight);
+  const originalDimensions = await getVideoDimensions(inputPath, options);
+  const inputExtension = path.extname(inputPath).toLowerCase();
+  const outputExtension = path.extname(outputPath).toLowerCase();
+  const dimensionsMatch =
+    originalDimensions.width === expectedDimensions.width && originalDimensions.height === expectedDimensions.height;
+  const extensionMatches = inputExtension === outputExtension;
+
+  await mkdir(path.dirname(outputPath), { recursive: true });
+
+  if (dimensionsMatch && extensionMatches) {
+    if (inputPath !== outputPath) {
+      await copyFile(inputPath, outputPath);
+    }
+
+    return {
+      outputPath,
+      originalDimensions,
+      normalized: false
+    };
+  }
+
+  await runFfmpeg(
+    [
+      '-y',
+      '-i',
+      inputPath,
+      ...(dimensionsMatch ? [] : ['-vf', buildDimensionNormalizationFilter(expectedDimensions)]),
+      '-map',
+      '0:v:0',
+      '-frames:v',
+      '1',
+      outputPath
+    ],
+    options
+  );
+
+  return {
+    outputPath,
+    originalDimensions,
+    normalized: true
+  };
+}
+
+export async function materializeVideoAtPath(
+  inputPath: string,
+  outputPath: string,
+  expectedWidth: number,
+  expectedHeight: number,
+  options: FfmpegRunOptions = {}
+): Promise<MaterializedVideoResult> {
+  const expectedDimensions = buildExpectedVideoDimensions(expectedWidth, expectedHeight);
+  const originalDimensions = await getVideoDimensions(inputPath, options);
+  const inputExtension = path.extname(inputPath).toLowerCase();
+  const outputExtension = path.extname(outputPath).toLowerCase();
+  const dimensionsMatch =
+    originalDimensions.width === expectedDimensions.width && originalDimensions.height === expectedDimensions.height;
+  const extensionMatches = inputExtension === outputExtension;
+
+  await mkdir(path.dirname(outputPath), { recursive: true });
+
+  if (dimensionsMatch && extensionMatches) {
+    if (inputPath !== outputPath) {
+      await copyFile(inputPath, outputPath);
+    }
+
+    return {
+      outputPath,
+      originalDimensions,
+      normalized: false
+    };
+  }
+
+  await runFfmpeg(
+    [
+      '-y',
+      '-i',
+      inputPath,
+      ...(dimensionsMatch ? [] : ['-vf', buildDimensionNormalizationFilter(expectedDimensions)]),
+      '-map',
+      '0:v:0',
+      '-map',
+      '0:a?',
+      '-c:v',
+      'libx264',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-ar',
+      '48000',
+      '-ac',
+      '2',
+      '-movflags',
+      '+faststart',
+      outputPath
+    ],
+    options
+  );
+
+  return {
+    outputPath,
+    originalDimensions,
+    normalized: true
+  };
+}
+
 async function assertConsistentVideoDimensions(
   videoPaths: string[],
   options: StitchVideoOptions = {}
@@ -511,10 +652,37 @@ export async function stitchVideos(
   }
 
   await mkdir(path.dirname(outputPath), { recursive: true });
-  await assertConsistentVideoDimensions(videoPaths, options);
+  const preparedVideoPaths =
+    options.expectedWidth && options.expectedHeight
+      ? await Promise.all(
+          videoPaths.map(async (videoPath, index) => {
+            const normalizedPath = path.join(
+              path.dirname(outputPath),
+              '.normalized-videos',
+              `video-${String(index + 1).padStart(3, '0')}.mp4`
+            );
+            const result = await materializeVideoAtPath(
+              videoPath,
+              normalizedPath,
+              options.expectedWidth!,
+              options.expectedHeight!,
+              options
+            );
+            return result.outputPath;
+          })
+        )
+      : videoPaths;
 
-  const normalizedAudioPaths = audioPaths.length ? audioPaths : Array(videoPaths.length).fill(null);
-  const sourceVideoPaths = await normalizeSegmentsWithAudio(videoPaths, normalizedAudioPaths, outputPath, fps, options);
+  await assertConsistentVideoDimensions(preparedVideoPaths, options);
+
+  const normalizedAudioPaths = audioPaths.length ? audioPaths : Array(preparedVideoPaths.length).fill(null);
+  const sourceVideoPaths = await normalizeSegmentsWithAudio(
+    preparedVideoPaths,
+    normalizedAudioPaths,
+    outputPath,
+    fps,
+    options
+  );
 
   if (sourceVideoPaths.length === 1) {
     await copyFile(sourceVideoPaths[0], outputPath);

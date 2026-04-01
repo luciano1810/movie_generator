@@ -251,7 +251,7 @@ export async function createProject(input: {
   const timestamp = now();
   const project: Project = {
     id,
-    title: input.title.trim() || '未命名短剧项目',
+    title: input.title.trim() || '未命名电影项目',
     sourceText: input.sourceText.trim(),
     createdAt: timestamp,
     updatedAt: timestamp,

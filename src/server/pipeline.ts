@@ -17,6 +17,7 @@ import {
   filterReferenceLibraryForShot,
   getDefaultShotDurationSeconds,
   getGenerationReferenceLibraryForShot,
+  normalizeVideoFps,
   normalizeStoryboardShots,
   STAGES,
   STAGE_LABELS
@@ -45,7 +46,14 @@ import {
   uploadImageBufferToComfy,
   uploadImageToComfy
 } from './comfyui.js';
-import { extractLastFrame, getMediaDurationSeconds, stitchAudios, stitchVideos } from './video-editor.js';
+import {
+  extractLastFrame,
+  getMediaDurationSeconds,
+  materializeImageAtPath,
+  materializeVideoAtPath,
+  stitchAudios,
+  stitchVideos
+} from './video-editor.js';
 
 const runningProjects = new Map<string, Promise<void>>();
 const runningReferenceGenerations = new Map<string, Promise<void>>();
@@ -2047,14 +2055,15 @@ function buildVideoWorkflowDerivedVariables(
 ): Record<string, TemplateVariable> {
   const safeWidth = Math.max(1, Math.round(width));
   const safeHeight = Math.max(1, Math.round(height));
-  const safeFps = Math.max(1, Math.round(fps));
+  const safeDurationSeconds = Math.max(1, Math.trunc(durationSeconds));
+  const safeFps = normalizeVideoFps(fps, 24);
   const longSide = Math.max(safeWidth, safeHeight);
   const shortSide = Math.min(safeWidth, safeHeight);
   const conditioningLongSide = Math.max(longSide, 1920);
   const conditioningScale = conditioningLongSide / longSide;
 
   return {
-    frame_count: Math.max(2, Math.round(durationSeconds * safeFps) + 1),
+    frame_count: Math.max(2, safeDurationSeconds * safeFps + 1),
     latent_video_width: roundDownToMultiple(safeWidth, 16),
     latent_video_height: roundDownToMultiple(safeHeight, 16),
     video_long_side: longSide,
@@ -2529,6 +2538,64 @@ function buildShotAssetOutputPath(
           : 'videos';
   const normalizedExtension = extension.startsWith('.') ? extension : `.${extension}`;
   return path.join(folder, shotId, `${Date.now()}-${crypto.randomUUID().slice(0, 8)}${normalizedExtension}`);
+}
+
+function buildShotVideoStageRelativePath(shotId: string, ...parts: string[]): string {
+  return path.join('.video-stage', shotId, ...parts);
+}
+
+async function materializeVideoInputImageForShot(
+  project: Project,
+  shot: Project['storyboard'][number],
+  sourcePath: string,
+  label: string,
+  options: {
+    signal?: AbortSignal;
+  } = {}
+): Promise<string> {
+  const outputPath = resolveProjectPath(project.id, buildShotVideoStageRelativePath(shot.id, 'normalized-inputs', `${label}.png`));
+  const result = await materializeImageAtPath(
+    sourcePath,
+    outputPath,
+    project.settings.videoWidth,
+    project.settings.videoHeight,
+    options
+  );
+  return result.outputPath;
+}
+
+async function persistMaterializedVideoForShot(
+  project: Project,
+  shot: Project['storyboard'][number],
+  buffer: Buffer,
+  sourceExtension: string,
+  rawLabel: string,
+  outputRelativePath: string,
+  options: {
+    signal?: AbortSignal;
+  } = {}
+): Promise<{
+  relativePath: string;
+  absolutePath: string;
+}> {
+  const rawSaved = await writeProjectFile(
+    project.id,
+    buildShotVideoStageRelativePath(shot.id, 'raw-videos', `${rawLabel}${sourceExtension}`),
+    buffer
+  );
+  const outputAbsolutePath = resolveProjectPath(project.id, outputRelativePath);
+  await materializeVideoAtPath(
+    rawSaved.absolutePath,
+    outputAbsolutePath,
+    project.settings.videoWidth,
+    project.settings.videoHeight,
+    options
+  );
+
+  return {
+    relativePath: toStorageRelative(outputAbsolutePath),
+    absolutePath: outputAbsolutePath
+  };
 }
 
 function buildReferenceAssetOutputPath(
@@ -3557,7 +3624,14 @@ async function generateVideoAssetForShot(
     await throwIfRunInterrupted(project.id, 'shots');
 
     const segmentDuration = segmentDurations[segmentIndex];
-    const uploadedImage = await uploadImageToComfy(currentInputImagePath, { signal });
+    const normalizedInputImagePath = await materializeVideoInputImageForShot(
+      project,
+      shot,
+      currentInputImagePath,
+      `input-seg-${String(segmentIndex + 1).padStart(3, '0')}`,
+      { signal }
+    );
+    const uploadedImage = await uploadImageToComfy(normalizedInputImagePath, { signal });
     const isFinalSegment = segmentIndex === segmentCount - 1;
     const useLastFrameReferenceForSegment = isFinalSegment && Boolean(targetLastFrameImagePath);
     const workflowPath = resolveVideoWorkflowPath(appSettings, useLastFrameReferenceForSegment);
@@ -3567,7 +3641,14 @@ async function generateVideoAssetForShot(
     }
 
     if (isFinalSegment && targetLastFrameImagePath && !uploadedTargetLastFrameImage) {
-      uploadedTargetLastFrameImage = await uploadImageToComfy(targetLastFrameImagePath, { signal });
+      const normalizedLastFrameImagePath = await materializeVideoInputImageForShot(
+        project,
+        shot,
+        targetLastFrameImagePath,
+        'target-last-frame',
+        { signal }
+      );
+      uploadedTargetLastFrameImage = await uploadImageToComfy(normalizedLastFrameImagePath, { signal });
     }
 
     const outputFiles = await runProjectComfyWorkflow(
@@ -3607,20 +3688,27 @@ async function generateVideoAssetForShot(
     const extension = path.extname(outputFile.filename) || '.mp4';
 
     if (segmentCount === 1) {
-      const saved = await writeProjectFile(project.id, buildShotAssetOutputPath('videos', shot.id, extension), buffer);
+      const saved = await persistMaterializedVideoForShot(
+        project,
+        shot,
+        buffer,
+        extension,
+        'single-output',
+        buildShotAssetOutputPath('videos', shot.id, '.mp4'),
+        { signal }
+      );
       savedVideoRelativePath = saved.relativePath;
       continue;
     }
 
-    const segmentSaved = await writeProjectFile(
-      project.id,
-      path.join(
-        '.video-stage',
-        shot.id,
-        'segments',
-        `segment-${String(segmentIndex + 1).padStart(3, '0')}${extension}`
-      ),
-      buffer
+    const segmentSaved = await persistMaterializedVideoForShot(
+      project,
+      shot,
+      buffer,
+      extension,
+      `segment-${String(segmentIndex + 1).padStart(3, '0')}`,
+      buildShotVideoStageRelativePath(shot.id, 'segments', `segment-${String(segmentIndex + 1).padStart(3, '0')}.mp4`),
+      { signal }
     );
     segmentVideoPaths.push(segmentSaved.absolutePath);
 
@@ -4336,6 +4424,67 @@ async function executeStoryboardShotImageGeneration(projectId: string, shotId: s
   await saveProject(project);
 }
 
+async function executeStoryboardShotLastImageGeneration(projectId: string, shotId: string): Promise<void> {
+  const project = await readProject(projectId);
+  const shot = project.storyboard.find((item) => item.id === shotId);
+
+  if (!shot) {
+    throw new Error(`未找到镜头 ${shotId}`);
+  }
+
+  if (!project.storyboard.length) {
+    throw new Error('请先生成分镜，再生成结束参考帧。');
+  }
+
+  const requiresTerminalFrame =
+    shot.useLastFrameReference ||
+    getShotVideoSegmentDurations(project, shot).length > 1 ||
+    Boolean(getActiveShotAsset(project, 'lastImages', shot.id));
+
+  if (!requiresTerminalFrame) {
+    throw new Error('当前镜头没有可独立重生的结束参考帧；请先启用结束参考帧约束，或让镜头进入长镜头分段生成。');
+  }
+
+  const appSettings = getAppSettings();
+  const referenceUploadCache = new Map<string, string>();
+  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
+  const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
+  const effectiveLastFramePrompt = resolveEffectiveLastFramePrompt(shot, true);
+
+  appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
+  appendLog(project, `开始为镜头 ${shot.title} 单独重生结束参考帧。`);
+  await saveProject(project);
+
+  const endFrameAsset = await generateReferenceFrameAssetForShot(
+    project,
+    shot,
+    appSettings,
+    selectedWorkflow,
+    generationReferenceInputs,
+    'end',
+    {
+      promptOverride: effectiveLastFramePrompt
+    }
+  );
+  setActiveShotAsset(project, 'lastImages', shot.id, endFrameAsset);
+
+  const hadVideoOutput = Boolean(clearActiveShotAsset(project, 'videos', shot.id));
+  const downstreamInvalidation = invalidateDownstreamLongTakeDependentOutputs(project, shot.id);
+  project.assets.finalVideo = null;
+  resetStage(project, 'shots');
+  resetStage(project, 'edit');
+
+  appendLog(
+    project,
+    downstreamInvalidation.dependentShotIds.length
+      ? `镜头 ${shot.title} 的结束参考帧已更新；当前镜头视频${
+          hadVideoOutput ? '已失效' : '待重新生成'
+        }，后续长镜头续接镜头 ${downstreamInvalidation.dependentShotIds.join(', ')} 的首帧和视频也已失效，请按顺序重新生成。`
+      : `镜头 ${shot.title} 的结束参考帧已更新；${hadVideoOutput ? '当前视频片段已失效，请重新生成。' : '请重新生成当前视频片段。'}`
+  );
+  await saveProject(project);
+}
+
 async function executeStoryboardShotVideoGeneration(projectId: string, shotId: string): Promise<void> {
   const project = await readProject(projectId);
   const shot = project.storyboard.find((item) => item.id === shotId);
@@ -4489,6 +4638,17 @@ export async function enqueueStoryboardShotImageGeneration(projectId: string, sh
       await executeStoryboardShotImageGeneration(projectId, shotId);
     },
     'Shot image generation'
+  );
+}
+
+export async function enqueueStoryboardShotLastImageGeneration(projectId: string, shotId: string): Promise<void> {
+  await enqueueStageScopedProjectTask(
+    projectId,
+    'shots',
+    async () => {
+      await executeStoryboardShotLastImageGeneration(projectId, shotId);
+    },
+    'Shot last image generation'
   );
 }
 

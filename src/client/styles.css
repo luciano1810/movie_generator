@@ -1253,12 +1253,22 @@ select:focus {
   -webkit-line-clamp: 3;
 }
 
+.stage-browser-secondary {
+  color: rgba(214, 223, 244, 0.74);
+}
+
 .stage-browser-detail {
   min-width: 0;
 }
 
 .stage-detail-card {
   min-height: 100%;
+}
+
+.stage-detail-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .stage-detail-head {
@@ -1277,6 +1287,14 @@ select:focus {
   margin: 0;
   color: var(--muted);
   line-height: 1.6;
+}
+
+.detail-card-context {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted-strong);
+  font-size: 0.8rem;
+  line-height: 1.5;
 }
 
 .stage-detail-empty {
@@ -1537,6 +1555,12 @@ select:focus {
   gap: 12px;
 }
 
+.shot-detail-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
 .shot-head {
   display: flex;
   justify-content: space-between;
@@ -1763,6 +1787,40 @@ select:focus {
 
 .asset-audio-preview audio {
   width: 100%;
+}
+
+.long-take-summary-card {
+  background:
+    radial-gradient(circle at top right, rgba(79, 140, 255, 0.16), transparent 42%),
+    linear-gradient(180deg, rgba(12, 20, 36, 0.96) 0%, rgba(7, 13, 24, 0.92) 100%);
+}
+
+.long-take-status-strip {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.long-take-shot-list {
+  display: grid;
+  gap: 10px;
+}
+
+.long-take-shot-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(4, 9, 17, 0.74);
+  border: 1px solid rgba(124, 151, 205, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.long-take-shot-item strong {
+  font-size: 0.9rem;
+}
+
+.long-take-shot-item small {
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 .bottom-grid {
@@ -2026,7 +2084,8 @@ select:focus {
   .form-grid,
   .preset-grid,
   .asset-stack,
-  .shot-meta {
+  .shot-meta,
+  .shot-detail-pair {
     grid-template-columns: 1fr;
   }
 

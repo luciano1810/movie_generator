@@ -20,7 +20,8 @@ import {
   STORY_LENGTH_LABELS,
   STORY_LENGTHS,
   STAGES,
-  STAGE_LABELS
+  STAGE_LABELS,
+  VIDEO_FPS_OPTIONS
 } from '../shared/types';
 import { SettingsDialog } from './SettingsDialog';
 
@@ -84,6 +85,12 @@ interface ReferenceLibraryPickerProps {
   onChange: (value: string) => void;
 }
 
+interface ShotBrowserGroup {
+  id: string;
+  shots: Array<Project['storyboard'][number]>;
+  longTakeIdentifier: string | null;
+}
+
 const ASPECT_RATIO_LABELS: Record<ProjectSettings['aspectRatio'], string> = {
   '21:9': '21:9 超宽横屏',
   '16:9': '16:9 横屏',
@@ -110,7 +117,7 @@ const TAB_LABELS: Record<ProjectPanelTab, string> = {
 };
 
 const TAB_DESCRIPTIONS: Record<ProjectPanelTab, string> = {
-  script: '根据输入文案生成或优化完整短剧剧本。',
+  script: '根据输入文案生成或优化完整电影剧本。',
   storyboard: '基于剧本拆分镜头，输出镜头信息、长镜头承接标识和镜头生成描述。',
   assets: '提取角色、场景、物品候选，并批量生成参考资产。',
   shots: '为每个镜头先生成参考帧，再立即生成对应视频片段。',
@@ -256,6 +263,71 @@ function isLongTakeContinuationShot(project: Project, shot: Project['storyboard'
 
   const previousShot = project.storyboard[shotIndex - 1];
   return Boolean(shot.longTakeIdentifier && previousShot?.longTakeIdentifier === shot.longTakeIdentifier);
+}
+
+function buildShotBrowserGroups(project: Project): ShotBrowserGroup[] {
+  const groups: ShotBrowserGroup[] = [];
+
+  for (const shot of project.storyboard) {
+    const previousGroup = groups[groups.length - 1] ?? null;
+    const previousShot = previousGroup?.shots[previousGroup.shots.length - 1] ?? null;
+    const sharesLongTake =
+      Boolean(shot.longTakeIdentifier) &&
+      Boolean(previousShot?.longTakeIdentifier) &&
+      previousShot?.longTakeIdentifier === shot.longTakeIdentifier;
+
+    if (previousGroup && sharesLongTake) {
+      previousGroup.shots.push(shot);
+      continue;
+    }
+
+    groups.push({
+      id: shot.id,
+      shots: [shot],
+      longTakeIdentifier: shot.longTakeIdentifier?.trim() ? shot.longTakeIdentifier : null
+    });
+  }
+
+  return groups;
+}
+
+function getShotBrowserGroupForShotId(project: Project, shotId: string | null | undefined): ShotBrowserGroup | null {
+  if (!shotId) {
+    return buildShotBrowserGroups(project)[0] ?? null;
+  }
+
+  return buildShotBrowserGroups(project).find((group) => group.shots.some((shot) => shot.id === shotId)) ?? null;
+}
+
+function formatShotBrowserGroupRange(group: ShotBrowserGroup): string {
+  const firstShot = group.shots[0];
+  const lastShot = group.shots[group.shots.length - 1];
+
+  if (!firstShot || !lastShot) {
+    return '-';
+  }
+
+  if (firstShot.id === lastShot.id) {
+    return `S${firstShot.sceneNumber} · #${firstShot.shotNumber}`;
+  }
+
+  if (firstShot.sceneNumber === lastShot.sceneNumber) {
+    return `S${firstShot.sceneNumber} · #${firstShot.shotNumber}-${lastShot.shotNumber}`;
+  }
+
+  return `S${firstShot.sceneNumber} · #${firstShot.shotNumber} 到 S${lastShot.sceneNumber} · #${lastShot.shotNumber}`;
+}
+
+function formatShotBrowserGroupTimeline(group: ShotBrowserGroup): string {
+  const firstShot = group.shots[0];
+  const lastShot = group.shots[group.shots.length - 1];
+  const totalDurationSeconds = group.shots.reduce((sum, shot) => sum + shot.durationSeconds, 0);
+
+  if (!firstShot || !lastShot) {
+    return '-';
+  }
+
+  return `${firstShot.startTimecode} - ${lastShot.endTimecode} · ${totalDurationSeconds}s`;
 }
 
 function truncateText(value: string | null | undefined, maxLength = 88): string {
@@ -812,12 +884,19 @@ function getReferenceAssetVersions(item: ReferenceAssetItem): GeneratedAsset[] {
   return item.asset ? [item.asset, ...item.assetHistory] : [];
 }
 
-function getShotAssetVersions(project: Project, stage: 'images' | 'videos', shotId: string): GeneratedAsset[] {
+function getShotAssetVersions(project: Project, stage: 'images' | 'lastImages' | 'videos', shotId: string): GeneratedAsset[] {
   const activeAsset =
     stage === 'images'
       ? project.assets.images.find((asset) => asset.shotId === shotId) ?? null
+      : stage === 'lastImages'
+        ? project.assets.lastImages.find((asset) => asset.shotId === shotId) ?? null
       : project.assets.videos.find((asset) => asset.shotId === shotId) ?? null;
-  const history = stage === 'images' ? project.assets.imageHistory[shotId] ?? [] : project.assets.videoHistory[shotId] ?? [];
+  const history =
+    stage === 'images'
+      ? project.assets.imageHistory[shotId] ?? []
+      : stage === 'lastImages'
+        ? project.assets.lastImageHistory[shotId] ?? []
+        : project.assets.videoHistory[shotId] ?? [];
 
   return activeAsset ? [activeAsset, ...history] : history;
 }
@@ -1851,6 +1930,30 @@ export function App() {
     }
   }
 
+  async function handleGenerateShotLastImage(shotId: string) {
+    if (!selectedId) {
+      return;
+    }
+
+    try {
+      setPending(`last-image-generate:${shotId}`);
+      setVideoAssetVersionIndices((current) => ({
+        ...current,
+        [shotId]: 0
+      }));
+      await requestJson<{ ok: true }>(`/api/projects/${selectedId}/storyboard/${shotId}/last-image/generate`, {
+        method: 'POST'
+      });
+      setNotice('已提交当前镜头的尾帧重生任务；当前镜头视频与受影响的后续长镜头续接镜头需要按顺序重新生成');
+      await loadProject(selectedId, true, true);
+      await loadProjects(selectedId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '提交尾帧重生任务失败');
+    } finally {
+      setPending('');
+    }
+  }
+
   async function handleSelectShotImageVersion(shotId: string, relativePath: string) {
     if (!selectedId) {
       return;
@@ -2182,8 +2285,10 @@ export function App() {
     draft?.settings.maxVideoSegmentDurationSeconds ??
     DEFAULT_SETTINGS.maxVideoSegmentDurationSeconds;
   const imageMap = new Map(project?.assets.images.map((asset) => [asset.shotId, asset]) ?? []);
+  const lastImageMap = new Map(project?.assets.lastImages.map((asset) => [asset.shotId, asset]) ?? []);
   const audioMap = new Map(project?.assets.audios.map((asset) => [asset.shotId, asset]) ?? []);
   const videoMap = new Map(project?.assets.videos.map((asset) => [asset.shotId, asset]) ?? []);
+  const shotBrowserGroups = project ? buildShotBrowserGroups(project) : [];
   const referenceEntries = project
     ? (
         [
@@ -2204,6 +2309,10 @@ export function App() {
   const selectedStoryboardShot = project?.storyboard.find((shot) => shot.id === selectedStoryboardShotId) ?? project?.storyboard[0] ?? null;
   const selectedImageShot = project?.storyboard.find((shot) => shot.id === selectedImageShotId) ?? project?.storyboard[0] ?? null;
   const selectedVideoShot = project?.storyboard.find((shot) => shot.id === selectedVideoShotId) ?? project?.storyboard[0] ?? null;
+  const selectedShotBrowserGroup =
+    project && (selectedImageShot || selectedVideoShot)
+      ? getShotBrowserGroupForShotId(project, selectedImageShot?.id ?? selectedVideoShot?.id ?? '')
+      : shotBrowserGroups[0] ?? null;
   const referenceItems = project ? allReferenceItems(project) : [];
   const generatedReferenceCount = project ? countGeneratedReferenceAssets(project) : 0;
   const failedReferenceCount = referenceItems.filter((item) => item.status === 'error').length;
@@ -2575,12 +2684,15 @@ export function App() {
     );
   }
 
-  function renderImageDetail() {
-    if (!project || !selectedImageShot) {
-      return <div className="empty-card stage-detail-empty">执行第 4 阶段后，才能在这里查看镜头参考帧生成链路。</div>;
+  function renderImageDetailCard(
+    shot: Project['storyboard'][number],
+    group: ShotBrowserGroup,
+    groupIndex: number
+  ) {
+    if (!project) {
+      return null;
     }
 
-    const shot = selectedImageShot;
     const longTakeContinuation = isLongTakeContinuationShot(project, shot);
     const technicalPromptDraft = technicalPromptDrafts[shot.id];
     const shotReferencePreviewItems = getShotReferencePreviewItems(project, shot);
@@ -2597,16 +2709,26 @@ export function App() {
     const selectedShotReferenceAsset =
       availableShotReferenceAssets.find((asset) => referenceLibraryAssetValue(asset) === shotReferenceSelectionValue) ?? null;
     const firstFramePromptValue = technicalPromptDraft?.firstFramePrompt ?? shot.firstFramePrompt;
+    const lastFramePromptValue = technicalPromptDraft?.lastFramePrompt ?? shot.lastFramePrompt;
     const imagePromptDirty = firstFramePromptValue.trim() !== shot.firstFramePrompt.trim();
+    const lastFramePromptDirty = shot.useLastFrameReference && lastFramePromptValue.trim() !== shot.lastFramePrompt.trim();
     const imagePromptPending = pending === `image-prompt:${shot.id}`;
     const imageGeneratePending = pending === `image-generate:${shot.id}`;
+    const lastImageGeneratePending = pending === `last-image-generate:${shot.id}`;
     const imageSelectPending = pending === `image-select:${shot.id}`;
     const shotReferenceAddPending = pending === `shot-reference-add:${shot.id}`;
     const imageAsset = imageMap.get(shot.id) ?? null;
+    const lastImageAsset = lastImageMap.get(shot.id) ?? null;
     const imageVersions = getShotAssetVersions(project, 'images', shot.id);
+    const lastImageVersions = getShotAssetVersions(project, 'lastImages', shot.id);
     const selectedImageIndex = Math.min(imageAssetVersionIndices[shot.id] ?? 0, Math.max(imageVersions.length - 1, 0));
     const selectedImage = imageVersions[selectedImageIndex] ?? null;
     const selectedImageIsCurrent = imageAsset?.relativePath === selectedImage?.relativePath;
+    const requiresSegmentedTailFrame = shot.durationSeconds > effectiveMaxVideoSegmentDurationSeconds;
+    const supportsLastFrameGeneration =
+      shot.useLastFrameReference || requiresSegmentedTailFrame || Boolean(lastImageAsset) || lastImageVersions.length > 0;
+    const groupCardContext =
+      group.shots.length > 1 ? `长镜头第 ${groupIndex + 1}/${group.shots.length} 段 · ${formatShotBrowserGroupRange(group)}` : null;
 
     return (
       <article className="shot-card stage-detail-card">
@@ -2615,6 +2737,7 @@ export function App() {
             <span className="eyebrow">{`S${shot.sceneNumber} · #${shot.shotNumber}`}</span>
             <h4>{shot.title}</h4>
             <p>{shot.purpose}</p>
+            {groupCardContext ? <small className="detail-card-context">{groupCardContext}</small> : null}
           </div>
           <span className={`pill ${imageAsset ? 'success' : ''}`}>
             {imageAsset ? '当前版本已就绪' : selectedImage ? '可从历史版本恢复' : '未生成'}
@@ -2673,10 +2796,7 @@ export function App() {
             </div>
             <div className="input-reference-strip-track">
               {shotReferencePreviewItems.map((reference) => (
-                <div
-                  key={`${reference.kind}:${reference.itemId}`}
-                  className="input-reference-entry"
-                >
+                <div key={`${reference.kind}:${reference.itemId}`} className="input-reference-entry">
                   <a
                     className="input-reference-chip"
                     href={assetUrl(reference.asset.relativePath)}
@@ -2745,7 +2865,13 @@ export function App() {
         </div>
         <div className="prompt-block">
           <h5>结束参考帧策略</h5>
-          <p>{shot.useLastFrameReference ? '该镜头会额外生成结束参考帧，并自动注入后续视频工作流。' : '该镜头仅生成起始参考帧，结束画面由视频工作流自然收束。'}</p>
+          <p>
+            {shot.useLastFrameReference
+              ? '该镜头会额外生成结束参考帧，并自动注入后续视频工作流。'
+              : requiresSegmentedTailFrame
+                ? `该镜头时长超过单段上限 ${effectiveMaxVideoSegmentDurationSeconds} 秒；系统会为长镜头分段生成额外补尾帧。`
+                : '该镜头仅生成起始参考帧，结束画面由视频工作流自然收束。'}
+          </p>
         </div>
         <div className="prompt-block">
           <h5>长镜头承接</h5>
@@ -2757,61 +2883,99 @@ export function App() {
               : '当前镜头未启用长镜头尾帧承接。'}
           </p>
         </div>
-        <div className="asset-box">
-          <span>起始参考帧版本</span>
-          {selectedImage ? (
-            <>
-              <img src={assetUrl(selectedImage.relativePath)} alt={shot.title} />
-              <a href={assetUrl(selectedImage.relativePath)} target="_blank" rel="noreferrer">
-                打开原图
-              </a>
-              {imageVersions.length > 1 ? (
-                <div className="inline-actions">
+        <div className="asset-stack">
+          <div className="asset-box">
+            <span>起始参考帧版本</span>
+            {selectedImage ? (
+              <>
+                <img src={assetUrl(selectedImage.relativePath)} alt={shot.title} />
+                <a href={assetUrl(selectedImage.relativePath)} target="_blank" rel="noreferrer">
+                  打开原图
+                </a>
+                {imageVersions.length > 1 ? (
+                  <div className="inline-actions">
+                    <button
+                      className="button ghost mini-button"
+                      disabled={selectedImageIndex <= 0}
+                      onClick={() =>
+                        setImageAssetVersionIndices((current) => ({
+                          ...current,
+                          [shot.id]: Math.max(0, selectedImageIndex - 1)
+                        }))
+                      }
+                      type="button"
+                    >
+                      较新
+                    </button>
+                    <button
+                      className="button ghost mini-button"
+                      disabled={selectedImageIndex >= imageVersions.length - 1}
+                      onClick={() =>
+                        setImageAssetVersionIndices((current) => ({
+                          ...current,
+                          [shot.id]: Math.min(imageVersions.length - 1, selectedImageIndex + 1)
+                        }))
+                      }
+                      type="button"
+                    >
+                      较旧
+                    </button>
+                    <small className="version-indicator">
+                      {selectedImageIndex + 1}/{imageVersions.length} · {formatTime(selectedImage.createdAt)}
+                    </small>
+                  </div>
+                ) : null}
+                {!selectedImageIsCurrent ? (
                   <button
                     className="button ghost mini-button"
-                    disabled={selectedImageIndex <= 0}
-                    onClick={() =>
-                      setImageAssetVersionIndices((current) => ({
-                        ...current,
-                        [shot.id]: Math.max(0, selectedImageIndex - 1)
-                      }))
-                    }
+                    disabled={Boolean(project.runState.isRunning) || imageSelectPending || imagePromptDirty}
+                    onClick={() => void handleSelectShotImageVersion(shot.id, selectedImage.relativePath)}
                     type="button"
                   >
-                    较新
+                    {imageSelectPending ? '切换中...' : '设为当前版本'}
                   </button>
-                  <button
-                    className="button ghost mini-button"
-                    disabled={selectedImageIndex >= imageVersions.length - 1}
-                    onClick={() =>
-                      setImageAssetVersionIndices((current) => ({
-                        ...current,
-                        [shot.id]: Math.min(imageVersions.length - 1, selectedImageIndex + 1)
-                      }))
-                    }
-                    type="button"
-                  >
-                    较旧
-                  </button>
-                  <small className="version-indicator">
-                    {selectedImageIndex + 1}/{imageVersions.length} · {formatTime(selectedImage.createdAt)}
-                  </small>
-                </div>
-              ) : null}
-              {!selectedImageIsCurrent ? (
-                <button
-                  className="button ghost mini-button"
-                  disabled={Boolean(project.runState.isRunning) || imageSelectPending || imagePromptDirty}
-                  onClick={() => void handleSelectShotImageVersion(shot.id, selectedImage.relativePath)}
-                  type="button"
-                >
-                  {imageSelectPending ? '切换中...' : '设为当前版本'}
-                </button>
-              ) : null}
-            </>
-          ) : (
-            <small>当前镜头还没有起始参考帧图片。</small>
-          )}
+                ) : null}
+              </>
+            ) : (
+              <small>当前镜头还没有起始参考帧图片。</small>
+            )}
+          </div>
+          <div className="asset-box">
+            <span>结束参考帧</span>
+            {lastImageAsset ? (
+              <>
+                <img src={assetUrl(lastImageAsset.relativePath)} alt={`${shot.title} 尾帧`} />
+                <a href={assetUrl(lastImageAsset.relativePath)} target="_blank" rel="noreferrer">
+                  打开尾帧
+                </a>
+                <small>
+                  {lastImageVersions.length > 1
+                    ? `已保留 ${lastImageVersions.length} 个尾帧版本`
+                    : `生成于 ${formatTime(lastImageAsset.createdAt)}`}
+                </small>
+              </>
+            ) : (
+              <small>
+                {supportsLastFrameGeneration ? '当前镜头还没有结束参考帧图片。' : '当前镜头暂不需要独立结束参考帧。'}
+              </small>
+            )}
+            {supportsLastFrameGeneration ? (
+              <button
+                className="button ghost mini-button"
+                disabled={
+                  Boolean(project.runState.isRunning) ||
+                  lastImageGeneratePending ||
+                  imagePromptPending ||
+                  lastFramePromptDirty ||
+                  (shot.useLastFrameReference && !lastFramePromptValue.trim())
+                }
+                onClick={() => void handleGenerateShotLastImage(shot.id)}
+                type="button"
+              >
+                {lastImageGeneratePending ? '重生中...' : lastImageAsset ? '重新生成尾帧' : '生成尾帧'}
+              </button>
+            ) : null}
+          </div>
         </div>
         <button
           className="button secondary"
@@ -2832,12 +2996,15 @@ export function App() {
     );
   }
 
-  function renderVideoDetail() {
-    if (!project || !selectedVideoShot) {
-      return <div className="empty-card stage-detail-empty">执行第 4 阶段后，才能在这里编辑视频 Prompt 并查看片段。</div>;
+  function renderVideoDetailCard(
+    shot: Project['storyboard'][number],
+    group: ShotBrowserGroup,
+    groupIndex: number
+  ) {
+    if (!project) {
+      return null;
     }
 
-    const shot = selectedVideoShot;
     const longTakeContinuation = isLongTakeContinuationShot(project, shot);
     const imageAsset = imageMap.get(shot.id) ?? null;
     const audioAsset = audioMap.get(shot.id) ?? null;
@@ -2872,6 +3039,8 @@ export function App() {
     const videoGeneratePending = pending === `video-generate:${shot.id}`;
     const videoSelectPending = pending === `video-select:${shot.id}`;
     const videoGenerationDirty = videoPromptDirty || technicalPromptDirty || audioPromptDirty;
+    const groupCardContext =
+      group.shots.length > 1 ? `长镜头第 ${groupIndex + 1}/${group.shots.length} 段 · ${formatShotBrowserGroupTimeline(group)}` : null;
 
     return (
       <article className="shot-card stage-detail-card">
@@ -2880,6 +3049,7 @@ export function App() {
             <span className="eyebrow">{`S${shot.sceneNumber} · #${shot.shotNumber}`}</span>
             <h4>{shot.title}</h4>
             <p>{shot.purpose}</p>
+            {groupCardContext ? <small className="detail-card-context">{groupCardContext}</small> : null}
           </div>
           <span className={`pill ${videoAsset ? 'success' : ''}`}>{formatShotTimeline(shot)}</span>
         </div>
@@ -3186,6 +3356,78 @@ export function App() {
           {videoGeneratePending ? '生成中...' : videoAsset ? '仅重新生成视频片段' : '仅生成视频片段'}
         </button>
       </article>
+    );
+  }
+
+  function renderShotsDetail() {
+    if (!project || !selectedShotBrowserGroup) {
+      return <div className="empty-card stage-detail-empty">执行第 4 阶段后，才能在这里查看参考帧、尾帧和视频片段。</div>;
+    }
+
+    const group = selectedShotBrowserGroup;
+    const totalDurationSeconds = group.shots.reduce((sum, shot) => sum + shot.durationSeconds, 0);
+    const readyGroupImageCount = group.shots.filter((shot) => imageMap.has(shot.id)).length;
+    const readyGroupLastImageCount = group.shots.filter((shot) => lastImageMap.has(shot.id)).length;
+    const readyGroupVideoCount = group.shots.filter((shot) => videoMap.has(shot.id)).length;
+
+    return (
+      <div className="stage-detail-stack">
+        {group.shots.length > 1 ? (
+          <article className="shot-card stage-detail-card long-take-summary-card">
+            <div className="stage-detail-head">
+              <div>
+                <span className="eyebrow">{group.longTakeIdentifier ? `长镜头组 ${group.longTakeIdentifier}` : '连续长镜头'}</span>
+                <h4>{`${group.shots[0]?.title ?? '长镜头'} 到 ${group.shots[group.shots.length - 1]?.title ?? ''}`}</h4>
+                <p>左侧列表已把连续长镜头聚合成一项；这里展开组内每一段镜头的参考帧、尾帧、视频、配音与 Prompt。</p>
+              </div>
+              <span className="pill success">{formatShotBrowserGroupTimeline(group)}</span>
+            </div>
+            <div className="status-strip long-take-status-strip">
+              <div className="status-item">
+                <span>镜头段数</span>
+                <strong>{group.shots.length}</strong>
+              </div>
+              <div className="status-item">
+                <span>起始帧</span>
+                <strong>{readyGroupImageCount}/{group.shots.length}</strong>
+              </div>
+              <div className="status-item">
+                <span>尾帧</span>
+                <strong>{readyGroupLastImageCount}/{group.shots.length}</strong>
+              </div>
+              <div className="status-item">
+                <span>视频片段</span>
+                <strong>{readyGroupVideoCount}/{group.shots.length}</strong>
+              </div>
+              <div className="status-item">
+                <span>总时长</span>
+                <strong>{totalDurationSeconds}s</strong>
+              </div>
+            </div>
+            <div className="long-take-shot-list">
+              {group.shots.map((shot, index) => (
+                <div key={shot.id} className="long-take-shot-item">
+                  <strong>{`第 ${index + 1} 段 · S${shot.sceneNumber} #${shot.shotNumber} · ${shot.title}`}</strong>
+                  <small>
+                    {formatShotTimeline(shot)}
+                    {videoMap.has(shot.id)
+                      ? ' · 视频已生成'
+                      : imageMap.has(shot.id)
+                        ? ' · 已有参考帧'
+                        : ' · 待生成'}
+                  </small>
+                </div>
+              ))}
+            </div>
+          </article>
+        ) : null}
+        {group.shots.map((shot, index) => (
+          <div key={shot.id} className="shot-detail-pair">
+            {renderImageDetailCard(shot, group, index)}
+            {renderVideoDetailCard(shot, group, index)}
+          </div>
+        ))}
+      </div>
     );
   }
 
@@ -3850,70 +4092,114 @@ export function App() {
                         <aside className="stage-browser-sidebar">
                           <div className="section-head stage-browser-sidebar-head">
                             <h4>镜头列表</h4>
-                            <span>{project.storyboard.length} 条</span>
+                            <span>{shotBrowserGroups.length} 条</span>
                           </div>
                           <div className="stage-browser-list">
-                            {project.storyboard.map((shot) => {
-                              const longTakeContinuation = isLongTakeContinuationShot(project, shot);
-                              const imageAsset = imageMap.get(shot.id) ?? null;
-                              const previewAsset = getShotPreviewAsset(project, shot, imageAsset);
-                              const videoAsset = videoMap.get(shot.id) ?? null;
-                              const firstFramePromptValue =
-                                technicalPromptDrafts[shot.id]?.firstFramePrompt ?? shot.firstFramePrompt;
-                              const imageVersions = getShotAssetVersions(project, 'images', shot.id);
-                              const videoVersions = getShotAssetVersions(project, 'videos', shot.id);
-                              const isActive = selectedImageShot?.id === shot.id || selectedVideoShot?.id === shot.id;
+                            {shotBrowserGroups.map((group) => {
+                              const leadShot = group.shots[0];
+                              const previewAsset = leadShot
+                                ? getShotPreviewAsset(project, leadShot, imageMap.get(leadShot.id) ?? null)
+                                : null;
+                              const groupHasVideo = group.shots.some((shot) => videoMap.has(shot.id));
+                              const groupHasImage = group.shots.some((shot) => imageMap.has(shot.id));
+                              const groupHasHistory = group.shots.some((shot) => {
+                                const imageVersions = getShotAssetVersions(project, 'images', shot.id);
+                                const videoVersions = getShotAssetVersions(project, 'videos', shot.id);
+                                return imageVersions.length > 0 || videoVersions.length > 0;
+                              });
+                              const isActive = group.shots.some(
+                                (shot) => selectedImageShot?.id === shot.id || selectedVideoShot?.id === shot.id
+                              );
+                              const firstFramePromptValue = leadShot
+                                ? technicalPromptDrafts[leadShot.id]?.firstFramePrompt ?? leadShot.firstFramePrompt
+                                : '';
+                              const statusLabel = group.shots.length > 1
+                                ? group.shots.every((shot) => videoMap.has(shot.id))
+                                  ? '长镜头已齐'
+                                  : groupHasVideo
+                                    ? '部分视频已生成'
+                                    : groupHasImage
+                                      ? '已启动'
+                                      : groupHasHistory
+                                        ? '历史版本'
+                                        : '待生成'
+                                : groupHasVideo
+                                  ? '视频已生成'
+                                  : groupHasImage
+                                    ? '已生成参考帧'
+                                    : groupHasHistory
+                                      ? '历史版本'
+                                      : '待生成';
+                              const statusTone =
+                                group.shots.every((shot) => videoMap.has(shot.id))
+                                  ? 'success'
+                                  : groupHasVideo || groupHasImage
+                                    ? 'running'
+                                    : '';
 
                               return (
                                 <button
-                                  key={shot.id}
+                                  key={group.id}
                                   className={`stage-browser-item ${isActive ? 'active' : ''}`}
                                   onClick={() => {
-                                    setSelectedImageShotId(shot.id);
-                                    setSelectedVideoShotId(shot.id);
+                                    if (!leadShot) {
+                                      return;
+                                    }
+
+                                    setSelectedImageShotId(leadShot.id);
+                                    setSelectedVideoShotId(leadShot.id);
                                   }}
                                   type="button"
                                 >
                                   <div className="stage-browser-thumb">
                                     {previewAsset ? (
-                                      <img src={assetUrl(previewAsset.relativePath)} alt={shot.title} />
+                                      <img src={assetUrl(previewAsset.relativePath)} alt={leadShot?.title ?? '镜头预览'} />
                                     ) : (
                                       <div className="stage-browser-thumb-placeholder">
-                                        <span>{`S${shot.sceneNumber}`}</span>
-                                        <strong>{`#${shot.shotNumber}`}</strong>
+                                        <span>{leadShot ? `S${leadShot.sceneNumber}` : 'SHOT'}</span>
+                                        <strong>{leadShot ? `#${leadShot.shotNumber}` : '-'}</strong>
                                       </div>
                                     )}
                                   </div>
                                   <div className="stage-browser-copy">
                                     <div className="stage-browser-copy-top">
-                                      <strong>{shot.title}</strong>
-                                      <span className={`pill ${videoAsset ? 'success' : imageAsset ? 'running' : ''}`}>
-                                        {videoAsset
-                                          ? '视频已生成'
-                                          : imageAsset
-                                            ? '已生成参考帧'
-                                            : imageVersions.length || videoVersions.length
-                                              ? '历史版本'
-                                              : '待生成'}
-                                      </span>
+                                      <strong>
+                                        {group.shots.length > 1
+                                          ? group.longTakeIdentifier
+                                            ? `长镜头 ${group.longTakeIdentifier}`
+                                            : `${leadShot?.title ?? '长镜头'} 等 ${group.shots.length} 段`
+                                          : leadShot?.title ?? '镜头'}
+                                      </strong>
+                                      <span className={`pill ${statusTone}`}>{statusLabel}</span>
                                     </div>
                                     <small>
-                                      {`S${shot.sceneNumber} · #${shot.shotNumber} · ${formatShotTimeline(shot)}`}
-                                      {shot.longTakeIdentifier
-                                        ? ` · ${longTakeContinuation ? '长镜头承接' : '长镜头起始'} ${shot.longTakeIdentifier}`
-                                        : ''}
+                                      {formatShotBrowserGroupRange(group)} · {formatShotBrowserGroupTimeline(group)}
+                                      {group.shots.length > 1 ? ` · ${group.shots.length} 段` : ''}
                                     </small>
-                                    <p>{truncateText(firstFramePromptValue, 78)}</p>
+                                    <small>
+                                      {group.shots.length > 1
+                                        ? `${group.shots.filter((shot) => videoMap.has(shot.id)).length}/${group.shots.length} 视频 · ${group.shots.filter((shot) => lastImageMap.has(shot.id)).length}/${group.shots.length} 尾帧`
+                                        : leadShot?.longTakeIdentifier
+                                          ? `长镜头 ${isLongTakeContinuationShot(project, leadShot) ? '承接' : '起始'} ${leadShot.longTakeIdentifier}`
+                                          : '单镜头'}
+                                    </small>
+                                    <p>
+                                      {group.shots.length > 1
+                                        ? truncateText(group.shots.map((shot) => shot.title).join(' / '), 78)
+                                        : truncateText(firstFramePromptValue, 78)}
+                                    </p>
+                                    {group.shots.length > 1 ? (
+                                      <p className="stage-browser-secondary">
+                                        {truncateText(group.shots.map((shot) => shot.purpose).join(' / '), 96)}
+                                      </p>
+                                    ) : null}
                                   </div>
                                 </button>
                               );
                             })}
                           </div>
                         </aside>
-                        <div className="stage-browser-detail">
-                          {renderImageDetail()}
-                          {renderVideoDetail()}
-                        </div>
+                        <div className="stage-browser-detail">{renderShotsDetail()}</div>
                       </div>
                     ) : (
                       <div className="empty-card">执行第 4 阶段后，才能在这里查看参考帧与视频片段。</div>
@@ -4615,8 +4901,7 @@ export function App() {
                 </label>
                 <label className="field">
                   <span>FPS</span>
-                  <input
-                    type="number"
+                  <select
                     value={draft.settings.fps}
                     onChange={(event) =>
                       setDraft((current) => {
@@ -4626,13 +4911,19 @@ export function App() {
                               ...current,
                               settings: {
                                 ...current.settings,
-                                fps: Number(event.target.value) || current.settings.fps
+                                fps: Number(event.target.value)
                               }
                             }
                           : current;
                       })
                     }
-                  />
+                  >
+                    {VIDEO_FPS_OPTIONS.map((fps) => (
+                      <option key={fps} value={fps}>
+                        {fps}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <label className="field span-2">
                   <span>TTS 工作流</span>
@@ -4670,7 +4961,7 @@ export function App() {
                 </label>
               </div>
               <p className="settings-hint">
-                项目篇幅会直接约束剧本阶段的目标场景数和总时长，并继续影响后续拆镜颗粒度。修改篇幅后，需要重新执行“剧本生成”，后续阶段才会基于新篇幅生效。这里显示的是当前系统允许的单个镜头视频硬上限；镜头时长超过该值时，需要在分镜阶段主动拆成多个镜头。
+                项目篇幅会通过调整剧本生成 prompt 来影响目标长度与节奏，并继续影响后续拆镜颗粒度；它不再因为长度不足直接触发重生成或报错。修改篇幅后，需要重新执行“剧本生成”，后续阶段才会基于新篇幅生效。这里显示的是当前系统允许的单个镜头视频硬上限；镜头时长超过该值时，需要在分镜阶段主动拆成多个镜头。
               </p>
               <p className="settings-hint">
                 当前项目的 TTS 状态：{ttsWorkflowStatusLabel}。
