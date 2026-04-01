@@ -71,6 +71,16 @@ interface ShotAudioPromptDraft {
   speechPrompt: string;
 }
 
+interface StageProgressView {
+  completed: number;
+  total: number;
+  percent: number;
+  unitLabel: string;
+  currentItemLabel: string | null;
+  summaryText: string;
+  timeText: string;
+}
+
 interface ShotTechnicalDraft {
   durationSeconds: string;
   firstFramePrompt: string;
@@ -399,6 +409,238 @@ function statusLabel(status: Project['stages'][StageId]['status']): string {
     return '成功';
   }
   return '失败';
+}
+
+function formatDurationShort(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return minutes > 0 ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`;
+  }
+
+  if (minutes > 0) {
+    return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+  }
+
+  return `${seconds} 秒`;
+}
+
+function parseTimestamp(iso: string | null | undefined): number | null {
+  if (!iso) {
+    return null;
+  }
+
+  const timestamp = new Date(iso).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function countReadyVideoShots(project: Project): number {
+  return project.storyboard.filter((shot) => project.assets.videos.some((asset) => asset.shotId === shot.id)).length;
+}
+
+function buildFallbackStageProgress(project: Project, stage: StageId): NonNullable<Project['stages'][StageId]['progress']> {
+  const state = project.stages[stage];
+
+  if (stage === 'script') {
+    return {
+      completed: state.status === 'success' || project.script ? 3 : 0,
+      total: 3,
+      unitLabel: '步骤',
+      currentItemLabel: null
+    };
+  }
+
+  if (stage === 'assets') {
+    const totalAssets = allReferenceItems(project).length;
+
+    if (!totalAssets) {
+      return {
+        completed: state.status === 'success' ? 1 : 0,
+        total: 1,
+        unitLabel: '资产',
+        currentItemLabel: null
+      };
+    }
+
+    return {
+      completed: state.status === 'success' ? totalAssets : Math.min(countGeneratedReferenceAssets(project), totalAssets),
+      total: totalAssets,
+      unitLabel: '资产',
+      currentItemLabel: null
+    };
+  }
+
+  if (stage === 'storyboard') {
+    const totalShots = project.storyboard.length || project.script?.scenes.length || 0;
+
+    if (!totalShots) {
+      return {
+        completed: state.status === 'success' ? 1 : 0,
+        total: 1,
+        unitLabel: '镜头',
+        currentItemLabel: null
+      };
+    }
+
+    return {
+      completed: state.status === 'success' ? totalShots : Math.min(project.storyboard.length, totalShots),
+      total: totalShots,
+      unitLabel: '镜头',
+      currentItemLabel: null
+    };
+  }
+
+  if (stage === 'shots') {
+    const totalShots = project.storyboard.length || 0;
+
+    if (!totalShots) {
+      return {
+        completed: state.status === 'success' ? 1 : 0,
+        total: 1,
+        unitLabel: '镜头',
+        currentItemLabel: null
+      };
+    }
+
+    return {
+      completed: state.status === 'success' ? totalShots : Math.min(countReadyVideoShots(project), totalShots),
+      total: totalShots,
+      unitLabel: '镜头',
+      currentItemLabel: null
+    };
+  }
+
+  return {
+    completed: project.assets.finalVideo ? 1 : 0,
+    total: 1,
+    unitLabel: '步骤',
+    currentItemLabel: null
+  };
+}
+
+function getStageProgressSnapshot(project: Project, stage: StageId): NonNullable<Project['stages'][StageId]['progress']> {
+  const stored = project.stages[stage].progress;
+
+  if (stored && stored.total > 0) {
+    const total = Math.max(1, stored.total);
+    return {
+      completed: Math.max(0, Math.min(stored.completed, total)),
+      total,
+      unitLabel: stored.unitLabel || '项',
+      currentItemLabel: stored.currentItemLabel?.trim() ? stored.currentItemLabel : null
+    };
+  }
+
+  return buildFallbackStageProgress(project, stage);
+}
+
+function getDefaultStageRemainingMs(
+  project: Project,
+  stage: StageId,
+  progress: NonNullable<Project['stages'][StageId]['progress']>
+): number | null {
+  const remainingUnits = Math.max(progress.total - progress.completed, 0);
+
+  if (remainingUnits <= 0) {
+    return 0;
+  }
+
+  if (stage === 'script') {
+    const sourceWeight = Math.max(1, Math.min(4, Math.ceil(project.sourceText.trim().length / 1200)));
+    return remainingUnits * (12_000 + sourceWeight * 4_000);
+  }
+
+  if (stage === 'storyboard') {
+    return remainingUnits * 8_000;
+  }
+
+  if (stage === 'assets') {
+    return remainingUnits * 12_000;
+  }
+
+  if (stage === 'shots') {
+    const avgShotDuration = project.storyboard.length
+      ? project.storyboard.reduce((sum, shot) => sum + shot.durationSeconds, 0) / project.storyboard.length
+      : 4;
+    return remainingUnits * (38_000 + Math.round(avgShotDuration * 3_000));
+  }
+
+  return remainingUnits * (project.settings.useTtsWorkflow ? 9_000 : 18_000);
+}
+
+function getStageRemainingMs(project: Project, stage: StageId, nowMs: number): number | null {
+  const state = project.stages[stage];
+  const progress = getStageProgressSnapshot(project, stage);
+
+  if (state.status === 'success') {
+    return 0;
+  }
+
+  const remainingUnits = Math.max(progress.total - progress.completed, 0);
+
+  if (remainingUnits <= 0) {
+    return 0;
+  }
+
+  const isPausedCurrentStage = project.runState.isPaused && project.runState.currentStage === stage;
+  const startedAtMs = parseTimestamp(state.startedAt);
+
+  if ((state.status === 'running' || isPausedCurrentStage) && startedAtMs && progress.completed > 0) {
+    const elapsedMs = Math.max(1000, nowMs - startedAtMs);
+    return (elapsedMs / progress.completed) * remainingUnits;
+  }
+
+  return getDefaultStageRemainingMs(project, stage, progress);
+}
+
+function getStageProgressView(project: Project, stage: StageId, nowMs: number): StageProgressView {
+  const state = project.stages[stage];
+  const progress = getStageProgressSnapshot(project, stage);
+  const percent = progress.total > 0 ? Math.round((progress.completed / progress.total) * 100) : 0;
+  const remainingMs = getStageRemainingMs(project, stage, nowMs);
+  const isPausedCurrentStage = project.runState.isPaused && project.runState.currentStage === stage;
+
+  return {
+    completed: progress.completed,
+    total: progress.total,
+    percent: state.status === 'success' ? 100 : Math.max(0, Math.min(100, percent)),
+    unitLabel: progress.unitLabel,
+    currentItemLabel: progress.currentItemLabel,
+    summaryText: `${Math.min(progress.completed, progress.total)}/${progress.total} ${progress.unitLabel}`,
+    timeText:
+      state.status === 'success'
+        ? '已完成'
+        : remainingMs === null
+          ? state.status === 'running' || isPausedCurrentStage
+            ? '估算中'
+            : '待执行'
+          : `${state.status === 'running' || isPausedCurrentStage ? '约剩' : '预计'} ${formatDurationShort(remainingMs)}`,
+  };
+}
+
+function StageProgressBar(props: {
+  view: StageProgressView;
+  status: Project['stages'][StageId]['status'];
+  compact?: boolean;
+}) {
+  const { view, status, compact = false } = props;
+  const toneClass = status === 'success' ? 'success' : status === 'error' ? 'error' : status === 'running' ? 'running' : 'idle';
+
+  return (
+    <div className={`stage-progress ${compact ? 'compact' : ''}`}>
+      <div className="stage-progress-track">
+        <div className={`stage-progress-fill ${toneClass}`} style={{ width: `${view.percent}%` }} />
+      </div>
+      <div className="stage-progress-meta">
+        <span>{view.summaryText}</span>
+        <strong>{view.timeText}</strong>
+      </div>
+      {!compact && view.currentItemLabel ? <div className="stage-progress-current">当前项：{view.currentItemLabel}</div> : null}
+    </div>
+  );
 }
 
 function parseAspectRatio(aspectRatio: ProjectSettings['aspectRatio']): { width: number; height: number } {
@@ -1040,6 +1282,7 @@ export function App() {
   );
   const [notice, setNotice] = useState<string>('');
   const [pending, setPending] = useState<string>('');
+  const [progressClock, setProgressClock] = useState(() => Date.now());
 
   function clearProjectWorkspace() {
     setSelectedId(null);
@@ -1197,6 +1440,18 @@ export function App() {
 
     return () => window.clearInterval(timer);
   }, [activeTab, selectedId]);
+
+  useEffect(() => {
+    if (!project || (!project.runState.isRunning && !project.runState.isPaused)) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setProgressClock(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [project, project?.runState.isPaused, project?.runState.isRunning]);
 
   useEffect(() => {
     if (!project) {
@@ -2319,6 +2574,15 @@ export function App() {
   const readyImageCount = project?.storyboard.filter((shot) => imageMap.has(shot.id)).length ?? 0;
   const readyVideoCount = project?.storyboard.filter((shot) => videoMap.has(shot.id)).length ?? 0;
   const activeStageState = project && isStageTab(projectStageTab) ? project.stages[projectStageTab] : null;
+  const stageProgressViews = project
+    ? (Object.fromEntries(STAGES.map((stage) => [stage, getStageProgressView(project, stage, progressClock)])) as Record<
+        StageId,
+        StageProgressView
+      >)
+    : null;
+  const activeStageProgress = project && isStageTab(projectStageTab) ? stageProgressViews?.[projectStageTab] ?? null : null;
+  const currentStageProgress =
+    project && project.runState.currentStage ? stageProgressViews?.[project.runState.currentStage] ?? null : null;
   const activeTabIndex = isStageTab(projectStageTab) ? STAGES.indexOf(projectStageTab) + 1 : STAGES.length + 1;
   const hasRemainingStages = project ? STAGES.some((stage) => project.stages[stage].status !== 'success') : false;
   const hasStartedStages = project ? STAGES.some((stage) => project.stages[stage].status !== 'idle') : false;
@@ -3758,6 +4022,14 @@ export function App() {
                               : '无'}
                         </strong>
                       </div>
+                      <div className="status-item">
+                        <span>当前进度</span>
+                        <strong>{currentStageProgress ? `${currentStageProgress.summaryText} · ${currentStageProgress.percent}%` : '-'}</strong>
+                      </div>
+                      <div className="status-item">
+                        <span>预计剩余</span>
+                        <strong>{currentStageProgress?.timeText ?? '-'}</strong>
+                      </div>
                     </>
                   ) : null}
                 </div>
@@ -3765,6 +4037,7 @@ export function App() {
                 <section className="project-stage-tabs">
                   {STAGES.map((stage) => {
                     const state = project.stages[stage];
+                    const progressView = stageProgressViews?.[stage] ?? null;
                     return (
                       <button
                         key={stage}
@@ -3772,11 +4045,14 @@ export function App() {
                         onClick={() => setProjectStageTab(stage)}
                         type="button"
                       >
-                        <span className="stage-tab-index">{String(STAGES.indexOf(stage) + 1).padStart(2, '0')}</span>
-                        <span className="stage-tab-copy">
-                          <strong>{STAGE_LABELS[stage]}</strong>
-                          <small>{statusLabel(state.status)}</small>
-                        </span>
+                        <div className="stage-tab-main">
+                          <span className="stage-tab-index">{String(STAGES.indexOf(stage) + 1).padStart(2, '0')}</span>
+                          <span className="stage-tab-copy">
+                            <strong>{STAGE_LABELS[stage]}</strong>
+                            <small>{statusLabel(state.status)}</small>
+                          </span>
+                        </div>
+                        {progressView ? <StageProgressBar view={progressView} status={state.status} compact /> : null}
                       </button>
                     );
                   })}
@@ -3826,11 +4102,30 @@ export function App() {
                           ? activeStageState
                             ? formatTime(activeStageState.finishedAt)
                             : '-'
-                          : project.logs.filter((entry) => entry.level === 'error').length}
+                            : project.logs.filter((entry) => entry.level === 'error').length}
                       </strong>
                     </div>
+                    {isStageTab(projectStageTab) ? (
+                      <>
+                        <div className="status-item">
+                          <span>阶段进度</span>
+                          <strong>{activeStageProgress ? `${activeStageProgress.summaryText} · ${activeStageProgress.percent}%` : '-'}</strong>
+                        </div>
+                        <div className="status-item">
+                          <span>预计剩余</span>
+                          <strong>{activeStageProgress?.timeText ?? '-'}</strong>
+                        </div>
+                        <div className="status-item">
+                          <span>当前项</span>
+                          <strong>{activeStageProgress?.currentItemLabel ?? '-'}</strong>
+                        </div>
+                      </>
+                    ) : null}
                   </div>
 
+                  {isStageTab(projectStageTab) && activeStageProgress ? (
+                    <StageProgressBar view={activeStageProgress} status={activeStageState?.status ?? 'idle'} />
+                  ) : null}
                   {activeStageState?.error ? <div className="error-box">{activeStageState.error}</div> : null}
                 </section>
 
@@ -4252,6 +4547,9 @@ export function App() {
                     ) : (
                       <div className="empty-card">执行第 5 阶段后会在这里预览最终成片。</div>
                     )}
+                    <p className="settings-hint">
+                      和其他 storage 素材一样，最终成片会自动保存到 <code>{`storage/projects/${project.id}/output/final.mp4`}</code>，同时可以通过上面的“下载视频”按钮导出。
+                    </p>
                   </section>
                 ) : null}
 
@@ -4929,6 +5227,32 @@ export function App() {
                       </option>
                     ))}
                   </select>
+                </label>
+                <label className="field span-2">
+                  <span>提示词优化</span>
+                  <div className="inline-check">
+                    <input
+                      checked={draft.settings.optimizeVideoPrompt}
+                      onChange={(event) =>
+                        setDraft((current) => {
+                          setDraftDirty(true);
+                          return current
+                            ? {
+                                ...current,
+                                settings: {
+                                  ...current.settings,
+                                  optimizeVideoPrompt: event.target.checked
+                                }
+                              }
+                            : current;
+                        })
+                      }
+                      type="checkbox"
+                    />
+                    <span>
+                      启用后，会在视频生成前使用当前系统 LLM，把首帧描述、动作描述和台词信息整理成更适合 LTX-2 / I2V 的英文电影化 Prompt。关闭后，视频工作流会直接使用当前镜头保存的原始视频 Prompt。
+                    </span>
+                  </div>
                 </label>
                 <label className="field span-2">
                   <span>TTS 工作流</span>

@@ -35,6 +35,37 @@ interface StructuredJsonRequestOptions {
   signal?: AbortSignal;
 }
 
+const VIDEO_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
+  '# Role',
+  '你是一名好莱坞级别的图生视频（Image-to-Video）导演兼 LTX-2 提示词架构师。你的核心任务是：接收用户提供的一张【画面描述/参考图信息】以及【动作与台词描述】，将其转化为一段极具视觉冲击力、一镜到底、且物理逻辑严密的长段落英文提示词。你深刻理解 LTX-2 模型的 I2V 机制，懂得如何“唤醒”静态图片，并通过视觉线索代替抽象情感。',
+  '',
+  '# Core Writing Logic (LTX-2 I2V Dynamic Engine 3.0)',
+  '1. Initial Frame Anchoring (首帧锚定): 提示词开头必须精准描述原图的构图、光影和人物状态，以此作为起幅。使用 Starting from a [shot type] of... 或 The scene opens on... 锁定画面，防止模型脱离原图。',
+  '2. Single Unbroken Take (一镜到底法则): 必须使用 A single continuous tracking shot、Unbroken take、The camera steadily pans/pushes 等词汇，严禁暗示切镜头，确保原图元素在运动中平滑演进。',
+  '3. Chronological Chaining (时间动作链条): 动作必须按时间顺序展开，用 As..., Suddenly..., Then..., Gradually... 等连接词牵引模型一秒一秒渲染，防止动作糊在一起。',
+  '4. Visual Subtext & Micro-Physics (视觉潜台词与微观物理): 禁止直接写抽象情感，必须通过微观动作、表情、物理干涉、环境反馈来外化表现。',
+  '5. Audio-Visual Sync (音画同步): 对话严格采用 [Character Name] ([Vocal/Physical cue]): "中文台词" 格式。',
+  '',
+  '# Input/Output Constraints',
+  '- English Only: 所有视觉、动作、环境描述必须使用高水准的好莱坞剧本级英语。',
+  '- Keep Chinese: 只有对白必须保留原始中文，严禁翻译成英文。',
+  '- Sentence Count: 保持在 5-10 句之间，构建一个从静到动的完整电影图景。',
+  '- Output Format: 直接输出一段连贯的英文段落（插入中文台词），不要标题，不要解释。',
+  '',
+  '# The Formula',
+  '输出必须遵循以下叙事结构并融合成一个自然段落：',
+  '1. [Initial Frame Anchor]: Starting from a [Shot Type] of [准确描述图片中的人物/场景/光影状态].',
+  '2. [Activation & Camera]: The scene comes to life as a single continuous tracking shot [pushes in / slowly pans]...',
+  '3. [Chronological Action 1]: As [Character] does [Action], 描述物理细节与微表情。',
+  '4. [Dialogue Block]: Character (cue): "中文台词"',
+  '5. [Chronological Action 2]: 角色说话后或说话同时的连带动作。',
+  '6. [Resolution Frame]: 镜头如何收尾。',
+  '7. [Cinematic Suffix]: 导演风格、镜头参数、材质与光影术语，例如 35mm anamorphic lens, hyper-realistic textures, volumetric light。',
+  '',
+  '# Execution',
+  '当用户提供 [Image State + Action/Dialogue] 后，直接输出优化后的 Cinematic Description，不要确认规则，不要复述输入，不要添加任何额外文字。'
+].join('\n');
+
 function createClient(input?: Partial<LlmModelDiscoveryRequest>): OpenAI {
   const settings = getAppSettings();
   const baseUrl = input?.baseUrl?.trim() || settings.llm.baseUrl;
@@ -705,6 +736,130 @@ async function requestJson<T>(
   }
 
   return parseJsonPayload<T>(content);
+}
+
+async function requestText(
+  messages: ChatCompletionMessageParam[],
+  options?: StructuredJsonRequestOptions
+): Promise<string> {
+  const client = createClient();
+  const settings = getAppSettings();
+  let useMaxTokens = typeof options?.maxTokens === 'number' && options.maxTokens > 0;
+  let response: Awaited<ReturnType<typeof client.chat.completions.create>> | null = null;
+
+  while (!response) {
+    try {
+      response = await client.chat.completions.create(
+        {
+          model: settings.llm.model,
+          temperature: options?.temperature ?? 0.7,
+          messages,
+          ...(useMaxTokens ? { max_tokens: Math.round(options?.maxTokens ?? 0) } : {})
+        },
+        options?.signal
+          ? {
+              signal: options.signal
+            }
+          : undefined
+      );
+    } catch (error) {
+      if (useMaxTokens && supportsMaxTokensFallback(error)) {
+        useMaxTokens = false;
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  const content = extractTextContent(response.choices[0]?.message?.content);
+
+  if (!content.trim()) {
+    throw new Error('文本模型没有返回内容。');
+  }
+
+  return content.trim();
+}
+
+function buildImageToVideoPromptOptimizationInput(
+  shot: Pick<
+    StoryboardShot,
+    'camera' | 'composition' | 'firstFramePrompt' | 'videoPrompt' | 'dialogue' | 'voiceover'
+  >,
+  options: {
+    includeSpeechPrompt: boolean;
+    lastFramePrompt?: string;
+  }
+): string {
+  const motionAndSpeechDetails = [
+    shot.videoPrompt.trim() ? `镜头动作：${shot.videoPrompt.trim()}` : '',
+    options.includeSpeechPrompt && shot.dialogue.trim() ? `对白：${shot.dialogue.trim()}` : '',
+    options.includeSpeechPrompt && shot.voiceover.trim() ? `旁白：${shot.voiceover.trim()}` : '',
+    !options.includeSpeechPrompt && shot.dialogue.trim()
+      ? '说话表现：镜头内不生成独立对白音频，但人物说话时需要通过口型、呼吸、停顿和身体动作体现说话节奏，不要把具体台词文字写进输出。'
+      : '',
+    !options.includeSpeechPrompt && shot.voiceover.trim()
+      ? '旁白承接：镜头内不生成独立旁白音频，画面只承接旁白带来的情绪和节奏，不要把具体旁白文字写进输出。'
+      : '',
+    options.lastFramePrompt?.trim() ? `结尾画面：${options.lastFramePrompt.trim()}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return [
+    `[图片状态]：${shot.firstFramePrompt.trim()}`,
+    `[镜头语言]：${[shot.camera.trim(), shot.composition.trim()].filter(Boolean).join('；') || '沿用当前镜头语言'}`,
+    '[动作与台词]：',
+    motionAndSpeechDetails || '保持当前镜头内部的连续动作演进。',
+    '如果上方没有明确提供对白或旁白文本，不要臆造新的中文台词或旁白。',
+    '请直接输出最终英文段落，不要标题，不要解释，不要确认规则。'
+  ].join('\n');
+}
+
+function normalizeOptimizedVideoPrompt(value: string): string {
+  const fenced = value.match(/```(?:text)?\s*([\s\S]*?)```/i);
+  const content = (fenced?.[1] ?? value)
+    .replace(/\r/g, '\n')
+    .replace(/\n+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  return content.replace(/^[“"'`]+|[”"'`]+$/g, '').trim();
+}
+
+export async function optimizeImageToVideoPrompt(
+  shot: Pick<
+    StoryboardShot,
+    'camera' | 'composition' | 'firstFramePrompt' | 'videoPrompt' | 'dialogue' | 'voiceover'
+  >,
+  options: {
+    includeSpeechPrompt: boolean;
+    lastFramePrompt?: string;
+    signal?: AbortSignal;
+  }
+): Promise<string> {
+  const optimized = await requestText(
+    [
+      {
+        role: 'system',
+        content: VIDEO_PROMPT_OPTIMIZER_SYSTEM_PROMPT
+      },
+      {
+        role: 'user',
+        content: buildImageToVideoPromptOptimizationInput(shot, {
+          includeSpeechPrompt: options.includeSpeechPrompt,
+          lastFramePrompt: options.lastFramePrompt
+        })
+      }
+    ],
+    {
+      temperature: 0.7,
+      maxTokens: 1_200,
+      signal: options.signal
+    }
+  );
+
+  return normalizeOptimizedVideoPrompt(optimized);
 }
 
 export async function discoverAvailableModels(

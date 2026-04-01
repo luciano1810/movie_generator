@@ -77,6 +77,14 @@ export interface StageState {
   startedAt: string | null;
   finishedAt: string | null;
   error: string | null;
+  progress: StageProgress | null;
+}
+
+export interface StageProgress {
+  completed: number;
+  total: number;
+  unitLabel: string;
+  currentItemLabel: string | null;
 }
 
 export interface ProjectSettings {
@@ -95,6 +103,7 @@ export interface ProjectSettings {
   fps: number;
   maxVideoSegmentDurationSeconds: number;
   maxShotsPerScene: number;
+  optimizeVideoPrompt: boolean;
   useTtsWorkflow: boolean;
 }
 
@@ -679,6 +688,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   fps: VIDEO_FPS_OPTIONS[0],
   maxVideoSegmentDurationSeconds: 4,
   maxShotsPerScene: 3,
+  optimizeVideoPrompt: true,
   useTtsWorkflow: false
 };
 
@@ -863,6 +873,7 @@ export function normalizeSettings(input?: Partial<ProjectSettings>): ProjectSett
       DEFAULT_SETTINGS.maxVideoSegmentDurationSeconds
     ),
     maxShotsPerScene: normalizePositiveInteger(merged.maxShotsPerScene, DEFAULT_SETTINGS.maxShotsPerScene),
+    optimizeVideoPrompt: normalizeBoolean(merged.optimizeVideoPrompt, DEFAULT_SETTINGS.optimizeVideoPrompt),
     useTtsWorkflow: normalizeBoolean(merged.useTtsWorkflow, DEFAULT_SETTINGS.useTtsWorkflow)
   };
 }
@@ -1142,7 +1153,8 @@ export function createEmptyStageState(): StageState {
     status: 'idle',
     startedAt: null,
     finishedAt: null,
-    error: null
+    error: null,
+    progress: null
   };
 }
 

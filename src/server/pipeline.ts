@@ -12,6 +12,7 @@ import {
   type ReferenceAssetKind,
   type RunStage,
   type StageId,
+  type StageProgress,
   createIdleRunState,
   createEmptyReferenceLibrary,
   filterReferenceLibraryForShot,
@@ -34,6 +35,7 @@ import {
   extractReferenceLibraryFromScript,
   generateScriptFromText,
   generateStoryboardFromScript,
+  optimizeImageToVideoPrompt,
   type StoryboardPlanShot
 } from './openai-client.js';
 import {
@@ -280,11 +282,20 @@ function setStageStatus(
   error: string | null = null
 ): void {
   const current = project.stages[stage];
+  const progress =
+    status === 'success' && current.progress
+      ? {
+          ...current.progress,
+          completed: current.progress.total > 0 ? current.progress.total : current.progress.completed,
+          currentItemLabel: null
+        }
+      : current.progress;
   project.stages[stage] = {
     status,
     startedAt: status === 'running' ? now() : current.startedAt,
     finishedAt: status === 'running' ? null : now(),
-    error
+    error,
+    progress
   };
 }
 
@@ -293,7 +304,39 @@ function resetStage(project: Project, stage: StageId): void {
     status: 'idle',
     startedAt: null,
     finishedAt: null,
-    error: null
+    error: null,
+    progress: null
+  };
+}
+
+function normalizeStageProgress(
+  input: Partial<StageProgress> & Pick<StageProgress, 'completed' | 'total'>
+): StageProgress {
+  const total = Math.max(0, Math.round(Number(input.total) || 0));
+  const completed = Math.max(0, Math.min(total || Math.round(Number(input.completed) || 0), Math.round(Number(input.completed) || 0)));
+  const unitLabel = input.unitLabel?.trim() || '项';
+  const currentItemLabel = input.currentItemLabel?.trim() || null;
+
+  return {
+    completed,
+    total,
+    unitLabel,
+    currentItemLabel
+  };
+}
+
+function setStageProgress(
+  project: Project,
+  stage: StageId,
+  input: Partial<StageProgress> & Pick<StageProgress, 'completed' | 'total'>
+): void {
+  project.stages[stage] = {
+    ...project.stages[stage],
+    progress: normalizeStageProgress({
+      unitLabel: project.stages[stage].progress?.unitLabel,
+      currentItemLabel: project.stages[stage].progress?.currentItemLabel,
+      ...input
+    })
   };
 }
 
@@ -1289,12 +1332,13 @@ function buildMergedVideoPrompt(
   options: {
     includeSpeechPrompt: boolean;
     durationSeconds?: number;
+    baseVideoPrompt?: string;
   }
 ): string {
   const hasDialogueContent = Boolean(shot.dialogue.trim());
   const hasVoiceoverContent = Boolean(shot.voiceover.trim());
   const hasSpeechContent = hasDialogueContent || hasVoiceoverContent;
-  const videoPrompt = sanitizeVideoPromptText(shot.videoPrompt);
+  const videoPrompt = sanitizeVideoPromptText(options.baseVideoPrompt ?? shot.videoPrompt);
   const characterPrompt = buildVideoCharacterReferencePrompt(project, shot);
   const backgroundSoundPrompt = sanitizeVideoPromptText(shot.backgroundSoundPrompt);
   const speechPrompt = sanitizeVideoPromptText(shot.speechPrompt);
@@ -1385,13 +1429,15 @@ function getVideoWorkflowPrompt(
   appSettings: AppSettings,
   options: {
     durationSeconds?: number;
+    baseVideoPrompt?: string;
   } = {}
 ): string {
   return sanitizeVideoPromptText(
     appendTransitionHint(
       buildMergedVideoPrompt(project, shot, {
         includeSpeechPrompt: !shouldUseTtsWorkflow(project, appSettings),
-        durationSeconds: options.durationSeconds
+        durationSeconds: options.durationSeconds,
+        baseVideoPrompt: options.baseVideoPrompt
       }),
       shot
     )
@@ -2340,10 +2386,12 @@ function buildSegmentVideoPrompt(
   segmentIndex: number,
   segmentCount: number,
   segmentDurationSeconds: number,
-  terminalFramePrompt: string
+  terminalFramePrompt: string,
+  baseVideoPrompt?: string
 ): string {
   const basePrompt = getVideoWorkflowPrompt(project, shot, appSettings, {
-    durationSeconds: segmentDurationSeconds
+    durationSeconds: segmentDurationSeconds,
+    baseVideoPrompt
   });
   const lastFramePrompt = sanitizeVideoPromptText(terminalFramePrompt);
 
@@ -2362,6 +2410,43 @@ function buildSegmentVideoPrompt(
   }
 
   return `${basePrompt}\n\n本段是长镜头的第 ${segmentIndex + 1}/${segmentCount} 段，整段最终尾帧已单独锁定；当前只需要保持人物、机位、动作、表演与光线连续，让动作自然延续并留出下一段承接空间，暂时不要提前收束到最终尾帧，也不要突然切断当前动作。`;
+}
+
+async function resolveVideoPromptForWorkflow(
+  project: Project,
+  shot: Project['storyboard'][number],
+  appSettings: AppSettings,
+  options: {
+    lastFramePrompt?: string;
+  } = {}
+): Promise<string | null> {
+  if (!project.settings.optimizeVideoPrompt) {
+    return null;
+  }
+
+  try {
+    const optimizedPrompt = await optimizeImageToVideoPrompt(shot, {
+      includeSpeechPrompt: !shouldUseTtsWorkflow(project, appSettings),
+      lastFramePrompt: options.lastFramePrompt,
+      signal: getProjectAbortSignal(project.id)
+    });
+
+    if (!optimizedPrompt) {
+      return null;
+    }
+
+    appendLog(project, `镜头 ${shot.title} 已启用 LLM 提示词优化，视频工作流将使用优化后的 I2V Prompt。`);
+    await saveProject(project);
+    return optimizedPrompt;
+  } catch (error) {
+    appendLog(
+      project,
+      `镜头 ${shot.title} 的视频 Prompt 优化失败，已回退原始 Prompt：${error instanceof Error ? error.message : String(error)}`,
+      'warn'
+    );
+    await saveProject(project);
+    return null;
+  }
 }
 
 function pickOutputFile(files: ComfyOutputFile[], kind: 'image' | 'video' | 'audio'): ComfyOutputFile {
@@ -2689,6 +2774,12 @@ async function runScriptStage(project: Project): Promise<void> {
     throw new Error('项目缺少原始文字内容，无法生成剧本。');
   }
 
+  setStageProgress(project, 'script', {
+    completed: 0,
+    total: 3,
+    unitLabel: '步骤',
+    currentItemLabel: '生成剧本'
+  });
   appendLog(project, '开始调用文本模型生成剧本。');
   await saveProject(project);
 
@@ -2696,9 +2787,23 @@ async function runScriptStage(project: Project): Promise<void> {
     signal: getProjectAbortSignal(project.id)
   });
   project.script = script;
+  setStageProgress(project, 'script', {
+    completed: 1,
+    total: 3,
+    unitLabel: '步骤',
+    currentItemLabel: '提取资产列表'
+  });
+  await saveProject(project);
   project.referenceLibrary = await extractReferenceLibraryFromScript(script, project.settings, {
     signal: getProjectAbortSignal(project.id)
   });
+  setStageProgress(project, 'script', {
+    completed: 2,
+    total: 3,
+    unitLabel: '步骤',
+    currentItemLabel: '保存剧本文件'
+  });
+  await saveProject(project);
 
   const markdownFile = await writeProjectFile(project.id, 'script/script.md', script.markdown);
   const jsonFile = await writeProjectFile(project.id, 'script/script.json', JSON.stringify(script, null, 2));
@@ -2706,6 +2811,12 @@ async function runScriptStage(project: Project): Promise<void> {
   project.artifacts.scriptMarkdown = markdownFile.relativePath;
   project.artifacts.scriptJson = jsonFile.relativePath;
   await persistReferenceLibrary(project);
+  setStageProgress(project, 'script', {
+    completed: 3,
+    total: 3,
+    unitLabel: '步骤',
+    currentItemLabel: null
+  });
 
   appendLog(
     project,
@@ -3267,8 +3378,23 @@ async function runAssetStage(project: Project): Promise<void> {
     ['scene', project.referenceLibrary.scenes],
     ['object', project.referenceLibrary.objects]
   ];
+  const totalItems = referenceGroups.reduce((sum, [, items]) => sum + items.length, 0);
+
+  setStageProgress(project, 'assets', {
+    completed: 0,
+    total: totalItems,
+    unitLabel: '资产',
+    currentItemLabel: totalItems ? '准备生成资产' : null
+  });
+  await saveProject(project);
 
   if (!referenceGroups.some(([, items]) => items.length)) {
+    setStageProgress(project, 'assets', {
+      completed: 1,
+      total: 1,
+      unitLabel: '资产',
+      currentItemLabel: null
+    });
     appendLog(project, '未提取到可生成的参考资产，资产阶段结束。', 'warn');
     return;
   }
@@ -3276,6 +3402,7 @@ async function runAssetStage(project: Project): Promise<void> {
   let generatedCount = 0;
   let failedCount = 0;
   let skippedCount = 0;
+  let processedCount = 0;
 
   for (const [kind, items] of referenceGroups) {
     if (!items.length) {
@@ -3284,6 +3411,12 @@ async function runAssetStage(project: Project): Promise<void> {
 
     for (const item of items) {
       await throwIfRunInterrupted(project.id, 'assets');
+      setStageProgress(project, 'assets', {
+        completed: processedCount,
+        total: totalItems,
+        unitLabel: '资产',
+        currentItemLabel: `${item.name}${assetKindLabel(kind)}`
+      });
 
       const shouldUseReferenceImage = shouldUseUploadedReferenceImage(item.referenceImage?.relativePath ?? '');
       const workflowKind = getReferenceWorkflowKind(kind, shouldUseReferenceImage);
@@ -3291,11 +3424,19 @@ async function runAssetStage(project: Project): Promise<void> {
 
       if (!workflow.workflowPath) {
         skippedCount += 1;
+        processedCount += 1;
         appendLog(
           project,
           `未配置 ${assetWorkflowLabel(workflowKind)} 工作流，跳过 ${item.name}${assetKindLabel(kind)}候选。`,
           'warn'
         );
+        setStageProgress(project, 'assets', {
+          completed: processedCount,
+          total: totalItems,
+          unitLabel: '资产',
+          currentItemLabel: `${item.name}${assetKindLabel(kind)}`
+        });
+        await saveProject(project);
         continue;
       }
 
@@ -3309,8 +3450,24 @@ async function runAssetStage(project: Project): Promise<void> {
 
         failedCount += 1;
       }
+
+      processedCount += 1;
+      setStageProgress(project, 'assets', {
+        completed: processedCount,
+        total: totalItems,
+        unitLabel: '资产',
+        currentItemLabel: `${item.name}${assetKindLabel(kind)}`
+      });
+      await saveProject(project);
     }
   }
+
+  setStageProgress(project, 'assets', {
+    completed: totalItems || 1,
+    total: totalItems || 1,
+    unitLabel: '资产',
+    currentItemLabel: null
+  });
 
   appendLog(
     project,
@@ -3324,6 +3481,12 @@ async function runStoryboardStage(project: Project): Promise<void> {
     throw new Error('请先生成剧本，再生成分镜。');
   }
 
+  setStageProgress(project, 'storyboard', {
+    completed: 0,
+    total: 0,
+    unitLabel: '镜头',
+    currentItemLabel: '规划镜头'
+  });
   appendLog(project, '开始根据剧本拆解分镜。');
   project.storyboard = [];
   let storyboardPlan: StoryboardPlanShot[] | null = null;
@@ -3336,6 +3499,12 @@ async function runStoryboardStage(project: Project): Promise<void> {
     onPlanGenerated: async ({ planShots, totalShots }) => {
       await throwIfRunInterrupted(project.id, 'storyboard');
       storyboardPlan = planShots;
+      setStageProgress(project, 'storyboard', {
+        completed: 0,
+        total: totalShots,
+        unitLabel: '镜头',
+        currentItemLabel: totalShots ? '开始逐镜生成' : null
+      });
       await persistStoryboard(project, storyboardPlan);
       const shotsByScene = planShots.reduce<Map<number, number>>((map, shot) => {
         map.set(shot.sceneNumber, (map.get(shot.sceneNumber) ?? 0) + 1);
@@ -3351,11 +3520,23 @@ async function runStoryboardStage(project: Project): Promise<void> {
     },
     onShotStart: async ({ scene, shotPlan, globalShotIndex, totalShots }) => {
       await throwIfRunInterrupted(project.id, 'storyboard');
+      setStageProgress(project, 'storyboard', {
+        completed: Math.max(0, globalShotIndex - 1),
+        total: totalShots,
+        unitLabel: '镜头',
+        currentItemLabel: `${shotPlan.title}（场景 ${scene.sceneNumber} 镜头 ${shotPlan.shotNumber}）`
+      });
       appendLog(project, `分镜生成 ${globalShotIndex}/${totalShots}: 场景 ${scene.sceneNumber} 镜头 ${shotPlan.shotNumber} ${shotPlan.title}`);
       await saveProject(project);
     },
     onShotGenerated: async ({ scene, shot, storyboard: partialStoryboard, completedShots, totalShots }) => {
       project.storyboard = partialStoryboard;
+      setStageProgress(project, 'storyboard', {
+        completed: completedShots,
+        total: totalShots,
+        unitLabel: '镜头',
+        currentItemLabel: shot.title
+      });
       await persistStoryboard(project, storyboardPlan);
       appendLog(
         project,
@@ -3366,6 +3547,12 @@ async function runStoryboardStage(project: Project): Promise<void> {
   });
   project.storyboard = storyboard;
   await persistStoryboard(project, storyboardPlan);
+  setStageProgress(project, 'storyboard', {
+    completed: storyboard.length || 1,
+    total: storyboard.length || 1,
+    unitLabel: '镜头',
+    currentItemLabel: null
+  });
   appendLog(
     project,
     `分镜生成完成，共 ${storyboard.length} 个镜头，总时长 ${storyboard.at(-1)?.endTimecode ?? '00:00'}。`
@@ -3542,6 +3729,9 @@ async function generateVideoAssetForShot(
   const shotSeed = Math.floor(Math.random() * 9_000_000_000);
   const requireTerminalFrame = shot.useLastFrameReference || segmentCount > 1;
   const effectiveLastFramePrompt = resolveEffectiveLastFramePrompt(shot, requireTerminalFrame);
+  const optimizedVideoPrompt = await resolveVideoPromptForWorkflow(project, shot, appSettings, {
+    lastFramePrompt: effectiveLastFramePrompt
+  });
   let lastImageAsset = requireTerminalFrame ? getActiveShotAsset(project, 'lastImages', shot.id) : null;
 
   if (segmentCount > 1 && !appSettings.ffmpeg.binaryPath) {
@@ -3670,7 +3860,8 @@ async function generateVideoAssetForShot(
           segmentIndex,
           segmentCount,
           segmentDuration,
-          useLastFrameReferenceForSegment ? effectiveLastFramePrompt : ''
+          useLastFrameReferenceForSegment ? effectiveLastFramePrompt : '',
+          optimizedVideoPrompt ?? undefined
         ),
         referenceContext: generationReferenceInputs.referenceContext,
         referenceVariables: generationReferenceInputs.referenceVariables,
@@ -3747,7 +3938,8 @@ async function generateVideoAssetForShot(
   return buildAsset(
     savedVideoRelativePath,
     getVideoWorkflowPrompt(project, shot, appSettings, {
-      durationSeconds: effectiveDurationSeconds
+      durationSeconds: effectiveDurationSeconds,
+      baseVideoPrompt: optimizedVideoPrompt ?? undefined
     }),
     shot.sceneNumber,
     shot.id
@@ -3861,6 +4053,12 @@ async function runShotsStage(project: Project): Promise<void> {
     throw new Error('请先生成分镜，再生成镜头。');
   }
 
+  setStageProgress(project, 'shots', {
+    completed: 0,
+    total: project.storyboard.length,
+    unitLabel: '镜头',
+    currentItemLabel: '准备生成镜头'
+  });
   const appSettings = getAppSettings();
   const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
   if (!hasConfiguredImageToVideoWorkflow(appSettings)) {
@@ -3884,12 +4082,30 @@ async function runShotsStage(project: Project): Promise<void> {
     await throwIfRunInterrupted(project.id, 'shots');
 
     const shot = project.storyboard[index];
+    setStageProgress(project, 'shots', {
+      completed: index,
+      total: project.storyboard.length,
+      unitLabel: '镜头',
+      currentItemLabel: shot.title
+    });
     appendLog(project, `镜头生成 ${index + 1}/${project.storyboard.length}: ${shot.title}`);
     await saveProject(project);
     await generateShotMedia(project, shot, appSettings, referenceUploadCache, ttsReferenceAudioUploadCache);
+    setStageProgress(project, 'shots', {
+      completed: index + 1,
+      total: project.storyboard.length,
+      unitLabel: '镜头',
+      currentItemLabel: shot.title
+    });
     await saveProject(project);
   }
 
+  setStageProgress(project, 'shots', {
+    completed: project.storyboard.length,
+    total: project.storyboard.length,
+    unitLabel: '镜头',
+    currentItemLabel: null
+  });
   appendLog(project, '全部镜头参考帧与视频片段生成完成。');
 }
 
@@ -3918,11 +4134,25 @@ async function runEditStage(project: Project): Promise<void> {
 
   const appSettings = getAppSettings();
   const useTtsWorkflow = shouldUseTtsWorkflow(project, appSettings);
+  const totalEditSteps = useTtsWorkflow ? project.storyboard.length + 2 : 2;
+  setStageProgress(project, 'edit', {
+    completed: 0,
+    total: totalEditSteps,
+    unitLabel: '步骤',
+    currentItemLabel: '校验素材'
+  });
+  await saveProject(project);
   const signal = getProjectAbortSignal(project.id);
   const orderedAudioPaths: Array<string | null> = [];
   const ttsReferenceAudioUploadCache = new Map<string, string>();
 
   if (useTtsWorkflow) {
+    setStageProgress(project, 'edit', {
+      completed: 1,
+      total: totalEditSteps,
+      unitLabel: '步骤',
+      currentItemLabel: '准备镜头配音'
+    });
     appendLog(project, '已配置 TTS 工作流，开始为镜头准备配音音频。');
     await saveProject(project);
 
@@ -3930,10 +4160,23 @@ async function runEditStage(project: Project): Promise<void> {
       await throwIfRunInterrupted(project.id, 'edit');
 
       const shot = project.storyboard[index];
+      setStageProgress(project, 'edit', {
+        completed: 1 + index,
+        total: totalEditSteps,
+        unitLabel: '步骤',
+        currentItemLabel: `配音：${shot.title}`
+      });
       const preparedTtsAudio = await ensureShotTtsAudio(project, shot, appSettings, ttsReferenceAudioUploadCache);
 
       if (!preparedTtsAudio.asset || !preparedTtsAudio.absolutePath) {
         orderedAudioPaths.push(null);
+        setStageProgress(project, 'edit', {
+          completed: 2 + index,
+          total: totalEditSteps,
+          unitLabel: '步骤',
+          currentItemLabel: `配音：${shot.title}`
+        });
+        await saveProject(project);
         continue;
       }
 
@@ -3970,11 +4213,31 @@ async function runEditStage(project: Project): Promise<void> {
         );
         await saveProject(project);
       }
+
+      setStageProgress(project, 'edit', {
+        completed: 2 + index,
+        total: totalEditSteps,
+        unitLabel: '步骤',
+        currentItemLabel: `配音：${shot.title}`
+      });
+      await saveProject(project);
     }
 
+    setStageProgress(project, 'edit', {
+      completed: totalEditSteps - 1,
+      total: totalEditSteps,
+      unitLabel: '步骤',
+      currentItemLabel: '合成成片'
+    });
     appendLog(project, '镜头配音音频已准备完成，开始合成成片。');
     await saveProject(project);
   } else if (!project.settings.useTtsWorkflow) {
+    setStageProgress(project, 'edit', {
+      completed: 1,
+      total: totalEditSteps,
+      unitLabel: '步骤',
+      currentItemLabel: '合成成片'
+    });
     appendLog(project, '当前项目已关闭 TTS，最终成片将直接使用视频片段自身的声音轨。');
     await saveProject(project);
   }
@@ -4000,6 +4263,12 @@ async function runEditStage(project: Project): Promise<void> {
     null,
     null
   );
+  setStageProgress(project, 'edit', {
+    completed: totalEditSteps,
+    total: totalEditSteps,
+    unitLabel: '步骤',
+    currentItemLabel: null
+  });
 
   appendLog(project, '视频剪辑完成，已导出完整成片。');
 }
@@ -4008,6 +4277,7 @@ async function executeStage(projectId: string, stage: StageId): Promise<void> {
   const project = await readProject(projectId);
   assertStagePreconditions(project, stage);
   resetDownstreamArtifacts(project, stage);
+  resetStage(project, stage);
   setStageStatus(project, stage, 'running');
   appendLog(project, `${STAGE_LABELS[stage]} 开始执行。`);
   await saveProject(project);

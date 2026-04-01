@@ -5,6 +5,7 @@ import {
   type GeneratedAsset,
   type ReferenceAssetItem,
   type Project,
+  type StageProgress,
   type ProjectRunState,
   type ProjectSettings,
   type RunStage,
@@ -114,6 +115,29 @@ function normalizePersistedRunStage(value: unknown): RunStage | null {
   return normalizePersistedStageId(value);
 }
 
+function hydrateStageProgress(progress: StageProgress | undefined | null): StageProgress | null {
+  if (!progress) {
+    return null;
+  }
+
+  const total = Number.isFinite(progress.total) ? Math.max(0, Math.round(progress.total)) : 0;
+  const completed = Number.isFinite(progress.completed)
+    ? Math.max(0, Math.min(total || Math.round(progress.completed), Math.round(progress.completed)))
+    : 0;
+  const unitLabel = typeof progress.unitLabel === 'string' && progress.unitLabel.trim() ? progress.unitLabel.trim() : '项';
+  const currentItemLabel =
+    typeof progress.currentItemLabel === 'string' && progress.currentItemLabel.trim()
+      ? progress.currentItemLabel.trim()
+      : null;
+
+  return {
+    completed,
+    total,
+    unitLabel,
+    currentItemLabel
+  };
+}
+
 function hydrateProjectRunState(runState: ProjectRunState | undefined): ProjectRunState {
   const fallback = createIdleRunState();
 
@@ -144,7 +168,8 @@ function hydrateProject(project: Project): Project {
           status: currentState?.status ?? fallbackState.status,
           startedAt: currentState?.startedAt ?? fallbackState.startedAt,
           finishedAt: currentState?.finishedAt ?? fallbackState.finishedAt,
-          error: currentState?.error ?? fallbackState.error
+          error: currentState?.error ?? fallbackState.error,
+          progress: hydrateStageProgress(currentState?.progress) ?? fallbackState.progress
         }
       ];
     })
