@@ -284,7 +284,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           <div>
             <span className="eyebrow">System Settings</span>
             <h2>系统设置</h2>
-            <p>这里配置全局 LLM API、ComfyUI API 和本地 FFmpeg，保存后新任务立即生效。</p>
+            <p>这里配置全局 LLM API、Gemini API、ComfyUI API 和本地 FFmpeg，保存后新任务立即生效。</p>
           </div>
           <button className="button ghost" onClick={onClose}>
             关闭
@@ -295,6 +295,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
           <div className="status-item">
             <span>LLM API</span>
             <strong>{status?.llmConfigured ? '已配置' : '未配置'}</strong>
+          </div>
+          <div className="status-item">
+            <span>Gemini API</span>
+            <strong>{status?.geminiConfigured ? '已配置' : '未配置'}</strong>
           </div>
           <div className="status-item">
             <span>ComfyUI</span>
@@ -381,6 +385,51 @@ export function SettingsDialog(props: SettingsDialogProps) {
               </div>
             </label>
           </div>
+        </section>
+
+        <section className="settings-section">
+          <div className="section-head">
+            <h3>Gemini API</h3>
+            <span>用于项目级 Gemini 图片生成；推荐填写兼容 `generateContent` 的接口根地址</span>
+          </div>
+          <div className="form-grid">
+            <label className="field span-2">
+              <span>Base URL</span>
+              <input
+                value={draft.gemini.baseUrl}
+                onChange={(event) =>
+                  onChange({
+                    ...draft,
+                    gemini: {
+                      ...draft.gemini,
+                      baseUrl: event.target.value
+                    }
+                  })
+                }
+                placeholder="https://generativelanguage.googleapis.com/v1beta"
+              />
+            </label>
+            <label className="field span-2">
+              <span>API Key</span>
+              <input
+                type="password"
+                value={draft.gemini.apiKey}
+                onChange={(event) =>
+                  onChange({
+                    ...draft,
+                    gemini: {
+                      ...draft.gemini,
+                      apiKey: event.target.value
+                    }
+                  })
+                }
+                placeholder="AIza..."
+              />
+            </label>
+          </div>
+          <p className="settings-hint">
+            项目设置选择 Gemini 后，资产图和镜头首/尾参考帧会走这里配置的接口；视频生成仍然使用 ComfyUI。
+          </p>
         </section>
 
         <section className="settings-section">

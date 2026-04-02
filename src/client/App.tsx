@@ -16,7 +16,9 @@ import type {
 import {
   ASPECT_RATIOS,
   DEFAULT_SETTINGS,
+  GEMINI_IMAGE_MODELS,
   getGenerationReferenceLibraryForShot,
+  IMAGE_GENERATION_PROVIDERS,
   SCRIPT_MODES,
   STORY_LENGTH_LABELS,
   STORY_LENGTHS,
@@ -117,6 +119,16 @@ const ASPECT_RATIO_LABELS: Record<ProjectSettings['aspectRatio'], string> = {
 const SCRIPT_MODE_LABELS: Record<ScriptMode, string> = {
   generate: '生成新剧本',
   optimize: '优化已有剧本'
+};
+
+const IMAGE_GENERATION_PROVIDER_LABELS: Record<ProjectSettings['imageGenerationProvider'], string> = {
+  comfyui: 'ComfyUI',
+  gemini: 'Gemini'
+};
+
+const GEMINI_IMAGE_MODEL_LABELS: Record<ProjectSettings['geminiImageModel'], string> = {
+  'models/gemini-3.1-flash-image-preview': 'gemini-3.1-flash-image-preview',
+  'models/gemini-3-pro-image-preview': 'gemini-3-pro-image-preview'
 };
 
 const TAB_LABELS: Record<ProjectPanelTab, string> = {
@@ -2547,12 +2559,26 @@ export function App() {
   const ttsWorkflowReady = meta?.envStatus.ttsWorkflowExists ?? false;
   const projectTtsEnabled =
     draft?.settings.useTtsWorkflow ?? project?.settings.useTtsWorkflow ?? DEFAULT_SETTINGS.useTtsWorkflow;
+  const draftImageGenerationProvider =
+    draft?.settings.imageGenerationProvider ??
+    project?.settings.imageGenerationProvider ??
+    DEFAULT_SETTINGS.imageGenerationProvider;
+  const draftGeminiImageModel =
+    draft?.settings.geminiImageModel ?? project?.settings.geminiImageModel ?? DEFAULT_SETTINGS.geminiImageModel;
   const ttsWorkflowStatusLabel = !projectTtsEnabled
     ? '项目已关闭，台词并入视频'
     : ttsWorkflowReady
       ? '已就绪'
       : '未配置，回退到视频 Prompt';
   const ttsWorkflowConfigLabel = !projectTtsEnabled ? '项目已关闭' : ttsWorkflowReady ? '已配置' : '未配置';
+  const imageGenerationStatusLabel =
+    draftImageGenerationProvider === 'gemini'
+      ? meta?.envStatus.geminiConfigured
+        ? 'Gemini 已配置'
+        : 'Gemini 未配置'
+      : storyboardImageWorkflowReady || referenceWorkflowReadyCount > 0
+        ? 'ComfyUI 图片工作流已配置'
+        : 'ComfyUI 图片工作流未配置';
   const draftResolutionPreset = draft ? inferResolutionPreset(draft.settings) : 'custom';
   const draftSourceLabel = draft ? (draft.settings.scriptMode === 'generate' ? '剧情输入' : '待优化文本') : '项目输入';
   const draftFormatSummary = draft ? createFormatSummary(draft.settings) : '未设置画幅';
@@ -3906,6 +3932,10 @@ export function App() {
               <strong>{meta?.envStatus.llmConfigured ? '已配置' : '未配置'}</strong>
             </div>
             <div className="env-card">
+              <span>Gemini</span>
+              <strong>{meta?.envStatus.geminiConfigured ? '已配置' : '未配置'}</strong>
+            </div>
+            <div className="env-card">
               <span>ComfyUI</span>
               <strong>{meta?.envStatus.comfyuiConfigured ? '已连接地址' : '未配置地址'}</strong>
             </div>
@@ -4210,6 +4240,10 @@ export function App() {
                         <div className="status-item">
                           <span>项目篇幅</span>
                           <strong>{STORY_LENGTH_LABELS[draft.settings.storyLength]}</strong>
+                        </div>
+                        <div className="status-item">
+                          <span>图片生成</span>
+                          <strong>{IMAGE_GENERATION_PROVIDER_LABELS[draft.settings.imageGenerationProvider]}</strong>
                         </div>
                         <div className="status-item">
                           <span>单次视频上限（系统）</span>
@@ -5284,6 +5318,68 @@ export function App() {
                     ))}
                   </select>
                 </label>
+                <label className="field">
+                  <span>图片生成提供方</span>
+                  <select
+                    value={draft.settings.imageGenerationProvider}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                imageGenerationProvider:
+                                  event.target.value as ProjectSettings['imageGenerationProvider']
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  >
+                    {IMAGE_GENERATION_PROVIDERS.map((provider) => (
+                      <option key={provider} value={provider}>
+                        {IMAGE_GENERATION_PROVIDER_LABELS[provider]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Gemini 图片模型</span>
+                  <select
+                    value={draft.settings.geminiImageModel}
+                    disabled={draft.settings.imageGenerationProvider !== 'gemini'}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: {
+                                ...current.settings,
+                                geminiImageModel: event.target.value as ProjectSettings['geminiImageModel']
+                              }
+                            }
+                          : current;
+                      })
+                    }
+                  >
+                    {GEMINI_IMAGE_MODELS.map((model) => (
+                      <option key={model} value={model}>
+                        {GEMINI_IMAGE_MODEL_LABELS[model]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field span-2">
+                  <span>图片生成说明</span>
+                  <div className="inline-note">
+                    {draft.settings.imageGenerationProvider === 'gemini'
+                      ? `当前会使用 ${GEMINI_IMAGE_MODEL_LABELS[draft.settings.geminiImageModel]} 生成资产图和镜头首/尾参考帧；视频片段仍然走 ComfyUI。`
+                      : '当前会使用 ComfyUI 工作流生成资产图和镜头首/尾参考帧；视频片段仍然走 ComfyUI。'}
+                  </div>
+                </label>
                 <label className="field span-2">
                   <span>提示词优化</span>
                   <div className="inline-check">
@@ -5347,6 +5443,12 @@ export function App() {
               </div>
               <p className="settings-hint">
                 项目篇幅会通过调整剧本生成 prompt 来影响目标长度与节奏，并继续影响后续拆镜颗粒度；它不再因为长度不足直接触发重生成或报错。修改篇幅后，需要重新执行“剧本生成”，后续阶段才会基于新篇幅生效。这里显示的是当前系统允许的单个镜头视频硬上限；镜头时长超过该值时，需要在分镜阶段主动拆成多个镜头。
+              </p>
+              <p className="settings-hint">
+                当前图片生成状态：{imageGenerationStatusLabel}
+                {draft.settings.imageGenerationProvider === 'gemini'
+                  ? `；模型为 ${GEMINI_IMAGE_MODEL_LABELS[draft.settings.geminiImageModel]}。`
+                  : '；请在系统设置里检查 ComfyUI 图片工作流。'}
               </p>
               <p className="settings-hint">
                 当前项目的 TTS 状态：{ttsWorkflowStatusLabel}。

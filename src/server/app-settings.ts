@@ -97,6 +97,7 @@ export function getRuntimeStatus(settings = getAppSettings()): RuntimeStatus {
 
   return {
     llmConfigured: Boolean(settings.llm.baseUrl && settings.llm.apiKey && settings.llm.model),
+    geminiConfigured: Boolean(settings.gemini.baseUrl && settings.gemini.apiKey),
     comfyuiConfigured: Boolean(settings.comfyui.baseUrl),
     characterAssetWorkflowExists: workflowExists(settings.comfyui.workflows.character_asset.workflowPath),
     storyboardImageWorkflowExists: workflowExists(settings.comfyui.workflows.storyboard_image.workflowPath),

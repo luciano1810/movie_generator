@@ -29,6 +29,10 @@ export const envAppSettingsDefaults: AppSettings = {
     apiKey: process.env.OPENAI_API_KEY ?? '',
     model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini'
   },
+  gemini: {
+    baseUrl: process.env.GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com/v1beta',
+    apiKey: process.env.GEMINI_API_KEY ?? ''
+  },
   comfyui: {
     baseUrl: process.env.COMFYUI_BASE_URL ?? 'http://100.100.8.2:8188',
     workflows: {

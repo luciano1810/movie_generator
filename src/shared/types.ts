@@ -14,6 +14,11 @@ export const ASPECT_RATIOS = ['21:9', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4',
 export const SCRIPT_MODES = ['generate', 'optimize'] as const;
 export const STORY_LENGTHS = ['test', 'short', 'medium', 'long'] as const;
 export const VIDEO_FPS_OPTIONS = [24, 30, 60] as const;
+export const IMAGE_GENERATION_PROVIDERS = ['comfyui', 'gemini'] as const;
+export const GEMINI_IMAGE_MODELS = [
+  'models/gemini-3.1-flash-image-preview',
+  'models/gemini-3-pro-image-preview'
+] as const;
 
 export type StageId = (typeof STAGES)[number];
 export type ComfyWorkflowType = (typeof COMFYUI_WORKFLOW_TYPES)[number];
@@ -21,6 +26,8 @@ export type AspectRatio = (typeof ASPECT_RATIOS)[number];
 export type ScriptMode = (typeof SCRIPT_MODES)[number];
 export type StoryLength = (typeof STORY_LENGTHS)[number];
 export type VideoFps = (typeof VIDEO_FPS_OPTIONS)[number];
+export type ImageGenerationProvider = (typeof IMAGE_GENERATION_PROVIDERS)[number];
+export type GeminiImageModel = (typeof GEMINI_IMAGE_MODELS)[number];
 export type RunStage = StageId | 'all';
 export type StageStatus = 'idle' | 'running' | 'success' | 'error';
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -36,6 +43,10 @@ export interface AppSettings {
     apiKey: string;
     model: string;
   };
+  gemini: {
+    baseUrl: string;
+    apiKey: string;
+  };
   comfyui: {
     baseUrl: string;
     workflows: Record<ComfyWorkflowType, ComfyWorkflowSettings>;
@@ -50,6 +61,7 @@ export interface AppSettings {
 
 export interface RuntimeStatus {
   llmConfigured: boolean;
+  geminiConfigured: boolean;
   comfyuiConfigured: boolean;
   characterAssetWorkflowExists: boolean;
   storyboardImageWorkflowExists: boolean;
@@ -105,6 +117,8 @@ export interface ProjectSettings {
   maxShotsPerScene: number;
   optimizeVideoPrompt: boolean;
   useTtsWorkflow: boolean;
+  imageGenerationProvider: ImageGenerationProvider;
+  geminiImageModel: GeminiImageModel;
 }
 
 export interface ScriptCharacter {
@@ -699,7 +713,9 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   maxVideoSegmentDurationSeconds: 4,
   maxShotsPerScene: 3,
   optimizeVideoPrompt: true,
-  useTtsWorkflow: false
+  useTtsWorkflow: false,
+  imageGenerationProvider: 'comfyui',
+  geminiImageModel: 'models/gemini-3-pro-image-preview'
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -707,6 +723,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     baseUrl: 'https://api.openai.com/v1',
     apiKey: '',
     model: 'gpt-4o-mini'
+  },
+  gemini: {
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    apiKey: ''
   },
   comfyui: {
     baseUrl: 'http://127.0.0.1:8188',
@@ -773,6 +793,19 @@ function normalizeEditableString(value: unknown, fallback: string): string {
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function normalizeImageGenerationProvider(
+  value: unknown,
+  fallback: ImageGenerationProvider
+): ImageGenerationProvider {
+  return IMAGE_GENERATION_PROVIDERS.includes(value as ImageGenerationProvider)
+    ? (value as ImageGenerationProvider)
+    : fallback;
+}
+
+function normalizeGeminiImageModel(value: unknown, fallback: GeminiImageModel): GeminiImageModel {
+  return GEMINI_IMAGE_MODELS.includes(value as GeminiImageModel) ? (value as GeminiImageModel) : fallback;
 }
 
 function matchesWorkflowTemplatePath(value: string, templatePath: string): boolean {
@@ -884,7 +917,12 @@ export function normalizeSettings(input?: Partial<ProjectSettings>): ProjectSett
     ),
     maxShotsPerScene: normalizePositiveInteger(merged.maxShotsPerScene, DEFAULT_SETTINGS.maxShotsPerScene),
     optimizeVideoPrompt: normalizeBoolean(merged.optimizeVideoPrompt, DEFAULT_SETTINGS.optimizeVideoPrompt),
-    useTtsWorkflow: normalizeBoolean(merged.useTtsWorkflow, DEFAULT_SETTINGS.useTtsWorkflow)
+    useTtsWorkflow: normalizeBoolean(merged.useTtsWorkflow, DEFAULT_SETTINGS.useTtsWorkflow),
+    imageGenerationProvider: normalizeImageGenerationProvider(
+      merged.imageGenerationProvider,
+      DEFAULT_SETTINGS.imageGenerationProvider
+    ),
+    geminiImageModel: normalizeGeminiImageModel(merged.geminiImageModel, DEFAULT_SETTINGS.geminiImageModel)
   };
 }
 
@@ -892,6 +930,10 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
   const llm = {
     ...fallback.llm,
     ...(input?.llm ?? {})
+  };
+  const gemini = {
+    ...fallback.gemini,
+    ...(input?.gemini ?? {})
   };
   const rawComfyui = ((input?.comfyui ?? {}) as Record<string, unknown>) ?? {};
   const rawWorkflows =
@@ -943,6 +985,10 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
       baseUrl: normalizeEditableString(llm.baseUrl, fallback.llm.baseUrl),
       apiKey: normalizeEditableString(llm.apiKey, fallback.llm.apiKey),
       model: normalizeEditableString(llm.model, fallback.llm.model)
+    },
+    gemini: {
+      baseUrl: normalizeEditableString(gemini.baseUrl, fallback.gemini.baseUrl),
+      apiKey: normalizeEditableString(gemini.apiKey, fallback.gemini.apiKey)
     },
     comfyui: {
       baseUrl: normalizeEditableString(rawComfyui.baseUrl, fallback.comfyui.baseUrl),

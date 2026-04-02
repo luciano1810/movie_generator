@@ -49,6 +49,7 @@ import {
   uploadImageBufferToComfy,
   uploadImageToComfy
 } from './comfyui.js';
+import { type GeminiInputImage, generateImageWithGemini } from './gemini.js';
 import {
   extractLastFrame,
   getMediaDurationSeconds,
@@ -75,6 +76,7 @@ interface GenerationReferenceInputs {
   referenceCount: number;
   referenceImageCount: number;
   referenceImages: string[];
+  referenceImageRelativePaths: string[];
 }
 
 interface TtsPlan {
@@ -131,6 +133,7 @@ const DEFAULT_FIRST_LAST_FRAME_VIDEO_WORKFLOW_PATH = path.resolve(
 const ZIMAGE_TEXT_TO_IMAGE_WORKFLOW_BASENAME = 'zimage_text_to_image.template.json';
 const MAX_STORYBOARD_REFERENCE_IMAGES_PER_RUN = 3;
 const MAX_STORYBOARD_REFERENCE_IMAGES_PER_CHAIN_RUN = 2;
+const MAX_GEMINI_REFERENCE_IMAGES_PER_REQUEST = 6;
 const AUDIO_DRIVEN_VIDEO_PADDING_SECONDS = 0.25;
 const NO_REFERENCE_TTS_VOICE_PRESETS = [
   {
@@ -981,6 +984,26 @@ function shouldUseTtsWorkflow(project: Project, appSettings: AppSettings): boole
   return project.settings.useTtsWorkflow && hasConfiguredTtsWorkflow(appSettings);
 }
 
+function usesGeminiImageGeneration(project: Project): boolean {
+  return project.settings.imageGenerationProvider === 'gemini';
+}
+
+function hasConfiguredGemini(appSettings: AppSettings): boolean {
+  return Boolean(appSettings.gemini.baseUrl.trim() && appSettings.gemini.apiKey.trim());
+}
+
+function assertGeminiImageGenerationConfigured(appSettings: AppSettings): void {
+  if (!hasConfiguredGemini(appSettings)) {
+    throw new Error('系统设置中未配置 Gemini API 地址或 Key。');
+  }
+}
+
+function resolveProjectImageGenerationBackendLabel(project: Project): string {
+  return usesGeminiImageGeneration(project)
+    ? `Gemini ${project.settings.geminiImageModel}`
+    : 'ComfyUI';
+}
+
 function getAllReferenceItems(referenceLibrary: Project['referenceLibrary']): ReferenceAssetItem[] {
   return [
     ...referenceLibrary.characters,
@@ -1197,13 +1220,27 @@ async function buildGenerationReferenceInputs(
   const characterReferenceImages = preparedByKind.character
     .map((item) => (typeof item.input_image === 'string' ? item.input_image : ''))
     .filter(Boolean);
+  const characterReferenceImageRelativePaths = preparedByKind.character
+    .map((item) => (typeof item.relative_path === 'string' ? item.relative_path : ''))
+    .filter(Boolean);
   const sceneReferenceImages = preparedByKind.scene
     .map((item) => (typeof item.input_image === 'string' ? item.input_image : ''))
+    .filter(Boolean);
+  const sceneReferenceImageRelativePaths = preparedByKind.scene
+    .map((item) => (typeof item.relative_path === 'string' ? item.relative_path : ''))
     .filter(Boolean);
   const objectReferenceImages = preparedByKind.object
     .map((item) => (typeof item.input_image === 'string' ? item.input_image : ''))
     .filter(Boolean);
+  const objectReferenceImageRelativePaths = preparedByKind.object
+    .map((item) => (typeof item.relative_path === 'string' ? item.relative_path : ''))
+    .filter(Boolean);
   const referenceImages = [...sceneReferenceImages, ...characterReferenceImages, ...objectReferenceImages];
+  const referenceImageRelativePaths = [
+    ...sceneReferenceImageRelativePaths,
+    ...characterReferenceImageRelativePaths,
+    ...objectReferenceImageRelativePaths
+  ];
   const editImage1 = sceneReferenceImages[0] ?? characterReferenceImages[0] ?? objectReferenceImages[0] ?? '';
   const editImage2 = characterReferenceImages[0] ?? sceneReferenceImages[0] ?? objectReferenceImages[0] ?? editImage1;
   const editImage3 = objectReferenceImages[0] ?? characterReferenceImages[0] ?? sceneReferenceImages[0] ?? editImage2;
@@ -1213,6 +1250,7 @@ async function buildGenerationReferenceInputs(
     referenceCount: getAllReferenceItems(referenceLibrary).length,
     referenceImageCount,
     referenceImages,
+    referenceImageRelativePaths,
     referenceVariables: {
       reference_context: referenceContext,
       reference_count: getAllReferenceItems(referenceLibrary).length,
@@ -2724,6 +2762,10 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
       throw new Error('请先生成剧本，再执行资产生成。');
     }
 
+    if (usesGeminiImageGeneration(project) && !hasConfiguredGemini(getAppSettings())) {
+      throw new Error('当前项目已选择 Gemini 生成图片，但系统设置中未配置 Gemini API 地址或 Key。');
+    }
+
     return;
   }
 
@@ -2751,13 +2793,18 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
       (shot) => !isLongTakeContinuationShot(project, shot) || shot.useLastFrameReference
     );
 
-    if (
-      requiresReferenceFrameGeneration &&
-      !appSettings.comfyui.workflows.storyboard_image.workflowPath &&
-      !appSettings.comfyui.workflows.image_edit.workflowPath &&
-      !appSettings.comfyui.workflows.text_to_image.workflowPath
-    ) {
-      throw new Error('系统设置中未配置 ComfyUI 参考帧生成工作流或文生图工作流路径。');
+    if (requiresReferenceFrameGeneration) {
+      if (usesGeminiImageGeneration(project)) {
+        if (!hasConfiguredGemini(appSettings)) {
+          throw new Error('当前项目已选择 Gemini 生成图片，但系统设置中未配置 Gemini API 地址或 Key。');
+        }
+      } else if (
+        !appSettings.comfyui.workflows.storyboard_image.workflowPath &&
+        !appSettings.comfyui.workflows.image_edit.workflowPath &&
+        !appSettings.comfyui.workflows.text_to_image.workflowPath
+      ) {
+        throw new Error('系统设置中未配置 ComfyUI 参考帧生成工作流或文生图工作流路径。');
+      }
     }
 
     if (!useTtsWorkflow && requiresVideoStageFfmpeg(project) && !appSettings.ffmpeg.binaryPath) {
@@ -2900,23 +2947,6 @@ async function generateReferenceAssetForProject(
 
   try {
     const shouldUseReferenceImage = shouldUseUploadedReferenceImage(referenceImageRelativePath, options.useReferenceImage);
-    const workflowKind = getReferenceWorkflowKind(kind, shouldUseReferenceImage);
-    const workflow = appSettings.comfyui.workflows[workflowKind];
-
-    if (!workflow.workflowPath) {
-      throw new Error(`系统设置中未配置 ComfyUI ${assetWorkflowLabel(workflowKind)}工作流路径。`);
-    }
-
-    const uploadedReferenceImage = shouldUseReferenceImage
-      ? await uploadImageToComfy(fromStorageRelative(referenceImageRelativePath), { signal })
-      : '';
-    const uploadedCharacterPoseImage =
-      kind === 'character' && shouldUseReferenceImage && existsSync(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
-        ? await uploadImageToComfy(DEFAULT_CHARACTER_POSE_REFERENCE_PATH, { signal })
-        : '';
-    const referenceImages = [uploadedReferenceImage, uploadedCharacterPoseImage].filter(Boolean);
-    const referenceImageVariables = buildEditImageSlotVariables(referenceImages);
-    const resolvedWorkflowPath = resolveReferenceCountWorkflowPath(workflow.workflowPath, referenceImages.length);
     const workflowPrompt =
       kind === 'character'
         ? buildCharacterAssetWorkflowPrompt(
@@ -2927,44 +2957,96 @@ async function generateReferenceAssetForProject(
             ageHint
           )
         : generationPrompt;
-    const resolvedImageDimensions = resolveWorkflowImageDimensions(
-      resolvedWorkflowPath,
-      project.settings.imageWidth,
-      project.settings.imageHeight
-    );
+    let saved:
+      | {
+          absolutePath: string;
+          relativePath: string;
+        }
+      | undefined;
 
-    const outputFiles = await runProjectComfyWorkflow(
-      project,
-      resolvedWorkflowPath,
-      {
+    if (usesGeminiImageGeneration(project)) {
+      assertGeminiImageGenerationConfigured(appSettings);
+
+      const geminiReferenceImagePaths = [
+        shouldUseReferenceImage && referenceImageRelativePath ? fromStorageRelative(referenceImageRelativePath) : '',
+        kind === 'character' && shouldUseReferenceImage && existsSync(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
+          ? DEFAULT_CHARACTER_POSE_REFERENCE_PATH
+          : ''
+      ].filter(Boolean);
+      const geminiReferenceImages = await loadGeminiInputImages(geminiReferenceImagePaths);
+
+      appendLog(project, `当前项目图片生成后端为 ${resolveProjectImageGenerationBackendLabel(project)}。`);
+      const result = await generateImageWithGemini({
+        model: project.settings.geminiImageModel,
         prompt: workflowPrompt,
-        negative_prompt: project.settings.negativePrompt,
-        output_prefix: `${project.id}_${kind}_${itemId}_reference`,
-        image_width: resolvedImageDimensions.imageWidth,
-        image_height: resolvedImageDimensions.imageHeight,
-        video_width: project.settings.videoWidth,
-        video_height: project.settings.videoHeight,
-        duration_seconds: getDefaultShotDurationSeconds(project.settings),
-        fps: project.settings.fps,
-        input_image: uploadedReferenceImage,
-        reference_image: uploadedReferenceImage,
-        reference_images: referenceImages,
-        ...referenceImageVariables,
-        scene_number: 0,
-        shot_number: 0,
-        seed: Math.floor(Math.random() * 9_000_000_000)
-      },
-      {
-        signal,
-        label: `reference_${kind}_${itemId}_${workflowKind}`,
-        outputKind: 'image'
-      }
-    );
+        aspectRatio: project.settings.aspectRatio,
+        referenceImages: geminiReferenceImages,
+        signal
+      });
+      const extension = guessImageExtensionFromMimeType(result.mimeType);
+      saved = await writeProjectFile(project.id, buildReferenceAssetOutputPath(kind, itemId, extension), result.buffer);
+    } else {
+      const workflowKind = getReferenceWorkflowKind(kind, shouldUseReferenceImage);
+      const workflow = appSettings.comfyui.workflows[workflowKind];
 
-    const outputFile = pickOutputFile(outputFiles, 'image');
-    const buffer = await fetchComfyOutputFile(outputFile, { signal });
-    const extension = path.extname(outputFile.filename) || '.png';
-    const saved = await writeProjectFile(project.id, buildReferenceAssetOutputPath(kind, itemId, extension), buffer);
+      if (!workflow.workflowPath) {
+        throw new Error(`系统设置中未配置 ComfyUI ${assetWorkflowLabel(workflowKind)}工作流路径。`);
+      }
+
+      const uploadedReferenceImage = shouldUseReferenceImage
+        ? await uploadImageToComfy(fromStorageRelative(referenceImageRelativePath), { signal })
+        : '';
+      const uploadedCharacterPoseImage =
+        kind === 'character' && shouldUseReferenceImage && existsSync(DEFAULT_CHARACTER_POSE_REFERENCE_PATH)
+          ? await uploadImageToComfy(DEFAULT_CHARACTER_POSE_REFERENCE_PATH, { signal })
+          : '';
+      const referenceImages = [uploadedReferenceImage, uploadedCharacterPoseImage].filter(Boolean);
+      const referenceImageVariables = buildEditImageSlotVariables(referenceImages);
+      const resolvedWorkflowPath = resolveReferenceCountWorkflowPath(workflow.workflowPath, referenceImages.length);
+      const resolvedImageDimensions = resolveWorkflowImageDimensions(
+        resolvedWorkflowPath,
+        project.settings.imageWidth,
+        project.settings.imageHeight
+      );
+
+      const outputFiles = await runProjectComfyWorkflow(
+        project,
+        resolvedWorkflowPath,
+        {
+          prompt: workflowPrompt,
+          negative_prompt: project.settings.negativePrompt,
+          output_prefix: `${project.id}_${kind}_${itemId}_reference`,
+          image_width: resolvedImageDimensions.imageWidth,
+          image_height: resolvedImageDimensions.imageHeight,
+          video_width: project.settings.videoWidth,
+          video_height: project.settings.videoHeight,
+          duration_seconds: getDefaultShotDurationSeconds(project.settings),
+          fps: project.settings.fps,
+          input_image: uploadedReferenceImage,
+          reference_image: uploadedReferenceImage,
+          reference_images: referenceImages,
+          ...referenceImageVariables,
+          scene_number: 0,
+          shot_number: 0,
+          seed: Math.floor(Math.random() * 9_000_000_000)
+        },
+        {
+          signal,
+          label: `reference_${kind}_${itemId}_${workflowKind}`,
+          outputKind: 'image'
+        }
+      );
+
+      const outputFile = pickOutputFile(outputFiles, 'image');
+      const buffer = await fetchComfyOutputFile(outputFile, { signal });
+      const extension = path.extname(outputFile.filename) || '.png';
+      saved = await writeProjectFile(project.id, buildReferenceAssetOutputPath(kind, itemId, extension), buffer);
+    }
+
+    if (!saved) {
+      throw new Error('参考资产生成失败：未保存输出文件。');
+    }
+
     const hadGeneratedMedia = hasGeneratedMediaOutputs(project);
 
     updateReferenceItem(project, kind, itemId, (item) => ({
@@ -3064,6 +3146,39 @@ function guessImageExtension(filename: string, mimeType: string): string {
   }
 
   return '.png';
+}
+
+function guessImageMimeTypeFromPath(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+
+  if (extension === '.jpg' || extension === '.jpeg') {
+    return 'image/jpeg';
+  }
+
+  if (extension === '.webp') {
+    return 'image/webp';
+  }
+
+  if (extension === '.gif') {
+    return 'image/gif';
+  }
+
+  return 'image/png';
+}
+
+function guessImageExtensionFromMimeType(mimeType: string): string {
+  return guessImageExtension('', mimeType);
+}
+
+async function loadGeminiInputImages(localPaths: string[]): Promise<GeminiInputImage[]> {
+  const uniquePaths = [...new Set(localPaths.map((item) => item.trim()).filter(Boolean))];
+
+  return await Promise.all(
+    uniquePaths.map(async (localPath) => ({
+      buffer: await readFile(localPath),
+      mimeType: guessImageMimeTypeFromPath(localPath)
+    }))
+  );
 }
 
 function guessAudioExtension(filename: string, mimeType: string): string {
@@ -3420,6 +3535,13 @@ async function runAssetStage(project: Project): Promise<void> {
   let failedCount = 0;
   let skippedCount = 0;
   let processedCount = 0;
+  const useGeminiImages = usesGeminiImageGeneration(project);
+
+  if (useGeminiImages) {
+    assertGeminiImageGenerationConfigured(appSettings);
+    appendLog(project, `当前项目图片生成后端为 ${resolveProjectImageGenerationBackendLabel(project)}。`);
+    await saveProject(project);
+  }
 
   for (const [kind, items] of referenceGroups) {
     if (!items.length) {
@@ -3439,7 +3561,7 @@ async function runAssetStage(project: Project): Promise<void> {
       const workflowKind = getReferenceWorkflowKind(kind, shouldUseReferenceImage);
       const workflow = appSettings.comfyui.workflows[workflowKind];
 
-      if (!workflow.workflowPath) {
+      if (!useGeminiImages && !workflow.workflowPath) {
         skippedCount += 1;
         processedCount += 1;
         appendLog(
@@ -3649,11 +3771,47 @@ function appendImageWorkflowLog(
   }
 }
 
+function appendImageGenerationLog(
+  project: Project,
+  generationReferenceInputs: GenerationReferenceInputs,
+  selectedWorkflow: SelectedImageStageWorkflow | null
+): void {
+  if (usesGeminiImageGeneration(project)) {
+    appendLog(
+      project,
+      generationReferenceInputs.referenceCount
+        ? `参考帧生成将注入 ${generationReferenceInputs.referenceCount} 个资产库参考项，其中最多 ${Math.min(
+            generationReferenceInputs.referenceImageRelativePaths.length,
+            MAX_GEMINI_REFERENCE_IMAGES_PER_REQUEST
+          )} 张参考图会作为 Gemini 输入。`
+        : '资产库暂无可用参考项，Gemini 参考帧生成将仅使用镜头 Prompt。',
+      generationReferenceInputs.referenceCount ? 'info' : 'warn'
+    );
+    appendLog(project, `参考帧阶段使用 ${resolveProjectImageGenerationBackendLabel(project)}。`);
+
+    if (generationReferenceInputs.referenceImageRelativePaths.length > MAX_GEMINI_REFERENCE_IMAGES_PER_REQUEST) {
+      appendLog(
+        project,
+        `Gemini 单次最多附带 ${MAX_GEMINI_REFERENCE_IMAGES_PER_REQUEST} 张参考图；当前会按优先级截取前 ${MAX_GEMINI_REFERENCE_IMAGES_PER_REQUEST} 张。`,
+        'warn'
+      );
+    }
+
+    return;
+  }
+
+  if (!selectedWorkflow) {
+    throw new Error('参考帧生成缺少可用的 ComfyUI 工作流。');
+  }
+
+  appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
+}
+
 async function generateReferenceFrameAssetForShot(
   project: Project,
   shot: Project['storyboard'][number],
   appSettings: AppSettings,
-  selectedWorkflow: SelectedImageStageWorkflow,
+  selectedWorkflow: SelectedImageStageWorkflow | null,
   generationReferenceInputs: GenerationReferenceInputs,
   frameKind: ReferenceFrameKind,
   options: {
@@ -3668,14 +3826,37 @@ async function generateReferenceFrameAssetForShot(
           ...shot,
           lastFramePrompt: options.promptOverride
         };
+  const promptWorkflow =
+    usesGeminiImageGeneration(project)
+      ? generationReferenceInputs.referenceImageRelativePaths.length > 0
+        ? 'image_edit'
+        : 'text_to_image'
+      : selectedWorkflow?.type ?? 'text_to_image';
   const generationPrompt = appendReferenceContext(
-    buildReferenceFrameWorkflowPrompt(project, effectiveShot, selectedWorkflow.type, frameKind),
+    buildReferenceFrameWorkflowPrompt(project, effectiveShot, promptWorkflow, frameKind),
     generationReferenceInputs.referenceContext
   );
   let buffer: Buffer;
   let extension: string;
 
-  if (selectedWorkflow.type === 'storyboard_image' || selectedWorkflow.type === 'image_edit') {
+  if (usesGeminiImageGeneration(project)) {
+    assertGeminiImageGenerationConfigured(appSettings);
+
+    const geminiReferenceImagePaths = generationReferenceInputs.referenceImageRelativePaths
+      .slice(0, MAX_GEMINI_REFERENCE_IMAGES_PER_REQUEST)
+      .map((relativePath) => fromStorageRelative(relativePath));
+    const result = await generateImageWithGemini({
+      model: project.settings.geminiImageModel,
+      prompt: generationPrompt,
+      aspectRatio: project.settings.aspectRatio,
+      referenceImages: await loadGeminiInputImages(geminiReferenceImagePaths),
+      signal
+    });
+    buffer = result.buffer;
+    extension = guessImageExtensionFromMimeType(result.mimeType);
+  } else if (!selectedWorkflow) {
+    throw new Error('参考帧生成缺少可用的 ComfyUI 工作流。');
+  } else if (selectedWorkflow.type === 'storyboard_image' || selectedWorkflow.type === 'image_edit') {
     const result = await runStoryboardImageWorkflowForShot(
       project,
       effectiveShot,
@@ -3757,13 +3938,16 @@ async function generateVideoAssetForShot(
   }
 
   if (requireTerminalFrame && !lastImageAsset) {
-    const selectedWorkflow = resolveImageStageWorkflow(appSettings, terminalReferenceInputs);
+    const selectedWorkflow = usesGeminiImageGeneration(project)
+      ? null
+      : resolveImageStageWorkflow(appSettings, terminalReferenceInputs);
     appendLog(
       project,
       segmentCount > 1
         ? `镜头 ${shot.title} 需要分段生成，先为整段视频补生成结束参考帧，再按“首帧续接、尾段收束”的方式依次生成各段视频。`
         : `镜头 ${shot.title} 需要结束参考帧，开始补生成结束参考帧。`
     );
+    appendImageGenerationLog(project, terminalReferenceInputs, selectedWorkflow);
     await saveProject(project);
 
     const endFrameAsset = await generateReferenceFrameAssetForShot(
@@ -4014,8 +4198,10 @@ async function generateShotMedia(
     const startFrameAsset = await generateStartFrameFromPreviousShotVideo(project, shot);
     setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
   } else {
-    selectedWorkflow = resolveImageStageWorkflow(appSettings, startGenerationReferenceInputs);
-    appendImageWorkflowLog(project, selectedWorkflow, startGenerationReferenceInputs);
+    selectedWorkflow = usesGeminiImageGeneration(project)
+      ? null
+      : resolveImageStageWorkflow(appSettings, startGenerationReferenceInputs);
+    appendImageGenerationLog(project, startGenerationReferenceInputs, selectedWorkflow);
     await saveProject(project);
     const startFrameAsset = await generateReferenceFrameAssetForShot(
       project,
@@ -4030,8 +4216,10 @@ async function generateShotMedia(
 
   if (shot.useLastFrameReference) {
     if (!selectedWorkflow) {
-      selectedWorkflow = resolveImageStageWorkflow(appSettings, endGenerationReferenceInputs);
-      appendImageWorkflowLog(project, selectedWorkflow, endGenerationReferenceInputs);
+      selectedWorkflow = usesGeminiImageGeneration(project)
+        ? null
+        : resolveImageStageWorkflow(appSettings, endGenerationReferenceInputs);
+      appendImageGenerationLog(project, endGenerationReferenceInputs, selectedWorkflow);
     }
 
     appendLog(project, `镜头 ${shot.title} 需要结束参考帧，开始补生成结束参考帧。`);
@@ -4738,10 +4926,12 @@ async function executeStoryboardShotLastImageGeneration(projectId: string, shotI
   const appSettings = getAppSettings();
   const referenceUploadCache = new Map<string, string>();
   const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot, 'end');
-  const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
+  const selectedWorkflow = usesGeminiImageGeneration(project)
+    ? null
+    : resolveImageStageWorkflow(appSettings, generationReferenceInputs);
   const effectiveLastFramePrompt = resolveEffectiveLastFramePrompt(shot, true);
 
-  appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
+  appendImageGenerationLog(project, generationReferenceInputs, selectedWorkflow);
   appendLog(project, `开始为镜头 ${shot.title} 单独重生结束参考帧。`);
   await saveProject(project);
 
