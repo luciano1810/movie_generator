@@ -5024,7 +5024,7 @@ export function App() {
                 <label className="field span-2">
                   <span>{draftSourceLabel}</span>
                   <textarea
-                    rows={10}
+                    rows={8}
                     value={draft.sourceText}
                     placeholder={scriptModeSourcePlaceholder(draft.settings.scriptMode)}
                     onChange={(event) =>
@@ -5104,7 +5104,7 @@ export function App() {
                 <label className="field span-2">
                   <span>视觉风格</span>
                   <textarea
-                    rows={3}
+                    rows={2}
                     value={draft.settings.visualStyle}
                     onChange={(event) =>
                       setDraft((current) => {
@@ -5566,7 +5566,7 @@ export function App() {
                     value={createSource}
                     onChange={(event) => setCreateSource(event.target.value)}
                     placeholder={scriptModeSourcePlaceholder(createScriptMode)}
-                    rows={10}
+                    rows={8}
                   />
                 </label>
                 <label className="field">
