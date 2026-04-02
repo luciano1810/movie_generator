@@ -9,6 +9,7 @@ import {
   type LlmModelDiscoveryResponse,
   type Project,
   type ReferenceAssetKind,
+  type ShotReferenceFrameKind,
   type RunStage,
   DEFAULT_SETTINGS,
   STAGES,
@@ -56,6 +57,10 @@ function isRunStage(value: unknown): value is RunStage {
 
 function isReferenceAssetKind(value: unknown): value is ReferenceAssetKind {
   return value === 'character' || value === 'scene' || value === 'object';
+}
+
+function isShotReferenceFrameKind(value: unknown): value is ShotReferenceFrameKind {
+  return value === 'start' || value === 'end';
 }
 
 function getReferenceCollection(project: Project, kind: ReferenceAssetKind) {
@@ -759,6 +764,9 @@ async function main(): Promise<void> {
   app.put('/api/projects/:id/storyboard/:shotId/reference-items/:kind/:itemId', async (request, response, next) => {
     try {
       const { id, shotId, kind, itemId } = request.params;
+      const frameKind = isShotReferenceFrameKind(request.query?.frameKind)
+        ? request.query.frameKind
+        : 'start';
 
       if (!isReferenceAssetKind(kind)) {
         response.status(400).json({ message: '无效的参考资产类型。' });
@@ -793,7 +801,7 @@ async function main(): Promise<void> {
         return;
       }
 
-      response.json(await addReferenceAssetToStoryboardShot(id, shotId, kind, itemId));
+      response.json(await addReferenceAssetToStoryboardShot(id, shotId, kind, itemId, frameKind));
     } catch (error) {
       next(error);
     }
@@ -802,6 +810,9 @@ async function main(): Promise<void> {
   app.delete('/api/projects/:id/storyboard/:shotId/reference-items/:kind/:itemId', async (request, response, next) => {
     try {
       const { id, shotId, kind, itemId } = request.params;
+      const frameKind = isShotReferenceFrameKind(request.query?.frameKind)
+        ? request.query.frameKind
+        : 'start';
 
       if (!isReferenceAssetKind(kind)) {
         response.status(400).json({ message: '无效的参考资产类型。' });
@@ -836,7 +847,7 @@ async function main(): Promise<void> {
         return;
       }
 
-      response.json(await removeReferenceAssetFromStoryboardShot(id, shotId, kind, itemId));
+      response.json(await removeReferenceAssetFromStoryboardShot(id, shotId, kind, itemId, frameKind));
     } catch (error) {
       next(error);
     }

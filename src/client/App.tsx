@@ -8,6 +8,7 @@ import type {
   ProjectSettings,
   ReferenceAssetItem,
   ReferenceAssetKind,
+  ShotReferenceFrameKind,
   ScriptMode,
   RunStage,
   StageId
@@ -357,6 +358,10 @@ function truncateText(value: string | null | undefined, maxLength = 88): string 
 
 function referenceSelectionId(kind: ReferenceAssetKind, itemId: string): string {
   return `${kind}:${itemId}`;
+}
+
+function shotFrameReferenceSelectionKey(shotId: string, frameKind: ShotReferenceFrameKind): string {
+  return `${shotId}:${frameKind}`;
 }
 
 function getReferenceItemPreviewAsset(item: ReferenceAssetItem): GeneratedAsset | null {
@@ -1078,7 +1083,8 @@ function countGeneratedReferenceAssets(project: Project): number {
 
 function getShotReferencePreviewItems(
   project: Project,
-  shot: Project['storyboard'][number]
+  shot: Project['storyboard'][number],
+  frameKind: ShotReferenceFrameKind = 'start'
 ): Array<{
   kind: ReferenceAssetKind;
   itemId: string;
@@ -1086,7 +1092,7 @@ function getShotReferencePreviewItems(
   summary: string;
   asset: GeneratedAsset;
 }> {
-  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script, frameKind);
   const previewItems: Array<{
     kind: ReferenceAssetKind;
     itemId: string;
@@ -2044,6 +2050,7 @@ export function App() {
 
   async function handleAddShotReferenceAsset(
     shotId: string,
+    frameKind: ShotReferenceFrameKind,
     kind: ReferenceAssetKind,
     itemId: string,
     itemName: string
@@ -2053,15 +2060,15 @@ export function App() {
     }
 
     try {
-      setPending(`shot-reference-add:${shotId}`);
+      setPending(`shot-reference-add:${shotId}:${frameKind}`);
       const updated = await requestJson<Project>(
-        `/api/projects/${selectedId}/storyboard/${shotId}/reference-items/${kind}/${itemId}`,
+        `/api/projects/${selectedId}/storyboard/${shotId}/reference-items/${kind}/${itemId}?frameKind=${frameKind}`,
         {
           method: 'PUT'
         }
       );
       setProject(updated);
-      setNotice(`已为当前镜头加入${referenceKindLabel(kind)}参考图“${itemName}”，请重新生成当前镜头链路或视频片段`);
+      setNotice(`已为当前镜头${frameKind === 'start' ? '首帧' : '尾帧'}加入${referenceKindLabel(kind)}参考图“${itemName}”，请重新生成相关链路或视频片段`);
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '添加镜头参考图失败');
@@ -2072,6 +2079,7 @@ export function App() {
 
   async function handleRemoveShotReferenceAsset(
     shotId: string,
+    frameKind: ShotReferenceFrameKind,
     kind: ReferenceAssetKind,
     itemId: string,
     itemName: string
@@ -2081,15 +2089,15 @@ export function App() {
     }
 
     try {
-      setPending(`shot-reference-remove:${shotId}:${kind}:${itemId}`);
+      setPending(`shot-reference-remove:${shotId}:${frameKind}:${kind}:${itemId}`);
       const updated = await requestJson<Project>(
-        `/api/projects/${selectedId}/storyboard/${shotId}/reference-items/${kind}/${itemId}`,
+        `/api/projects/${selectedId}/storyboard/${shotId}/reference-items/${kind}/${itemId}?frameKind=${frameKind}`,
         {
           method: 'DELETE'
         }
       );
       setProject(updated);
-      setNotice(`已从当前镜头移除${referenceKindLabel(kind)}参考图“${itemName}”`);
+      setNotice(`已从当前镜头${frameKind === 'start' ? '首帧' : '尾帧'}移除${referenceKindLabel(kind)}参考图“${itemName}”`);
       await loadProjects(selectedId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '移除镜头参考图失败');
@@ -2970,21 +2978,33 @@ export function App() {
       return null;
     }
 
+    const currentProject = project;
     const longTakeContinuation = isLongTakeContinuationShot(project, shot);
     const technicalPromptDraft = technicalPromptDrafts[shot.id];
-    const shotReferencePreviewItems = getShotReferencePreviewItems(project, shot);
-    const shotReferenceIds = new Set(
-      shotReferencePreviewItems.map((reference) => referenceSelectionId(reference.kind, reference.itemId))
+    const startReferencePreviewItems = getShotReferencePreviewItems(project, shot, 'start');
+    const startReferenceIds = new Set(
+      startReferencePreviewItems.map((reference) => referenceSelectionId(reference.kind, reference.itemId))
     );
-    const availableShotReferenceAssets = buildCurrentProjectReferenceAssets(project).filter(
-      (asset) => !shotReferenceIds.has(referenceSelectionId(asset.kind, asset.itemId))
+    const availableStartReferenceAssets = buildCurrentProjectReferenceAssets(project).filter(
+      (asset) => !startReferenceIds.has(referenceSelectionId(asset.kind, asset.itemId))
     );
-    const shotReferenceSelectionValue = resolveReferenceLibrarySelection(
-      availableShotReferenceAssets,
-      shotReferenceLibrarySelections[shot.id]
+    const startReferenceSelectionValue = resolveReferenceLibrarySelection(
+      availableStartReferenceAssets,
+      shotReferenceLibrarySelections[shotFrameReferenceSelectionKey(shot.id, 'start')]
     );
-    const selectedShotReferenceAsset =
-      availableShotReferenceAssets.find((asset) => referenceLibraryAssetValue(asset) === shotReferenceSelectionValue) ?? null;
+    const selectedStartReferenceAsset =
+      availableStartReferenceAssets.find((asset) => referenceLibraryAssetValue(asset) === startReferenceSelectionValue) ?? null;
+    const endReferencePreviewItems = getShotReferencePreviewItems(project, shot, 'end');
+    const endReferenceIds = new Set(endReferencePreviewItems.map((reference) => referenceSelectionId(reference.kind, reference.itemId)));
+    const availableEndReferenceAssets = buildCurrentProjectReferenceAssets(project).filter(
+      (asset) => !endReferenceIds.has(referenceSelectionId(asset.kind, asset.itemId))
+    );
+    const endReferenceSelectionValue = resolveReferenceLibrarySelection(
+      availableEndReferenceAssets,
+      shotReferenceLibrarySelections[shotFrameReferenceSelectionKey(shot.id, 'end')]
+    );
+    const selectedEndReferenceAsset =
+      availableEndReferenceAssets.find((asset) => referenceLibraryAssetValue(asset) === endReferenceSelectionValue) ?? null;
     const firstFramePromptValue = technicalPromptDraft?.firstFramePrompt ?? shot.firstFramePrompt;
     const lastFramePromptValue = technicalPromptDraft?.lastFramePrompt ?? shot.lastFramePrompt;
     const imagePromptDirty = firstFramePromptValue.trim() !== shot.firstFramePrompt.trim();
@@ -2993,7 +3013,8 @@ export function App() {
     const imageGeneratePending = pending === `image-generate:${shot.id}`;
     const lastImageGeneratePending = pending === `last-image-generate:${shot.id}`;
     const imageSelectPending = pending === `image-select:${shot.id}`;
-    const shotReferenceAddPending = pending === `shot-reference-add:${shot.id}`;
+    const startReferenceAddPending = pending === `shot-reference-add:${shot.id}:start`;
+    const endReferenceAddPending = pending === `shot-reference-add:${shot.id}:end`;
     const imageAsset = imageMap.get(shot.id) ?? null;
     const lastImageAsset = lastImageMap.get(shot.id) ?? null;
     const imageVersions = getShotAssetVersions(project, 'images', shot.id);
@@ -3008,6 +3029,117 @@ export function App() {
     const groupCardContext =
       group.shots.length > 1 ? `长镜头第 ${groupIndex + 1}/${group.shots.length} 段 · ${formatShotBrowserGroupRange(group)}` : null;
 
+    function renderReferenceManager(frameKind: ShotReferenceFrameKind) {
+      const isStartFrame = frameKind === 'start';
+      const previewItems = isStartFrame ? startReferencePreviewItems : endReferencePreviewItems;
+      const availableAssets = isStartFrame ? availableStartReferenceAssets : availableEndReferenceAssets;
+      const selectedAsset = isStartFrame ? selectedStartReferenceAsset : selectedEndReferenceAsset;
+      const selectionValue = isStartFrame ? startReferenceSelectionValue : endReferenceSelectionValue;
+      const addPending = isStartFrame ? startReferenceAddPending : endReferenceAddPending;
+      const selectionKey = shotFrameReferenceSelectionKey(shot.id, frameKind);
+      const frameLabel = isStartFrame ? '首帧' : '尾帧';
+      const generationLabel = isStartFrame ? '参考帧和后续视频生成' : '尾帧生成和后续视频收束';
+
+      return (
+        <>
+          <div className="input-reference-strip">
+            <div className="input-reference-strip-head">
+              <span>{`从当前资产库添加${frameLabel}参考图`}</span>
+              <small>{`可手动补充未自动匹配到的角色、场景或物品参考图，${generationLabel}都会使用这些参考图。`}</small>
+            </div>
+            {availableAssets.length ? (
+              <>
+                  <ReferenceLibraryPicker
+                  assets={availableAssets}
+                  disabled={Boolean(currentProject.runState.isRunning) || addPending}
+                  selectedValue={selectionValue}
+                  onChange={(value) =>
+                    setShotReferenceLibrarySelections((current) => ({
+                      ...current,
+                      [selectionKey]: value
+                    }))
+                  }
+                />
+                {selectedAsset ? (
+                  <div className="inline-actions">
+                    <a href={assetUrl(selectedAsset.relativePath)} target="_blank" rel="noreferrer">
+                      打开资产库素材
+                    </a>
+                    <button
+                      className="button ghost mini-button"
+                      disabled={Boolean(currentProject.runState.isRunning) || addPending}
+                      onClick={() =>
+                        void handleAddShotReferenceAsset(
+                          shot.id,
+                          frameKind,
+                          selectedAsset.kind,
+                          selectedAsset.itemId,
+                          selectedAsset.name
+                        )
+                      }
+                      type="button"
+                    >
+                      {addPending ? '加入中...' : `加入${frameLabel}`}
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="input-reference-empty">{`当前项目资产库里没有更多可加入这个${frameLabel}的参考图。`}</div>
+            )}
+          </div>
+          {previewItems.length ? (
+            <div className="input-reference-strip">
+              <div className="input-reference-strip-head">
+                <span>{`${frameLabel}输入参考图`}</span>
+                <small>{`${previewItems.length} 张；自动匹配当前镜头内容，也支持你在上方手动添加或移除`}</small>
+              </div>
+              <div className="input-reference-strip-track">
+                {previewItems.map((reference) => (
+                  <div key={`${frameKind}:${reference.kind}:${reference.itemId}`} className="input-reference-entry">
+                    <a
+                      className="input-reference-chip"
+                      href={assetUrl(reference.asset.relativePath)}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={
+                        reference.summary
+                          ? `${referenceKindLabel(reference.kind)} · ${reference.name}\n${reference.summary}`
+                          : `${referenceKindLabel(reference.kind)} · ${reference.name}`
+                      }
+                    >
+                      <img src={assetUrl(reference.asset.relativePath)} alt={`${referenceKindLabel(reference.kind)} ${reference.name}`} />
+                      <div className="input-reference-chip-copy">
+                        <strong>{reference.name}</strong>
+                        <small>{referenceKindLabel(reference.kind)}</small>
+                      </div>
+                    </a>
+                    <button
+                      className="button ghost mini-button"
+                      disabled={
+                        Boolean(currentProject.runState.isRunning) ||
+                        pending === `shot-reference-remove:${shot.id}:${frameKind}:${reference.kind}:${reference.itemId}`
+                      }
+                      onClick={() =>
+                        void handleRemoveShotReferenceAsset(shot.id, frameKind, reference.kind, reference.itemId, reference.name)
+                      }
+                      type="button"
+                    >
+                      {pending === `shot-reference-remove:${shot.id}:${frameKind}:${reference.kind}:${reference.itemId}`
+                        ? '移除中...'
+                        : '移除'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="input-reference-empty">{`当前${frameLabel}没有匹配到可注入的参考图，${frameLabel}生成将只使用 Prompt。`}</div>
+          )}
+        </>
+      );
+    }
+
     return (
       <article className="shot-card stage-detail-card">
         <div className="stage-detail-head">
@@ -3021,97 +3153,8 @@ export function App() {
             {imageAsset ? '当前版本已就绪' : selectedImage ? '可从历史版本恢复' : '未生成'}
           </span>
         </div>
-        <div className="input-reference-strip">
-          <div className="input-reference-strip-head">
-            <span>从当前资产库添加参考图</span>
-            <small>可手动补充未自动匹配到的角色、场景或物品参考图，参考帧和后续视频生成都会使用这些参考图。</small>
-          </div>
-          {availableShotReferenceAssets.length ? (
-            <>
-              <ReferenceLibraryPicker
-                assets={availableShotReferenceAssets}
-                disabled={Boolean(project.runState.isRunning) || shotReferenceAddPending}
-                selectedValue={shotReferenceSelectionValue}
-                onChange={(value) =>
-                  setShotReferenceLibrarySelections((current) => ({
-                    ...current,
-                    [shot.id]: value
-                  }))
-                }
-              />
-              {selectedShotReferenceAsset ? (
-                <div className="inline-actions">
-                  <a href={assetUrl(selectedShotReferenceAsset.relativePath)} target="_blank" rel="noreferrer">
-                    打开资产库素材
-                  </a>
-                  <button
-                    className="button ghost mini-button"
-                    disabled={Boolean(project.runState.isRunning) || shotReferenceAddPending}
-                    onClick={() =>
-                      void handleAddShotReferenceAsset(
-                        shot.id,
-                        selectedShotReferenceAsset.kind,
-                        selectedShotReferenceAsset.itemId,
-                        selectedShotReferenceAsset.name
-                      )
-                    }
-                    type="button"
-                  >
-                    {shotReferenceAddPending ? '加入中...' : '加入当前镜头'}
-                  </button>
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <div className="input-reference-empty">当前项目资产库里没有更多可加入这个镜头的参考图。</div>
-          )}
-        </div>
-        {shotReferencePreviewItems.length ? (
-          <div className="input-reference-strip">
-            <div className="input-reference-strip-head">
-              <span>输入参考图</span>
-              <small>{shotReferencePreviewItems.length} 张；自动匹配当前镜头内容，也支持你在上方手动添加或移除</small>
-            </div>
-            <div className="input-reference-strip-track">
-              {shotReferencePreviewItems.map((reference) => (
-                <div key={`${reference.kind}:${reference.itemId}`} className="input-reference-entry">
-                  <a
-                    className="input-reference-chip"
-                    href={assetUrl(reference.asset.relativePath)}
-                    target="_blank"
-                    rel="noreferrer"
-                    title={
-                      reference.summary
-                        ? `${referenceKindLabel(reference.kind)} · ${reference.name}\n${reference.summary}`
-                        : `${referenceKindLabel(reference.kind)} · ${reference.name}`
-                    }
-                  >
-                    <img src={assetUrl(reference.asset.relativePath)} alt={`${referenceKindLabel(reference.kind)} ${reference.name}`} />
-                    <div className="input-reference-chip-copy">
-                      <strong>{reference.name}</strong>
-                      <small>{referenceKindLabel(reference.kind)}</small>
-                    </div>
-                  </a>
-                  <button
-                    className="button ghost mini-button"
-                    disabled={
-                      Boolean(project.runState.isRunning) ||
-                      pending === `shot-reference-remove:${shot.id}:${reference.kind}:${reference.itemId}`
-                    }
-                    onClick={() =>
-                      void handleRemoveShotReferenceAsset(shot.id, reference.kind, reference.itemId, reference.name)
-                    }
-                    type="button"
-                  >
-                    {pending === `shot-reference-remove:${shot.id}:${reference.kind}:${reference.itemId}` ? '移除中...' : '移除'}
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="input-reference-empty">当前镜头没有匹配到可注入的参考图，参考帧生成将只使用 Prompt。</div>
-        )}
+        {renderReferenceManager('start')}
+        {showTailFramePanel ? renderReferenceManager('end') : null}
         <div className="prompt-block">
           <div className="prompt-block-head">
             <h5>起始参考帧 Prompt</h5>

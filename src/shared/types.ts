@@ -205,6 +205,7 @@ export interface ScriptPackage {
 }
 
 export type StoryboardDialogueFlowRole = 'single' | 'start' | 'middle' | 'end';
+export type ShotReferenceFrameKind = 'start' | 'end';
 
 export interface StoryboardDialogueIdentifier {
   groupId: string;
@@ -240,6 +241,10 @@ export interface StoryboardShot {
   referenceAssetIds: string[];
   manualReferenceAssetIds: string[];
   excludedReferenceAssetIds: string[];
+  startManualReferenceAssetIds: string[];
+  startExcludedReferenceAssetIds: string[];
+  endManualReferenceAssetIds: string[];
+  endExcludedReferenceAssetIds: string[];
 }
 
 export interface GeneratedAsset {
@@ -551,12 +556,17 @@ export function filterReferenceLibraryForShot(
 export function getGenerationReferenceLibraryForShot(
   referenceLibrary: ProjectReferenceLibrary,
   shot: StoryboardShot,
-  script: ScriptPackage | null
+  script: ScriptPackage | null,
+  frameKind: ShotReferenceFrameKind = 'start'
 ): ProjectReferenceLibrary {
   const explicitReferenceIds = new Set(shot.referenceAssetIds);
   const autoMatched = filterReferenceLibraryForShot(referenceLibrary, shot, script);
-  const manualReferenceIds = new Set(shot.manualReferenceAssetIds);
-  const excludedReferenceIds = new Set(shot.excludedReferenceAssetIds);
+  const manualReferenceIds = new Set(
+    frameKind === 'start' ? shot.startManualReferenceAssetIds : shot.endManualReferenceAssetIds
+  );
+  const excludedReferenceIds = new Set(
+    frameKind === 'start' ? shot.startExcludedReferenceAssetIds : shot.endExcludedReferenceAssetIds
+  );
 
   const explicitSelectionLibrary =
     explicitReferenceIds.size > 0
@@ -1024,6 +1034,8 @@ export function normalizeStoryboardShot(
   );
   const dialogueIdentifier = normalizeStoryboardDialogueIdentifier(input?.dialogueIdentifier);
   const longTakeIdentifier = normalizeLongTakeIdentifier(input?.longTakeIdentifier);
+  const normalizedManualReferenceAssetIds = normalizeReferenceSelectionIds(input?.manualReferenceAssetIds);
+  const normalizedExcludedReferenceAssetIds = normalizeReferenceSelectionIds(input?.excludedReferenceAssetIds);
 
   return {
     id,
@@ -1068,8 +1080,20 @@ export function normalizeStoryboardShot(
         : `场景${sceneNumber}镜头${shotNumber}无台词和旁白，不生成语音内容。`
     ),
     referenceAssetIds: normalizeReferenceSelectionIds(input?.referenceAssetIds),
-    manualReferenceAssetIds: normalizeReferenceSelectionIds(input?.manualReferenceAssetIds),
-    excludedReferenceAssetIds: normalizeReferenceSelectionIds(input?.excludedReferenceAssetIds)
+    manualReferenceAssetIds: normalizedManualReferenceAssetIds,
+    excludedReferenceAssetIds: normalizedExcludedReferenceAssetIds,
+    startManualReferenceAssetIds: normalizeReferenceSelectionIds(
+      input?.startManualReferenceAssetIds ?? normalizedManualReferenceAssetIds
+    ),
+    startExcludedReferenceAssetIds: normalizeReferenceSelectionIds(
+      input?.startExcludedReferenceAssetIds ?? normalizedExcludedReferenceAssetIds
+    ),
+    endManualReferenceAssetIds: normalizeReferenceSelectionIds(
+      input?.endManualReferenceAssetIds ?? normalizedManualReferenceAssetIds
+    ),
+    endExcludedReferenceAssetIds: normalizeReferenceSelectionIds(
+      input?.endExcludedReferenceAssetIds ?? normalizedExcludedReferenceAssetIds
+    )
   };
 }
 

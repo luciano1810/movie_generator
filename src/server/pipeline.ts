@@ -10,6 +10,7 @@ import {
   type ProjectRunState,
   type ReferenceAssetItem,
   type ReferenceAssetKind,
+  type ShotReferenceFrameKind,
   type RunStage,
   type StageId,
   type StageProgress,
@@ -841,9 +842,10 @@ function getDownstreamLongTakeDependentShotIds(project: Project, shotId: string)
 
 function getGenerationReferenceSelectionIds(
   project: Project,
-  shot: Project['storyboard'][number]
+  shot: Project['storyboard'][number],
+  frameKind: ShotReferenceFrameKind
 ): Set<string> {
-  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
+  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script, frameKind);
   const selectionIds = [
     ...referenceLibrary.characters.map((item) => buildShotReferenceSelectionId('character', item.id)),
     ...referenceLibrary.scenes.map((item) => buildShotReferenceSelectionId('scene', item.id)),
@@ -855,17 +857,26 @@ function getGenerationReferenceSelectionIds(
 
 function setShotReferenceSelections(
   shot: Project['storyboard'][number],
+  frameKind: ShotReferenceFrameKind,
   nextSelections: {
     manualReferenceAssetIds?: string[];
     excludedReferenceAssetIds?: string[];
   }
 ): void {
   if (nextSelections.manualReferenceAssetIds) {
-    shot.manualReferenceAssetIds = [...new Set(nextSelections.manualReferenceAssetIds)];
+    if (frameKind === 'start') {
+      shot.startManualReferenceAssetIds = [...new Set(nextSelections.manualReferenceAssetIds)];
+    } else {
+      shot.endManualReferenceAssetIds = [...new Set(nextSelections.manualReferenceAssetIds)];
+    }
   }
 
   if (nextSelections.excludedReferenceAssetIds) {
-    shot.excludedReferenceAssetIds = [...new Set(nextSelections.excludedReferenceAssetIds)];
+    if (frameKind === 'start') {
+      shot.startExcludedReferenceAssetIds = [...new Set(nextSelections.excludedReferenceAssetIds)];
+    } else {
+      shot.endExcludedReferenceAssetIds = [...new Set(nextSelections.excludedReferenceAssetIds)];
+    }
   }
 }
 
@@ -1138,11 +1149,12 @@ async function uploadImageToComfyCached(
 async function buildGenerationReferenceInputs(
   project: Project,
   uploadCache: Map<string, string>,
-  shot?: Project['storyboard'][number]
+  shot?: Project['storyboard'][number],
+  frameKind: ShotReferenceFrameKind = 'start'
 ): Promise<GenerationReferenceInputs> {
   const signal = getProjectAbortSignal(project.id);
   const referenceLibrary = shot
-    ? getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script)
+    ? getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script, frameKind)
     : project.referenceLibrary;
   const referenceContext = buildReferenceContext(referenceLibrary);
   const collections: Array<[ReferenceAssetKind, ReferenceAssetItem[]]> = [
@@ -1233,7 +1245,7 @@ function appendReferenceContext(prompt: string, referenceContext: string): strin
   return `${prompt}\n\n参考资产约束：\n${referenceContext}`;
 }
 
-type ReferenceFrameKind = 'start' | 'end';
+type ReferenceFrameKind = ShotReferenceFrameKind;
 
 function buildReferenceFrameGazePrompt(frameKind: ReferenceFrameKind): string {
   return frameKind === 'start'
@@ -3717,6 +3729,7 @@ async function generateVideoAssetForShot(
   shot: Project['storyboard'][number],
   appSettings: AppSettings,
   generationReferenceInputs: GenerationReferenceInputs,
+  terminalReferenceInputs: GenerationReferenceInputs,
   ttsUploadCache: Map<string, string>
 ): Promise<GeneratedAsset> {
   const signal = getProjectAbortSignal(project.id);
@@ -3744,7 +3757,7 @@ async function generateVideoAssetForShot(
   }
 
   if (requireTerminalFrame && !lastImageAsset) {
-    const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
+    const selectedWorkflow = resolveImageStageWorkflow(appSettings, terminalReferenceInputs);
     appendLog(
       project,
       segmentCount > 1
@@ -3758,7 +3771,7 @@ async function generateVideoAssetForShot(
       shot,
       appSettings,
       selectedWorkflow,
-      generationReferenceInputs,
+      terminalReferenceInputs,
       'end',
       {
         promptOverride: effectiveLastFramePrompt
@@ -3986,7 +3999,8 @@ async function generateShotMedia(
   referenceUploadCache: Map<string, string>,
   ttsReferenceAudioUploadCache: Map<string, string>
 ): Promise<void> {
-  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
+  const startGenerationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot, 'start');
+  const endGenerationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot, 'end');
   const isLongTakeContinuation = isLongTakeContinuationShot(project, shot);
   let selectedWorkflow: SelectedImageStageWorkflow | null = null;
 
@@ -4000,15 +4014,15 @@ async function generateShotMedia(
     const startFrameAsset = await generateStartFrameFromPreviousShotVideo(project, shot);
     setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
   } else {
-    selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
-    appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
+    selectedWorkflow = resolveImageStageWorkflow(appSettings, startGenerationReferenceInputs);
+    appendImageWorkflowLog(project, selectedWorkflow, startGenerationReferenceInputs);
     await saveProject(project);
     const startFrameAsset = await generateReferenceFrameAssetForShot(
       project,
       shot,
       appSettings,
       selectedWorkflow,
-      generationReferenceInputs,
+      startGenerationReferenceInputs,
       'start'
     );
     setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
@@ -4016,8 +4030,8 @@ async function generateShotMedia(
 
   if (shot.useLastFrameReference) {
     if (!selectedWorkflow) {
-      selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
-      appendImageWorkflowLog(project, selectedWorkflow, generationReferenceInputs);
+      selectedWorkflow = resolveImageStageWorkflow(appSettings, endGenerationReferenceInputs);
+      appendImageWorkflowLog(project, selectedWorkflow, endGenerationReferenceInputs);
     }
 
     appendLog(project, `镜头 ${shot.title} 需要结束参考帧，开始补生成结束参考帧。`);
@@ -4027,7 +4041,7 @@ async function generateShotMedia(
       shot,
       appSettings,
       selectedWorkflow,
-      generationReferenceInputs,
+      endGenerationReferenceInputs,
       'end'
     );
     setActiveShotAsset(project, 'lastImages', shot.id, endFrameAsset);
@@ -4037,17 +4051,18 @@ async function generateShotMedia(
 
   appendLog(
     project,
-    generationReferenceInputs.referenceCount
-      ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
+    startGenerationReferenceInputs.referenceCount
+      ? `视频生成将注入 ${startGenerationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${startGenerationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
       : `当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和${shot.useLastFrameReference ? '参考帧' : isLongTakeContinuation ? '上一镜头尾帧' : '起始参考帧'}。`,
-    generationReferenceInputs.referenceCount ? 'info' : 'warn'
+    startGenerationReferenceInputs.referenceCount ? 'info' : 'warn'
   );
   await saveProject(project);
   const videoAsset = await generateVideoAssetForShot(
     project,
     shot,
     appSettings,
-    generationReferenceInputs,
+    startGenerationReferenceInputs,
+    endGenerationReferenceInputs,
     ttsReferenceAudioUploadCache
   );
   setActiveShotAsset(project, 'videos', shot.id, videoAsset);
@@ -4722,7 +4737,7 @@ async function executeStoryboardShotLastImageGeneration(projectId: string, shotI
 
   const appSettings = getAppSettings();
   const referenceUploadCache = new Map<string, string>();
-  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
+  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot, 'end');
   const selectedWorkflow = resolveImageStageWorkflow(appSettings, generationReferenceInputs);
   const effectiveLastFramePrompt = resolveEffectiveLastFramePrompt(shot, true);
 
@@ -4803,7 +4818,8 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
 
   const referenceUploadCache = new Map<string, string>();
   const ttsReferenceAudioUploadCache = new Map<string, string>();
-  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot);
+  const generationReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot, 'start');
+  const terminalReferenceInputs = await buildGenerationReferenceInputs(project, referenceUploadCache, shot, 'end');
   appendLog(project, `开始为镜头 ${shot.title} 单独生成视频片段。`);
   appendLog(
     project,
@@ -4819,6 +4835,7 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
     shot,
     appSettings,
     generationReferenceInputs,
+    terminalReferenceInputs,
     ttsReferenceAudioUploadCache
   );
   setActiveShotAsset(project, 'videos', shot.id, videoAsset);
@@ -4958,11 +4975,13 @@ export async function addReferenceAssetToStoryboardShot(
   projectId: string,
   shotId: string,
   kind: ReferenceAssetKind,
-  itemId: string
+  itemId: string,
+  frameKind: ShotReferenceFrameKind = 'start'
 ): Promise<Project> {
   const project = await readProject(projectId);
   const shot = getStoryboardShot(project, shotId);
   const item = getReferenceCollection(project, kind).find((candidate) => candidate.id === itemId);
+  const frameLabel = frameKind === 'start' ? '首帧' : '尾帧';
 
   if (!item) {
     throw new Error(`未找到 ${kind} 资产项 ${itemId}`);
@@ -4973,12 +4992,16 @@ export async function addReferenceAssetToStoryboardShot(
   }
 
   const selectionId = buildShotReferenceSelectionId(kind, itemId);
-  const beforeSelections = getGenerationReferenceSelectionIds(project, shot);
-  setShotReferenceSelections(shot, {
-    manualReferenceAssetIds: [...shot.manualReferenceAssetIds, selectionId],
-    excludedReferenceAssetIds: shot.excludedReferenceAssetIds.filter((value) => value !== selectionId)
+  const currentManualReferenceAssetIds =
+    frameKind === 'start' ? shot.startManualReferenceAssetIds : shot.endManualReferenceAssetIds;
+  const currentExcludedReferenceAssetIds =
+    frameKind === 'start' ? shot.startExcludedReferenceAssetIds : shot.endExcludedReferenceAssetIds;
+  const beforeSelections = getGenerationReferenceSelectionIds(project, shot, frameKind);
+  setShotReferenceSelections(shot, frameKind, {
+    manualReferenceAssetIds: [...currentManualReferenceAssetIds, selectionId],
+    excludedReferenceAssetIds: currentExcludedReferenceAssetIds.filter((value) => value !== selectionId)
   });
-  const afterSelections = getGenerationReferenceSelectionIds(project, shot);
+  const afterSelections = getGenerationReferenceSelectionIds(project, shot, frameKind);
 
   if (areReferenceSelectionSetsEqual(beforeSelections, afterSelections)) {
     return project;
@@ -4989,9 +5012,9 @@ export async function addReferenceAssetToStoryboardShot(
     project,
     invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
       ? invalidation.downstreamDependentShotIds.length
-        ? `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；当前镜头及后续长镜头续接镜头 ${invalidation.downstreamDependentShotIds.join(', ')} 的参考帧、视频片段和最终成片已失效，请重新生成。`
-        : `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
-      : `镜头 ${shot.title} 已加入${assetKindLabel(kind)}参考图“${item.name}”；后续参考帧与视频生成会注入这张参考图。`,
+        ? `镜头 ${shot.title} 已为${frameLabel}加入${assetKindLabel(kind)}参考图“${item.name}”；当前镜头及后续长镜头续接镜头 ${invalidation.downstreamDependentShotIds.join(', ')} 的参考帧、视频片段和最终成片已失效，请重新生成。`
+        : `镜头 ${shot.title} 已为${frameLabel}加入${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
+      : `镜头 ${shot.title} 已为${frameLabel}加入${assetKindLabel(kind)}参考图“${item.name}”；后续参考帧与视频生成会注入这张参考图。`,
     invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
       ? 'warn'
       : 'info'
@@ -5005,32 +5028,38 @@ export async function removeReferenceAssetFromStoryboardShot(
   projectId: string,
   shotId: string,
   kind: ReferenceAssetKind,
-  itemId: string
+  itemId: string,
+  frameKind: ShotReferenceFrameKind = 'start'
 ): Promise<Project> {
   const project = await readProject(projectId);
   const shot = getStoryboardShot(project, shotId);
   const item = getReferenceCollection(project, kind).find((candidate) => candidate.id === itemId);
+  const frameLabel = frameKind === 'start' ? '首帧' : '尾帧';
 
   if (!item) {
     throw new Error(`未找到 ${kind} 资产项 ${itemId}`);
   }
 
   const selectionId = buildShotReferenceSelectionId(kind, itemId);
-  const beforeSelections = getGenerationReferenceSelectionIds(project, shot);
+  const beforeSelections = getGenerationReferenceSelectionIds(project, shot, frameKind);
   const autoMatchedLibrary = filterReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
   const explicitlySelected = shot.referenceAssetIds.includes(selectionId);
   const autoMatched =
     explicitlySelected ||
     (kind === 'character' ? autoMatchedLibrary.characters : kind === 'scene' ? autoMatchedLibrary.scenes : autoMatchedLibrary.objects)
       .some((candidate) => candidate.id === itemId);
+  const currentManualReferenceAssetIds =
+    frameKind === 'start' ? shot.startManualReferenceAssetIds : shot.endManualReferenceAssetIds;
+  const currentExcludedReferenceAssetIds =
+    frameKind === 'start' ? shot.startExcludedReferenceAssetIds : shot.endExcludedReferenceAssetIds;
 
-  setShotReferenceSelections(shot, {
-    manualReferenceAssetIds: shot.manualReferenceAssetIds.filter((value) => value !== selectionId),
+  setShotReferenceSelections(shot, frameKind, {
+    manualReferenceAssetIds: currentManualReferenceAssetIds.filter((value) => value !== selectionId),
     excludedReferenceAssetIds: autoMatched
-      ? [...shot.excludedReferenceAssetIds, selectionId]
-      : shot.excludedReferenceAssetIds.filter((value) => value !== selectionId)
+      ? [...currentExcludedReferenceAssetIds, selectionId]
+      : currentExcludedReferenceAssetIds.filter((value) => value !== selectionId)
   });
-  const afterSelections = getGenerationReferenceSelectionIds(project, shot);
+  const afterSelections = getGenerationReferenceSelectionIds(project, shot, frameKind);
 
   if (areReferenceSelectionSetsEqual(beforeSelections, afterSelections)) {
     return project;
@@ -5041,9 +5070,9 @@ export async function removeReferenceAssetFromStoryboardShot(
     project,
     invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
       ? invalidation.downstreamDependentShotIds.length
-        ? `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”；当前镜头及后续长镜头续接镜头 ${invalidation.downstreamDependentShotIds.join(', ')} 的参考帧、视频片段和最终成片已失效，请重新生成。`
-        : `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
-      : `镜头 ${shot.title} 已移除${assetKindLabel(kind)}参考图“${item.name}”。`,
+        ? `镜头 ${shot.title} 已从${frameLabel}移除${assetKindLabel(kind)}参考图“${item.name}”；当前镜头及后续长镜头续接镜头 ${invalidation.downstreamDependentShotIds.join(', ')} 的参考帧、视频片段和最终成片已失效，请重新生成。`
+        : `镜头 ${shot.title} 已从${frameLabel}移除${assetKindLabel(kind)}参考图“${item.name}”；相关参考帧、视频片段和最终成片已失效，请重新生成。`
+      : `镜头 ${shot.title} 已从${frameLabel}移除${assetKindLabel(kind)}参考图“${item.name}”。`,
     invalidation.hadImageOutput || invalidation.hadLastImageOutput || invalidation.hadVideoOutput || invalidation.hadFinalVideo
       ? 'warn'
       : 'info'
