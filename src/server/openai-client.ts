@@ -46,6 +46,7 @@ const VIDEO_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
   '3. Chronological Chaining (时间动作链条): 动作必须按时间顺序展开，用 As..., Suddenly..., Then..., Gradually... 等连接词牵引模型一秒一秒渲染，防止动作糊在一起。',
   '4. Visual Subtext & Micro-Physics (视觉潜台词与微观物理): 禁止直接写抽象情感，必须通过微观动作、表情、物理干涉、环境反馈来外化表现。',
   '5. Audio-Visual Sync (音画同步): 对话严格采用 [Character Name] ([Vocal/Physical cue]): "中文台词" 格式。',
+  '6. Motivated Gaze Direction (动机化视线): 人物视线必须服务于当前互动对象、动作目标、道具位置、画外空间或运动方向；除非用户明确要求主观镜头、对镜独白或压迫性直视镜头，否则不要默认写成 looking into camera / facing camera / staring at viewer，也不要让所有人物同时正对屏幕。',
   '',
   '# Input/Output Constraints',
   '- English Only: 所有视觉、动作、环境描述必须使用高水准的好莱坞剧本级英语。',
@@ -66,6 +67,8 @@ const VIDEO_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
   '# Execution',
   '当用户提供 [Image State + Action/Dialogue] 后，直接输出优化后的 Cinematic Description，不要确认规则，不要复述输入，不要添加任何额外文字。'
 ].join('\n');
+
+const STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS = 2;
 
 function createClient(input?: Partial<LlmModelDiscoveryRequest>): OpenAI {
   const settings = getAppSettings();
@@ -105,6 +108,21 @@ function extractTextContent(content: unknown): string {
   }
 
   return '';
+}
+
+function applyStoryboardDialogueMarkerDurationBonus(
+  durationSeconds: number,
+  dialogueIdentifier: StoryboardDialogueIdentifier | null,
+  settings: ProjectSettings
+): number {
+  if (!dialogueIdentifier?.groupId) {
+    return durationSeconds;
+  }
+
+  return Math.min(
+    durationSeconds + STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS,
+    getEffectiveMaxVideoSegmentDurationSeconds(settings)
+  );
 }
 
 function extractJsonCandidate(raw: string): string {
@@ -1293,8 +1311,8 @@ function buildStoryboardShotDurationGuideline(maxVideoSegmentDurationSeconds: nu
   return `每个镜头的 durationSeconds 必须由你在分镜时独立决定。项目篇幅只决定整片总量，不决定单个镜头该拍几秒。请根据当前镜头承载的信息量、动作完整度、表演停顿、对白长度、运镜路径和情绪发酵空间自行给出时长；短反应镜头可以更短，完整动作链、对白来回或情绪收束镜头可以更长，但任何一个镜头都不能超过 ${maxVideoSegmentDurationSeconds} 秒。`;
 }
 
-function buildStoryboardShotSplitGuideline(): string {
-  return '是否继续拆镜只取决于当前内容是否包含多个戏剧节拍、对话来回、动作升级、信息反转或人物进出场，不由项目篇幅档位决定；同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切。';
+function buildStoryboardShotSplitGuideline(maxVideoSegmentDurationSeconds: number): string {
+  return `是否继续拆镜只取决于当前内容是否包含多个戏剧节拍、对话来回、动作升级、信息反转或人物进出场，不由项目篇幅档位决定；同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切。只有当一条连续长镜头的总时长预计会超过 ${maxVideoSegmentDurationSeconds} 秒时，才允许为了分段生成把它拆成多个连续镜头；如果没有超过这个上限，必须保留为一个镜头，不要为了所谓模型稳定性提前拆开。`;
 }
 
 function getStoryLengthScriptGenerationTarget(settings: ProjectSettings): {
@@ -1948,6 +1966,12 @@ function normalizeStoryboardPlanShot(
   const sceneNumber = normalizePositiveInteger(input?.sceneNumber, index + 1);
   const shotNumber = normalizePositiveInteger(input?.shotNumber, 1);
   const title = normalizeString(input?.title, `场景${sceneNumber}镜头${shotNumber}`);
+  const dialogueIdentifier = normalizeStoryboardDialogueIdentifier(input?.dialogueIdentifier);
+  const durationSeconds = applyStoryboardDialogueMarkerDurationBonus(
+    normalizeDuration(input?.durationSeconds, getStoryboardShotFallbackDurationSeconds(settings)),
+    dialogueIdentifier,
+    settings
+  );
 
   return {
     id: `scene-${sceneNumber}-shot-${shotNumber}`,
@@ -1955,11 +1979,8 @@ function normalizeStoryboardPlanShot(
     shotNumber,
     title,
     purpose: normalizeString(input?.purpose, '推进剧情'),
-    durationSeconds: normalizeDuration(
-      input?.durationSeconds,
-      getStoryboardShotFallbackDurationSeconds(settings)
-    ),
-    dialogueIdentifier: normalizeStoryboardDialogueIdentifier(input?.dialogueIdentifier),
+    durationSeconds,
+    dialogueIdentifier,
     longTakeIdentifier: normalizeLongTakeIdentifier(input?.longTakeIdentifier) || null,
     overview: normalizeString(input?.overview, `${title}，突出关键动作、对白推进和情绪变化。`)
   };
@@ -2116,7 +2137,7 @@ function buildStoryboardConversationPrelude(
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
   const recommendedMinimumShotCount = getRecommendedMinimumStoryboardShotCount(script, settings);
   const shotDurationGuideline = buildStoryboardShotDurationGuideline(maxVideoSegmentDurationSeconds);
-  const shotSplitGuideline = buildStoryboardShotSplitGuideline();
+  const shotSplitGuideline = buildStoryboardShotSplitGuideline(maxVideoSegmentDurationSeconds);
   const sceneRules = script.scenes
     .map(
       (scene) =>
@@ -2147,17 +2168,17 @@ ${sceneRules}
 9. ${shotDurationGuideline}
 10. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；这是硬上限，不是建议值。任何一个镜头的 durationSeconds 都不能超过它；如果一段动作、对白或情绪变化超出这个上限，你必须主动拆成多个镜头，不要依赖系统自动拼接兜底
 11. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
-12. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
+12. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；人物视线必须根据对手、道具、动作目标、画外空间或运动方向来设计，除非这个镜头明确需要主观凝视、对镜交流或正面压迫感，否则不要默认所有角色都面朝镜头或直视屏幕；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
 13. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
-14. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
-15. 如果多个相邻镜头本质上属于同一条连续长镜头，只是为了分段生成或拆分时长才切成多个镜头，必须为这些连续镜头输出相同的 longTakeIdentifier，例如 scene-2-longtake-1；没有这种连续长镜头关系时输出 null
+14. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
+15. 只有当同一条连续长镜头的总时长预计超过 ${maxVideoSegmentDurationSeconds} 秒、因此不得不拆成多个镜头分段生成时，才允许为这些相邻镜头输出相同的 longTakeIdentifier，例如 scene-2-longtake-1；如果这条连续长镜头在 ${maxVideoSegmentDurationSeconds} 秒内可以拍完，必须保留为一个镜头并输出 longTakeIdentifier = null；没有这种连续长镜头拆段关系时也输出 null
 16. 当某个镜头与前一个镜头的 longTakeIdentifier 相同，系统会直接复用前一个镜头视频的尾帧作为当前镜头首帧，不再单独生成当前镜头的起始参考帧；因此只有在画面、机位、动作和空间关系都应连续承接时，才能复用同一个 longTakeIdentifier
 17. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容；它只能描述当前镜头内部可执行的连续画面，不要写“切到某人反应”“转到另一个机位”“插入特写”“切到下一镜”等段内切镜指令
 18. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
 19. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
 20. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
-21. 如果一个镜头属于同一段连续对白、接话反打、双人来回或以对白反应为核心的连续切镜，必须额外输出 dialogueIdentifier；同一段连续对白里的镜头使用同一个 groupId，例如 scene-2-dialogue-1。非对白镜头或不承担连续对白切换功能的镜头，dialogueIdentifier 输出 null
-22. dialogueIdentifier 目前只需要输出 groupId；系统会根据镜头顺序自动补全 sequenceIndex、sequenceLength 和 flowRole。因此不要为同一段连续对白随意改 groupId，也不要把不同对白段混成同一个 groupId
+21. 如果一个镜头包含对白、旁白、接话停顿、说话口型表演或以语音反应为核心的表演节奏，必须额外输出 dialogueIdentifier；非语音镜头输出 null
+22. dialogueIdentifier 现在只作为“该镜头最终时长在规划归一化阶段自动 +${STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS} 秒，且不超过 ${maxVideoSegmentDurationSeconds} 秒上限”的标记，不再触发额外连续对白简报；字段里只需要输出稳定可读的 groupId，例如 scene-2-dialogue-1，系统会自动补全 sequenceIndex、sequenceLength 和 flowRole
 23. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头后续需要哪些参考图。下方资产列表会在资产阶段统一生成成参考图；你现在要先根据名称、类别、摘要和细节选出这个镜头实际需要依赖的项，不能只看 ID 猜测
 24. referenceAssetIds 只能使用下方资产列表里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
 25. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
@@ -2225,7 +2246,7 @@ function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectS
   const minimumShotCount = getMinimumStoryboardShotCount(script, settings);
   const recommendedMinimumShotCount = getRecommendedMinimumStoryboardShotCount(script, settings);
   const shotDurationGuideline = buildStoryboardShotDurationGuideline(maxVideoSegmentDurationSeconds);
-  const shotSplitGuideline = buildStoryboardShotSplitGuideline();
+  const shotSplitGuideline = buildStoryboardShotSplitGuideline(maxVideoSegmentDurationSeconds);
   const retryNotice = retryFeedback
     ? `\n上一次规划结果不合格，必须修正以下问题：\n${retryFeedback}\n本次输出必须一次性给出修正后的完整分镜规划 JSON。\n`
     : '';
@@ -2253,9 +2274,9 @@ ${sceneRules}
 11. totalShots、sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
 12. totalShots 必须严格等于 shots.length
 13. shotNumber 必须在每个 scene 内从 1 开始连续递增
-14. 如果一个规划镜头属于同一段连续对白、接话反打、双人来回或以对白反应为核心的连续切镜，必须输出 dialogueIdentifier，并为这段连续对白保持稳定的 groupId，例如 scene-1-dialogue-1；非此类镜头输出 null
-15. 这一轮的 dialogueIdentifier 只需要输出 groupId；系统会根据镜头顺序自动补全 sequenceIndex、sequenceLength 和 flowRole
-16. 如果多个相邻镜头本质上属于同一条连续长镜头，只是为了分段生成、拆时长或控制模型稳定性才拆开，必须输出相同的 longTakeIdentifier，例如 scene-1-longtake-1；没有这种关系时输出 null
+14. 如果一个规划镜头包含对白、旁白、接话停顿、说话口型表演或以语音反应为核心的表演节奏，必须输出 dialogueIdentifier；非语音镜头输出 null
+15. dialogueIdentifier 现在只作为“该镜头最终时长在规划归一化阶段自动 +${STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS} 秒，且不超过 ${maxVideoSegmentDurationSeconds} 秒上限”的标记，不再触发额外连续对白简报；这一轮只需要输出稳定可读的 groupId，例如 scene-1-dialogue-1，系统会自动补全 sequenceIndex、sequenceLength 和 flowRole
+16. 只有当同一条连续长镜头的总时长预计超过 ${maxVideoSegmentDurationSeconds} 秒、因此必须拆成多个镜头分段生成时，才允许输出相同的 longTakeIdentifier，例如 scene-1-longtake-1；如果这条连续长镜头在 ${maxVideoSegmentDurationSeconds} 秒内可以拍完，必须保留为一个规划镜头并输出 longTakeIdentifier = null；不要为了控制模型稳定性提前拆长镜头，没有这种拆段关系时也输出 null
 17. 只有当前镜头与前一个镜头应该无缝连续承接、并且系统需要直接复用前一个视频尾帧作为当前首帧时，才允许复用同一个 longTakeIdentifier；不要把普通切镜误标成长镜头组
 18. 输出结构：
 {
@@ -2451,7 +2472,7 @@ ${buildStoryboardDialogueSequenceNeighborContext(planShots, group)}
 3. dialogue 和 voiceover 中的实际语音内容必须使用 ${spokenLanguageLabel}。${spokenLanguageRequirement}
 4. 每个镜头都要给出 dialogue，可为空字符串；但如果该镜头承担对白来回、接话、反应后补句或用对白推动冲突，就必须给出紧凑清晰的 dialogue
 5. 不要凭空添加关键剧情信息；可以为了镜头拆分，把同一场对白中的句子重新分配到不同镜头，或者把长句压缩成更利于切镜的短句，但不能改变原场景的事件逻辑和人物关系
-6. camera、composition、transitionHint、promptHint 必须服务于连续对白拍法，强调轴线、视线方向、人物站位、景别切换、谁接谁的话、在哪里切到反应、如何从上一镜自然进入下一镜
+6. camera、composition、transitionHint、promptHint 必须服务于连续对白拍法，强调轴线、视线方向、人物站位、景别切换、谁接谁的话、在哪里切到反应、如何从上一镜自然进入下一镜；视线默认应看向说话对象、被关注的人/物或画外反应方向，不要把所有角色都安排成面朝镜头，除非该镜头明确是主观镜头、对镜独白或刻意直视观众
 7. camera、composition、transitionHint、promptHint 各写 1 句，具体但紧凑；promptHint 重点写后续生成单镜头 prompt 时必须保留的连续性要求
 8. transitionHint 不要只写 cut，要说明这是接话切、视线切、反应切、动作承接切还是情绪延续切
 9. 只输出 JSON，结构如下：
@@ -2497,7 +2518,7 @@ function normalizeStoryboardDialogueSequenceBrief(
     ),
     continuityNotes: normalizeString(
       payload.continuityNotes,
-      '保持人物站位、视线方向、情绪升级和动作承接连续，切镜优先跟随接话点、反应点和情绪波峰。'
+      '保持人物站位、视线方向、情绪升级和动作承接连续，切镜优先跟随接话点、反应点和情绪波峰；视线应主要落在对手、道具或画外空间上，不要默认所有人物都正对镜头。'
     ),
     shots: group.shots.map((planShot) => {
       const matched = shotsByKey.get(`${planShot.sceneNumber}:${planShot.shotNumber}`);
@@ -2514,7 +2535,7 @@ function normalizeStoryboardDialogueSequenceBrief(
         ),
         composition: normalizeString(
           matched?.composition,
-          `${planShot.title}需要明确当前说话者、听者反应和两人的空间关系，避免视线与站位突然跳变。`
+          `${planShot.title}需要明确当前说话者、听者反应和两人的空间关系，避免视线与站位突然跳变；不要默认人物都面朝镜头，优先让视线落在对话对象或画外反应方向。`
         ),
         transitionHint: normalizeString(
           matched?.transitionHint,
@@ -2522,7 +2543,7 @@ function normalizeStoryboardDialogueSequenceBrief(
         ),
         promptHint: normalizeString(
           matched?.promptHint,
-          `${planShot.title}需要保留对白接力点、停顿节奏、人物视线方向和空间朝向的连续性。`
+          `${planShot.title}需要保留对白接力点、停顿节奏、人物视线方向和空间朝向的连续性；除非该镜头明确需要对镜交流，否则不要把人物视线统一写成直视镜头。`
         )
       };
     })
@@ -2601,7 +2622,6 @@ function buildStoryboardShotTurnPrompt(
   planShots: StoryboardPlanShot[],
   shotIndex: number,
   storyboard: StoryboardShot[],
-  dialogueSequenceContext: StoryboardDialogueSequenceShotContext | null,
   retryFeedback = ''
 ): string {
   const scene = script.scenes.find((item) => item.sceneNumber === shotPlan.sceneNumber);
@@ -2613,7 +2633,7 @@ function buildStoryboardShotTurnPrompt(
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
   const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
   const spokenLanguageLabel = describeProjectLanguage(settings.language);
-  const shotSplitGuideline = buildStoryboardShotSplitGuideline();
+  const shotSplitGuideline = buildStoryboardShotSplitGuideline(maxVideoSegmentDurationSeconds);
   const retryNotice = retryFeedback
     ? `\n上一次结果不合格，必须修正以下问题：\n${retryFeedback}\n本次输出必须一次性给出修正后的完整镜头 JSON。\n`
     : '';
@@ -2625,18 +2645,9 @@ function buildStoryboardShotTurnPrompt(
     ? JSON.stringify({ groupId: shotPlan.dialogueIdentifier.groupId })
     : 'null';
   const longTakeIdentifierOutput = shotPlan.longTakeIdentifier ? JSON.stringify(shotPlan.longTakeIdentifier) : 'null';
-  const dialogueSequenceNotice = dialogueSequenceContext
-    ? `连续对白补充约束：
-- 当前镜头属于对白组 ${dialogueSequenceContext.group.groupId}，组内位置 ${shotPlan.dialogueIdentifier?.sequenceIndex ?? 1}/${shotPlan.dialogueIdentifier?.sequenceLength ?? 1}
-- 组整体拍法：${dialogueSequenceContext.group.summary}
-- 组统一连续性要求：${dialogueSequenceContext.group.continuityNotes}
-- 当前镜头建议承载的对白：${dialogueSequenceContext.shot.dialogue || '无'}
-- 当前镜头建议承载的画外音：${dialogueSequenceContext.shot.voiceover || '无'}
-- 当前镜头对白拍法建议：${dialogueSequenceContext.shot.camera}
-- 当前镜头构图建议：${dialogueSequenceContext.shot.composition}
-- 当前镜头切换建议：${dialogueSequenceContext.shot.transitionHint}
-- 生成完整镜头时必须吸收的额外提示：${dialogueSequenceContext.shot.promptHint}`
-    : '连续对白补充约束：当前镜头不属于需要额外优化的连续对白组。';
+  const dialogueDurationNotice = shotPlan.dialogueIdentifier?.groupId
+    ? `对话标记说明：当前镜头带 dialogueIdentifier，系统已在分镜规划阶段把该镜头时长按“原规划时长 + ${STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS} 秒，且不超过 ${maxVideoSegmentDurationSeconds} 秒上限”做了补偿；这个标记现在只用于时长补偿，不再触发额外连续对白简报。`
+    : '对话标记说明：当前镜头没有 dialogueIdentifier，不做额外时长补偿。';
   const dialogueIdentifierRequirement = shotPlan.dialogueIdentifier?.groupId
     ? `当前镜头是对白标识镜头，dialogueIdentifier 必须输出为 ${dialogueIdentifierOutput}，不能改写 groupId，也不要输出其他额外字段。`
     : '当前镜头不是对白标识镜头，dialogueIdentifier 必须输出 null。';
@@ -2669,7 +2680,7 @@ ${buildStoryboardAdjacentPlanContext(planShots, shotIndex)}
 已完成镜头摘要：
 ${buildCompletedStoryboardContext(storyboard, shotPlan)}
 
-${dialogueSequenceNotice}
+${dialogueDurationNotice}
 
 要求：
 1. 只能输出这一个镜头的完整 JSON，不能输出其他镜头
@@ -2677,7 +2688,7 @@ ${dialogueSequenceNotice}
 3. 必须把当前规划里的 overview 展开成完整可执行分镜，但不能偏离该镜头承担的戏剧功能
 4. ${dialogueIdentifierRequirement}
 5. ${longTakeIdentifierRequirement}
-6. 如果上方存在“连续对白补充约束”，你必须把其中的对白分配、轴线、视线、站位、接话点、反应点和切换节奏吸收到 dialogue、camera、composition、transitionHint 和 speechPrompt 中；videoPrompt 只保留当前单镜头内部可执行的动作、表演、运镜和连续性要求，不要把切到反应镜、换机位或进入下一镜直接写进当前视频段
+6. dialogue、voiceover、camera、composition、transitionHint 和 speechPrompt 直接根据当前剧本场景、当前镜头规划、前后镜头关系和已完成镜头摘要生成；videoPrompt 只保留当前单镜头内部可执行的动作、表演、运镜和连续性要求，不要把切到反应镜、换机位或进入下一镜直接写进当前视频段
 7. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
 8. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
 9. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
@@ -2685,9 +2696,9 @@ ${dialogueSequenceNotice}
 11. ${shotSplitGuideline} 当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
 12. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
 13. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
-14. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
+14. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；人物视线必须根据对手、道具、动作目标、画外空间或运动方向来设计，除非这个镜头明确需要主观凝视、对镜交流或正面压迫感，否则不要默认所有角色都面朝镜头或直视屏幕；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
 15. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
-16. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
+16. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
 17. 如果当前镜头与前一个镜头使用同一个 longTakeIdentifier，你仍然要给出完整的 firstFramePrompt 作为连续性描述，但系统会直接复用前一个视频尾帧作为当前首帧，不会单独生图；因此这类 longTakeIdentifier 只能用于真正无缝承接的长镜头拆段
 18. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容；它只能描述当前镜头内部可执行的连续画面，不要写“切到某人反应”“转到另一个机位”“插入特写”“切到下一镜”等段内切镜指令
 19. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
@@ -2793,7 +2804,6 @@ async function generateStoryboardShot(
   planShots: StoryboardPlanShot[],
   shotIndex: number,
   storyboard: StoryboardShot[],
-  dialogueSequenceContext: StoryboardDialogueSequenceShotContext | null,
   options?: StoryboardGenerationOptions
 ): Promise<{ requestPrompt: string; shot: StoryboardShot }> {
   let retryFeedback = '';
@@ -2807,7 +2817,6 @@ async function generateStoryboardShot(
       planShots,
       shotIndex,
       storyboard,
-      dialogueSequenceContext,
       retryFeedback
     );
     const payload = await requestJson<StoryboardSingleShotPayload>(
@@ -2825,12 +2834,10 @@ async function generateStoryboardShot(
       continue;
     }
 
-    const mergedRawShot = mergeStoryboardDialogueSequenceFallbacks(rawShot, dialogueSequenceContext);
-
     const normalizedShot = normalizeStoryboardShotForGeneration(
       {
-        ...mergedRawShot,
-        dialogueIdentifier: normalizeStoryboardDialogueIdentifier(mergedRawShot.dialogueIdentifier),
+        ...rawShot,
+        dialogueIdentifier: normalizeStoryboardDialogueIdentifier(rawShot.dialogueIdentifier),
         id: shotPlan.id,
         sceneNumber: shotPlan.sceneNumber,
         shotNumber: shotPlan.shotNumber,
@@ -3295,17 +3302,6 @@ export async function generateStoryboardFromScript(
     storyboard
   });
 
-  const dialogueSequenceGroups = collectStoryboardDialogueSequenceGroups(script, planResult.planShots);
-  const dialogueSequenceBriefs: StoryboardDialogueSequenceBrief[] = [];
-
-  for (const group of dialogueSequenceGroups) {
-    dialogueSequenceBriefs.push(
-      await generateStoryboardDialogueSequenceBrief(script, settings, group, planResult.planShots, options)
-    );
-  }
-
-  const dialogueSequenceContextMap = buildStoryboardDialogueSequenceShotContextMap(dialogueSequenceBriefs);
-
   for (const [index, shotPlan] of planResult.planShots.entries()) {
     const scene = script.scenes.find((item) => item.sceneNumber === shotPlan.sceneNumber);
 
@@ -3331,7 +3327,6 @@ export async function generateStoryboardFromScript(
       planResult.planShots,
       index,
       storyboard,
-      dialogueSequenceContextMap.get(shotPlan.id) ?? null,
       options
     );
     storyboard = appendStoryboardShot(
