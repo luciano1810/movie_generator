@@ -263,7 +263,21 @@ function buildCharacterAssetWorkflowPrompt(
   const resolvedEthnicity = ethnicityHint.trim() || '人种未说明';
   const resolvedDescription = trimmedPrompt || '人物描述未说明';
 
-  return `${trimmedName}的全身照，${resolvedGender}，${resolvedAge}，${resolvedEthnicity}，${resolvedDescription}`;
+  return `单人角色设定参考图，${trimmedName}，${resolvedGender}，${resolvedAge}，${resolvedEthnicity}，${resolvedDescription}。要求：全身完整入画，采用自然站姿或轻微 3/4 侧身，不要僵硬证件照正立；强化独特身体轮廓、发型边缘、服装层次、面料材质对比、标志性配饰、局部磨损/年代细节和角色气质差异；干净中性背景，柔和电影感布光，画面中只出现这一位角色，不要多角色、不要文字、不要剧情动作、不要肢体裁切。`;
+}
+
+function buildSceneAssetWorkflowPrompt(sceneName: string, prompt: string): string {
+  const trimmedName = sceneName.trim() || '场景';
+  const resolvedDescription = prompt.trim() || '场景环境设定';
+
+  return `可复用电影场景空镜设定图，${trimmedName}，${resolvedDescription}。要求：画面中无人物、无剧情事件瞬间、无角色动作；每张图只呈现一个清晰稳定的主机位或空间分区，但要强化前中后景纵深、入口/通道/遮挡关系、关键陈设分布、材质纹理、光线方向、局部氛围颗粒和可承载调度的留白；避免把场景拍成空泛背景墙，避免文字标语成为画面主体。`;
+}
+
+function buildObjectAssetWorkflowPrompt(objectName: string, prompt: string): string {
+  const trimmedName = objectName.trim() || '物品';
+  const resolvedDescription = prompt.trim() || '物品设定';
+
+  return `单体道具/陈设参考图，${trimmedName}，${resolvedDescription}。要求：物品主体完整清晰，优先使用主视角或 3/4 角度展示独特轮廓、结构细节、材质反光、磨损污渍、边缘做工和状态差异；放置在简洁干净的中性背景或低干扰台面上，保留明确尺度感和特写可读性；不要人物手持、不要剧情动作瞬间、不要多件无关杂物堆叠、不要文字水印。`;
 }
 
 function now(): string {
@@ -1345,6 +1359,34 @@ function buildReferenceFrameQualityPrompt(
   return parts.join('\n');
 }
 
+function buildReferenceFrameCinematicProfilePrompt(project: Project): string {
+  const profile = project.settings.cinematicProfile;
+  const styleLines = [
+    sanitizeVideoPromptText(profile.lensAndDepth)
+      ? `- 镜头与景深：${sanitizeVideoPromptText(profile.lensAndDepth)}`
+      : '',
+    sanitizeVideoPromptText(profile.lightingAndContrast)
+      ? `- 布光与反差：${sanitizeVideoPromptText(profile.lightingAndContrast)}`
+      : '',
+    sanitizeVideoPromptText(profile.colorPalette)
+      ? `- 色彩与调色：${sanitizeVideoPromptText(profile.colorPalette)}`
+      : '',
+    sanitizeVideoPromptText(profile.textureAndAtmosphere)
+      ? `- 质感与氛围：${sanitizeVideoPromptText(profile.textureAndAtmosphere)}`
+      : ''
+  ].filter(Boolean);
+
+  if (!styleLines.length) {
+    return '';
+  }
+
+  return [
+    '参考帧摄影风格约束：',
+    ...styleLines,
+    '- 以上约束只用于当前参考帧静态生图，请把它落到真实可见的镜头光学、布光、调色、空气感和材质质感上，不要写成抽象风格口号。'
+  ].join('\n');
+}
+
 function buildReferenceFrameWorkflowPrompt(
   project: Project,
   shot: Project['storyboard'][number],
@@ -1352,15 +1394,19 @@ function buildReferenceFrameWorkflowPrompt(
   frameKind: ReferenceFrameKind
 ): string {
   const basePrompt = (frameKind === 'start' ? shot.firstFramePrompt : shot.lastFramePrompt).trim();
+  const cinematicProfilePrompt = buildReferenceFrameCinematicProfilePrompt(project);
 
   if (workflow === 'text_to_image') {
-    return [basePrompt, buildReferenceFrameGazePrompt(frameKind)].filter(Boolean).join('\n\n');
+    return [basePrompt, cinematicProfilePrompt, buildReferenceFrameGazePrompt(frameKind)]
+      .filter(Boolean)
+      .join('\n\n');
   }
 
   const characterPrompt = buildFirstFrameCharacterReferencePrompt(project, shot);
   const parts = [
     buildReferenceFrameShotDirectivePrompt(shot, frameKind),
     basePrompt,
+    cinematicProfilePrompt,
     buildReferenceFrameGazePrompt(frameKind),
     characterPrompt,
     buildReferenceFrameQualityPrompt(workflow, frameKind),
@@ -2504,6 +2550,8 @@ async function resolveVideoPromptForWorkflow(
   try {
     const optimizedPrompt = await optimizeImageToVideoPrompt(shot, {
       includeSpeechPrompt: !shouldUseTtsWorkflow(project, appSettings),
+      cinematicProfile: project.settings.cinematicProfile,
+      characterConstraintPrompt: buildVideoCharacterReferencePrompt(project, shot),
       lastFramePrompt: options.lastFramePrompt,
       signal: getProjectAbortSignal(project.id)
     });
@@ -2860,13 +2908,32 @@ async function runScriptStage(project: Project): Promise<void> {
     throw new Error('项目缺少原始文字内容，无法生成剧本。');
   }
 
+  const scriptStageLabel =
+    project.settings.scriptMode === 'generate'
+      ? '生成剧本'
+      : project.settings.scriptMode === 'optimize'
+        ? '优化剧本'
+        : '导入剧本';
+  const scriptStageLog =
+    project.settings.scriptMode === 'generate'
+      ? '开始调用文本模型生成剧本。'
+      : project.settings.scriptMode === 'optimize'
+        ? '开始调用文本模型优化剧本。'
+        : '开始解析上传剧本。';
+  const scriptStageDoneLabel =
+    project.settings.scriptMode === 'generate'
+      ? '剧本生成完成'
+      : project.settings.scriptMode === 'optimize'
+        ? '剧本优化完成'
+        : '剧本导入完成';
+
   setStageProgress(project, 'script', {
     completed: 0,
     total: 3,
     unitLabel: '步骤',
-    currentItemLabel: '生成剧本'
+    currentItemLabel: scriptStageLabel
   });
-  appendLog(project, '开始调用文本模型生成剧本。');
+  appendLog(project, scriptStageLog);
   await saveProject(project);
 
   const script = await generateScriptFromText(project.sourceText, project.settings, {
@@ -2906,7 +2973,7 @@ async function runScriptStage(project: Project): Promise<void> {
 
   appendLog(
     project,
-    `剧本生成完成，共 ${script.scenes.length} 场戏；已同步生成资产列表：角色 ${project.referenceLibrary.characters.length} 个，场景 ${project.referenceLibrary.scenes.length} 个，物品 ${project.referenceLibrary.objects.length} 个。`
+    `${scriptStageDoneLabel}，共 ${script.scenes.length} 场戏；已同步生成资产列表：角色 ${project.referenceLibrary.characters.length} 个，场景 ${project.referenceLibrary.scenes.length} 个，物品 ${project.referenceLibrary.objects.length} 个。`
   );
 }
 
@@ -2983,7 +3050,9 @@ async function generateReferenceAssetForProject(
             genderHint,
             ageHint
           )
-        : generationPrompt;
+        : kind === 'scene'
+          ? buildSceneAssetWorkflowPrompt(itemName, generationPrompt)
+          : buildObjectAssetWorkflowPrompt(itemName, generationPrompt);
     let saved:
       | {
           absolutePath: string;

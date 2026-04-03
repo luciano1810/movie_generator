@@ -390,6 +390,13 @@ video {
   font-size: 0.8rem;
 }
 
+.script-source-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .inline-check {
   display: flex;
   align-items: flex-start;

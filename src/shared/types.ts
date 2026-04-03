@@ -11,7 +11,7 @@ export const COMFYUI_WORKFLOW_TYPES = [
   'tts'
 ] as const;
 export const ASPECT_RATIOS = ['21:9', '16:9', '4:3', '3:2', '1:1', '2:3', '3:4', '9:16'] as const;
-export const SCRIPT_MODES = ['generate', 'optimize'] as const;
+export const SCRIPT_MODES = ['generate', 'optimize', 'upload'] as const;
 export const STORY_LENGTHS = ['test', 'short', 'medium', 'long'] as const;
 export const VIDEO_FPS_OPTIONS = [24, 30, 60] as const;
 export const IMAGE_GENERATION_PROVIDERS = ['comfyui', 'gemini'] as const;
@@ -106,6 +106,7 @@ export interface ProjectSettings {
   tone: string;
   audience: string;
   visualStyle: string;
+  cinematicProfile: ProjectCinematicProfile;
   negativePrompt: string;
   aspectRatio: AspectRatio;
   imageWidth: number;
@@ -119,6 +120,13 @@ export interface ProjectSettings {
   useTtsWorkflow: boolean;
   imageGenerationProvider: ImageGenerationProvider;
   geminiImageModel: GeminiImageModel;
+}
+
+export interface ProjectCinematicProfile {
+  lensAndDepth: string;
+  lightingAndContrast: string;
+  colorPalette: string;
+  textureAndAtmosphere: string;
 }
 
 export interface ScriptCharacter {
@@ -703,6 +711,12 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   tone: '高情绪、高反转、强钩子',
   audience: '电影观众',
   visualStyle: '电影感写实光影，人物统一，镜头具有戏剧张力',
+  cinematicProfile: {
+    lensAndDepth: '35mm / 50mm anamorphic lens look, shallow but readable depth of field, natural cinematic bokeh, realistic lens breathing, no fisheye distortion',
+    lightingAndContrast: 'motivated key light and soft fill, clear rim light separation, controlled highlight roll-off, gentle volumetric light, cinematic contrast without crushed blacks',
+    colorPalette: 'cohesive film color palette with restrained saturation, warm skin tones, unified scene-level color contrast, subtle teal-orange or neutral cinematic grading based on scene mood',
+    textureAndAtmosphere: 'fine film grain, subtle halation and bloom, realistic atmospheric haze, tactile production-design texture, avoid plastic HDR, over-sharpening, and CG-like smoothness'
+  },
   negativePrompt: 'low quality, blurry, watermark, subtitle, deformed hands, extra fingers',
   aspectRatio: '9:16',
   imageWidth: 720,
@@ -808,6 +822,23 @@ function normalizeGeminiImageModel(value: unknown, fallback: GeminiImageModel): 
   return GEMINI_IMAGE_MODELS.includes(value as GeminiImageModel) ? (value as GeminiImageModel) : fallback;
 }
 
+function normalizeCinematicProfile(
+  value: unknown,
+  fallback: ProjectCinematicProfile
+): ProjectCinematicProfile {
+  const input = value && typeof value === 'object' ? (value as Partial<ProjectCinematicProfile>) : {};
+
+  return {
+    lensAndDepth: normalizeEditableString(input.lensAndDepth, fallback.lensAndDepth),
+    lightingAndContrast: normalizeEditableString(input.lightingAndContrast, fallback.lightingAndContrast),
+    colorPalette: normalizeEditableString(input.colorPalette, fallback.colorPalette),
+    textureAndAtmosphere: normalizeEditableString(
+      input.textureAndAtmosphere,
+      fallback.textureAndAtmosphere
+    )
+  };
+}
+
 function matchesWorkflowTemplatePath(value: string, templatePath: string): boolean {
   if (!value || !templatePath) {
     return false;
@@ -902,6 +933,10 @@ export function normalizeSettings(input?: Partial<ProjectSettings>): ProjectSett
     tone: normalizeString(merged.tone, DEFAULT_SETTINGS.tone),
     audience: normalizeString(merged.audience, DEFAULT_SETTINGS.audience),
     visualStyle: normalizeString(merged.visualStyle, DEFAULT_SETTINGS.visualStyle),
+    cinematicProfile: normalizeCinematicProfile(
+      merged.cinematicProfile,
+      DEFAULT_SETTINGS.cinematicProfile
+    ),
     negativePrompt: normalizeString(merged.negativePrompt, DEFAULT_SETTINGS.negativePrompt),
     aspectRatio: ASPECT_RATIOS.includes(merged.aspectRatio as AspectRatio)
       ? (merged.aspectRatio as AspectRatio)

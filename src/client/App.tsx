@@ -118,7 +118,8 @@ const ASPECT_RATIO_LABELS: Record<ProjectSettings['aspectRatio'], string> = {
 
 const SCRIPT_MODE_LABELS: Record<ScriptMode, string> = {
   generate: '生成新剧本',
-  optimize: '优化已有剧本'
+  optimize: '优化已有剧本',
+  upload: '上传剧本'
 };
 
 const IMAGE_GENERATION_PROVIDER_LABELS: Record<ProjectSettings['imageGenerationProvider'], string> = {
@@ -141,7 +142,7 @@ const TAB_LABELS: Record<ProjectPanelTab, string> = {
 };
 
 const TAB_DESCRIPTIONS: Record<ProjectPanelTab, string> = {
-  script: '根据输入文案生成或优化完整电影剧本。',
+  script: '根据输入文案生成、优化或导入完整电影剧本。',
   storyboard: '基于剧本拆分镜头，输出镜头信息、长镜头承接标识和镜头生成描述。',
   assets: '提取角色、场景、物品候选，并批量生成参考资产。',
   shots: '为每个镜头先生成参考帧，再立即生成对应视频片段。',
@@ -229,6 +230,32 @@ async function fileToDataUrl(file: File): Promise<string> {
     };
     reader.readAsDataURL(file);
   });
+}
+
+async function readUploadedScriptFileText(file: File): Promise<string> {
+  const maxScriptFileSize = 2 * 1024 * 1024;
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+  const allowedExtensions = new Set(['txt', 'md', 'markdown', 'json']);
+  const isTextLikeFile =
+    allowedExtensions.has(extension) ||
+    file.type.startsWith('text/') ||
+    file.type === 'application/json' ||
+    file.type === '';
+
+  if (!isTextLikeFile) {
+    throw new Error('仅支持上传 .txt / .md / .json 剧本文本文件。');
+  }
+
+  if (file.size > maxScriptFileSize) {
+    throw new Error('剧本文件不能超过 2MB。');
+  }
+
+  const content = await file.text();
+  if (!content.trim()) {
+    throw new Error('剧本文件内容为空。');
+  }
+
+  return content;
 }
 
 function createDraft(project: Project): ProjectDraft {
@@ -771,10 +798,28 @@ function resolveDefaultResolutionPreset(
   return preset === 'custom' ? '720p' : preset;
 }
 
+function scriptModeSourceLabel(scriptMode: ScriptMode): string {
+  if (scriptMode === 'generate') {
+    return '剧情输入';
+  }
+
+  if (scriptMode === 'upload') {
+    return '上传剧本内容';
+  }
+
+  return '待优化文本';
+}
+
 function scriptModeSourcePlaceholder(scriptMode: ScriptMode): string {
-  return scriptMode === 'generate'
-    ? '输入故事梗概、角色设定、营销文案或剧情点子'
-    : '输入已有剧本、分场粗稿、对白草稿或待优化文案';
+  if (scriptMode === 'generate') {
+    return '输入故事梗概、角色设定、营销文案或剧情点子';
+  }
+
+  if (scriptMode === 'upload') {
+    return '粘贴完整剧本文本，或点击“导入剧本文件”读取 .txt / .md / .json';
+  }
+
+  return '输入已有剧本、分场粗稿、对白草稿或待优化文案';
 }
 
 function buildCreateProjectSettings(
@@ -801,6 +846,20 @@ function createFormatSummary(settings: Partial<ProjectSettings>): string {
   }
 
   return `${aspectRatioDirectionLabel(settings.aspectRatio)} ${settings.aspectRatio}｜图片 ${settings.imageWidth}×${settings.imageHeight}｜视频 ${settings.videoWidth}×${settings.videoHeight}`;
+}
+
+function updateCinematicProfileField(
+  settings: ProjectSettings,
+  field: keyof ProjectSettings['cinematicProfile'],
+  value: string
+): ProjectSettings {
+  return {
+    ...settings,
+    cinematicProfile: {
+      ...settings.cinematicProfile,
+      [field]: value
+    }
+  };
 }
 
 function assetKindLabel(kind: AssetLibraryKind): string {
@@ -1300,6 +1359,8 @@ export function App() {
   const [createResolutionPreset, setCreateResolutionPreset] = useState<ResolutionPresetId>(
     resolveDefaultResolutionPreset(DEFAULT_SETTINGS)
   );
+  const draftScriptFileInputRef = useRef<HTMLInputElement | null>(null);
+  const createScriptFileInputRef = useRef<HTMLInputElement | null>(null);
   const [notice, setNotice] = useState<string>('');
   const [pending, setPending] = useState<string>('');
   const [progressClock, setProgressClock] = useState(() => Date.now());
@@ -1633,6 +1694,43 @@ export function App() {
       setNotice(error instanceof Error ? error.message : '创建项目失败');
     } finally {
       setPending('');
+    }
+  }
+
+  async function handleImportCreateScriptFile(file: File | null) {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const content = await readUploadedScriptFileText(file);
+      setCreateSource(content);
+      setNotice(`已导入剧本文件：${file.name}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '导入剧本文件失败');
+    } finally {
+      if (createScriptFileInputRef.current) {
+        createScriptFileInputRef.current.value = '';
+      }
+    }
+  }
+
+  async function handleImportDraftScriptFile(file: File | null) {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const content = await readUploadedScriptFileText(file);
+      setDraft((current) => (current ? { ...current, sourceText: content } : current));
+      setDraftDirty(true);
+      setNotice(`已导入剧本文件：${file.name}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '导入剧本文件失败');
+    } finally {
+      if (draftScriptFileInputRef.current) {
+        draftScriptFileInputRef.current.value = '';
+      }
     }
   }
 
@@ -2580,7 +2678,7 @@ export function App() {
         ? 'ComfyUI 图片工作流已配置'
         : 'ComfyUI 图片工作流未配置';
   const draftResolutionPreset = draft ? inferResolutionPreset(draft.settings) : 'custom';
-  const draftSourceLabel = draft ? (draft.settings.scriptMode === 'generate' ? '剧情输入' : '待优化文本') : '项目输入';
+  const draftSourceLabel = draft ? scriptModeSourceLabel(draft.settings.scriptMode) : '项目输入';
   const draftFormatSummary = draft ? createFormatSummary(draft.settings) : '未设置画幅';
   const effectiveMaxVideoSegmentDurationSeconds =
     appSettings?.comfyui.maxVideoSegmentDurationSeconds ??
@@ -5021,8 +5119,31 @@ export function App() {
                   </select>
                 </label>
                 <div className="format-preview">{draftFormatSummary}</div>
-                <label className="field span-2">
-                  <span>{draftSourceLabel}</span>
+                <div className="field span-2">
+                  <div className="script-source-toolbar">
+                    <span>{draftSourceLabel}</span>
+                    {draft.settings.scriptMode === 'upload' ? (
+                      <>
+                        <input
+                          ref={draftScriptFileInputRef}
+                          type="file"
+                          accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json"
+                          hidden
+                          onChange={(event) => {
+                            void handleImportDraftScriptFile(event.target.files?.[0] ?? null);
+                          }}
+                        />
+                        <button
+                          className="button ghost mini-button"
+                          disabled={pending === 'save'}
+                          onClick={() => draftScriptFileInputRef.current?.click()}
+                          type="button"
+                        >
+                          导入剧本文件
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
                   <textarea
                     rows={8}
                     value={draft.sourceText}
@@ -5034,7 +5155,7 @@ export function App() {
                       })
                     }
                   />
-                </label>
+                </div>
               </div>
             </section>
 
@@ -5113,6 +5234,94 @@ export function App() {
                           ? {
                               ...current,
                               settings: { ...current.settings, visualStyle: event.target.value }
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field span-2">
+                  <span>参考帧镜头与景深</span>
+                  <textarea
+                    rows={2}
+                    value={draft.settings.cinematicProfile.lensAndDepth}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: updateCinematicProfileField(
+                                current.settings,
+                                'lensAndDepth',
+                                event.target.value
+                              )
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field span-2">
+                  <span>参考帧布光与反差</span>
+                  <textarea
+                    rows={2}
+                    value={draft.settings.cinematicProfile.lightingAndContrast}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: updateCinematicProfileField(
+                                current.settings,
+                                'lightingAndContrast',
+                                event.target.value
+                              )
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field span-2">
+                  <span>参考帧色彩方案</span>
+                  <textarea
+                    rows={2}
+                    value={draft.settings.cinematicProfile.colorPalette}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: updateCinematicProfileField(
+                                current.settings,
+                                'colorPalette',
+                                event.target.value
+                              )
+                            }
+                          : current;
+                      })
+                    }
+                  />
+                </label>
+                <label className="field span-2">
+                  <span>参考帧质感与氛围</span>
+                  <textarea
+                    rows={2}
+                    value={draft.settings.cinematicProfile.textureAndAtmosphere}
+                    onChange={(event) =>
+                      setDraft((current) => {
+                        setDraftDirty(true);
+                        return current
+                          ? {
+                              ...current,
+                              settings: updateCinematicProfileField(
+                                current.settings,
+                                'textureAndAtmosphere',
+                                event.target.value
+                              )
                             }
                           : current;
                       })
@@ -5560,15 +5769,38 @@ export function App() {
                     ))}
                   </select>
                 </label>
-                <label className="field span-2">
-                  <span>{createScriptMode === 'generate' ? '剧情输入' : '待优化文本'}</span>
+                <div className="field span-2">
+                  <div className="script-source-toolbar">
+                    <span>{scriptModeSourceLabel(createScriptMode)}</span>
+                    {createScriptMode === 'upload' ? (
+                      <>
+                        <input
+                          ref={createScriptFileInputRef}
+                          type="file"
+                          accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json"
+                          hidden
+                          onChange={(event) => {
+                            void handleImportCreateScriptFile(event.target.files?.[0] ?? null);
+                          }}
+                        />
+                        <button
+                          className="button ghost mini-button"
+                          disabled={pending === 'create'}
+                          onClick={() => createScriptFileInputRef.current?.click()}
+                          type="button"
+                        >
+                          导入剧本文件
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
                   <textarea
                     value={createSource}
                     onChange={(event) => setCreateSource(event.target.value)}
                     placeholder={scriptModeSourcePlaceholder(createScriptMode)}
                     rows={8}
                   />
-                </label>
+                </div>
                 <label className="field">
                   <span>分辨率</span>
                   <select
