@@ -512,13 +512,13 @@
     "inputs": {
       "value": "{{video_long_side}}"
     },
-    "class_type": "Int"
+    "class_type": "PrimitiveInt"
   },
   "241": {
     "inputs": {
       "value": "{{video_conditioning_long_side}}"
     },
-    "class_type": "Int"
+    "class_type": "PrimitiveInt"
   },
   "242": {
     "inputs": {
