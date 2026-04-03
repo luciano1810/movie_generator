@@ -1459,6 +1459,17 @@ function buildMergedVideoPrompt(
   return parts.filter(Boolean).join('\n\n');
 }
 
+function getOptimizedVideoPromptOnly(
+  project: Project,
+  baseVideoPrompt: string | undefined
+): string | null {
+  if (!project.settings.optimizeVideoPrompt || !baseVideoPrompt?.trim()) {
+    return null;
+  }
+
+  return sanitizeVideoPromptText(baseVideoPrompt);
+}
+
 function isGenericCutTransitionHint(transitionHint: string): boolean {
   return /^(cut|切|硬切|直接切|普通切|切镜|切换|转场)$/i.test(transitionHint.trim());
 }
@@ -1482,6 +1493,12 @@ function getVideoWorkflowPrompt(
     baseVideoPrompt?: string;
   } = {}
 ): string {
+  const optimizedVideoPromptOnly = getOptimizedVideoPromptOnly(project, options.baseVideoPrompt);
+
+  if (optimizedVideoPromptOnly) {
+    return optimizedVideoPromptOnly;
+  }
+
   return sanitizeVideoPromptText(
     appendTransitionHint(
       buildMergedVideoPrompt(project, shot, {
@@ -2439,6 +2456,12 @@ function buildSegmentVideoPrompt(
   terminalFramePrompt: string,
   baseVideoPrompt?: string
 ): string {
+  const optimizedVideoPromptOnly = getOptimizedVideoPromptOnly(project, baseVideoPrompt);
+
+  if (optimizedVideoPromptOnly) {
+    return optimizedVideoPromptOnly;
+  }
+
   const basePrompt = getVideoWorkflowPrompt(project, shot, appSettings, {
     durationSeconds: segmentDurationSeconds,
     baseVideoPrompt
