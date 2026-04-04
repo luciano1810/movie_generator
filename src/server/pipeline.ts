@@ -833,6 +833,12 @@ function isLongTakeContinuationShot(project: Project, shot: Project['storyboard'
   return shareSameLongTakeIdentifier(getPreviousStoryboardShot(project, shot), shot);
 }
 
+function shouldUseShotLastFrameReference(
+  shot: Pick<Project['storyboard'][number], 'longTakeIdentifier' | 'useLastFrameReference'>
+): boolean {
+  return !shot.longTakeIdentifier || shot.useLastFrameReference;
+}
+
 function getDownstreamLongTakeDependentShotIds(project: Project, shotId: string): string[] {
   const index = getStoryboardShotIndex(project, shotId);
 
@@ -2865,7 +2871,7 @@ function assertStagePreconditions(project: Project, stage: StageId): void {
     }
 
     const requiresReferenceFrameGeneration = project.storyboard.some(
-      (shot) => !isLongTakeContinuationShot(project, shot) || shot.useLastFrameReference
+      (shot) => !isLongTakeContinuationShot(project, shot) || shouldUseShotLastFrameReference(shot)
     );
 
     if (requiresReferenceFrameGeneration) {
@@ -4027,7 +4033,7 @@ async function generateVideoAssetForShot(
   const segmentDurations = getVideoSegmentDurations(project, effectiveDurationSeconds);
   const segmentCount = segmentDurations.length;
   const shotSeed = Math.floor(Math.random() * 9_000_000_000);
-  const requireTerminalFrame = shot.useLastFrameReference || segmentCount > 1;
+  const requireTerminalFrame = shouldUseShotLastFrameReference(shot) || segmentCount > 1;
   const effectiveLastFramePrompt = resolveEffectiveLastFramePrompt(shot, requireTerminalFrame);
   const optimizedVideoPrompt = await resolveVideoPromptForWorkflow(project, shot, appSettings, {
     lastFramePrompt: effectiveLastFramePrompt
@@ -4315,7 +4321,9 @@ async function generateShotMedia(
     setActiveShotAsset(project, 'images', shot.id, startFrameAsset);
   }
 
-  if (shot.useLastFrameReference) {
+  const shouldGenerateLastFrameReference = shouldUseShotLastFrameReference(shot);
+
+  if (shouldGenerateLastFrameReference) {
     if (!selectedWorkflow) {
       selectedWorkflow = usesGeminiImageGeneration(project)
         ? null
@@ -4342,7 +4350,7 @@ async function generateShotMedia(
     project,
     startGenerationReferenceInputs.referenceCount
       ? `视频生成将注入 ${startGenerationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${startGenerationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
-      : `当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和${shot.useLastFrameReference ? '参考帧' : isLongTakeContinuation ? '上一镜头尾帧' : '起始参考帧'}。`,
+      : `当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和${shouldGenerateLastFrameReference ? '参考帧' : isLongTakeContinuation ? '上一镜头尾帧' : '起始参考帧'}。`,
     startGenerationReferenceInputs.referenceCount ? 'info' : 'warn'
   );
   await saveProject(project);
@@ -5016,12 +5024,12 @@ async function executeStoryboardShotLastImageGeneration(projectId: string, shotI
   }
 
   const requiresTerminalFrame =
-    shot.useLastFrameReference ||
+    shouldUseShotLastFrameReference(shot) ||
     getShotVideoSegmentDurations(project, shot).length > 1 ||
     Boolean(getActiveShotAsset(project, 'lastImages', shot.id));
 
   if (!requiresTerminalFrame) {
-    throw new Error('当前镜头没有可独立重生的结束参考帧；请先启用结束参考帧约束，或让镜头进入长镜头分段生成。');
+    throw new Error('当前长镜头组镜头没有可独立重生的结束参考帧；请先让该镜头启用结束参考帧约束，或让镜头进入长镜头分段生成。');
   }
 
   const appSettings = getAppSettings();
@@ -5087,7 +5095,7 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
     throw new Error('请先为当前镜头生成或选择起始参考帧，再生成视频片段。');
   }
 
-  if (shot.useLastFrameReference && !getActiveShotAsset(project, 'lastImages', shot.id)) {
+  if (shouldUseShotLastFrameReference(shot) && !getActiveShotAsset(project, 'lastImages', shot.id)) {
     throw new Error('当前镜头需要结束参考帧；请先重新生成参考帧后再生成视频片段。');
   }
 
@@ -5116,7 +5124,7 @@ async function executeStoryboardShotVideoGeneration(projectId: string, shotId: s
     project,
     generationReferenceInputs.referenceCount
       ? `视频生成将注入 ${generationReferenceInputs.referenceCount} 个匹配当前镜头的资产库参考项，其中 ${generationReferenceInputs.referenceImageCount} 张参考图会作为工作流输入。`
-      : `当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和${shot.useLastFrameReference ? '参考帧' : '起始参考帧'}。`,
+      : `当前镜头没有匹配到可用参考项，视频生成将仅使用镜头 Prompt 和${shouldUseShotLastFrameReference(shot) ? '参考帧' : '起始参考帧'}。`,
     generationReferenceInputs.referenceCount ? 'info' : 'warn'
   );
   await saveProject(project);
@@ -5394,6 +5402,7 @@ export async function updateStoryboardShotPrompts(
     throw new Error(`未找到镜头 ${shotId}`);
   }
 
+  const requiresLastFrameReference = shouldUseShotLastFrameReference(shot);
   const changes: string[] = [];
   let shouldInvalidateStartFrameOutputs = false;
   let shouldInvalidateLastFrameOutputs = false;
@@ -5435,11 +5444,11 @@ export async function updateStoryboardShotPrompts(
 
   if (input.lastFramePrompt !== undefined) {
     const nextPrompt = input.lastFramePrompt.trim();
-    if (shot.useLastFrameReference && !nextPrompt) {
+    if (requiresLastFrameReference && !nextPrompt) {
       throw new Error('结束参考帧 Prompt 不能为空。');
     }
 
-    if (shot.useLastFrameReference && shot.lastFramePrompt !== nextPrompt) {
+    if (requiresLastFrameReference && shot.lastFramePrompt !== nextPrompt) {
       shot.lastFramePrompt = nextPrompt;
       changes.push('结束参考帧 Prompt');
       shouldInvalidateLastFrameOutputs = true;

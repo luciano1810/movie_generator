@@ -1110,12 +1110,14 @@ export function normalizeStoryboardShot(
       .replace(/^-+|-+$/g, '') || `scene-${sceneNumber}-shot-${shotNumber}`;
   const dialogue = normalizeString(input?.dialogue, '');
   const voiceover = normalizeString(input?.voiceover, '');
-  const useLastFrameReference = normalizeBoolean(
-    input?.useLastFrameReference,
-    Boolean(typeof input?.lastFramePrompt === 'string' && input.lastFramePrompt.trim())
-  );
   const dialogueIdentifier = normalizeStoryboardDialogueIdentifier(input?.dialogueIdentifier);
   const longTakeIdentifier = normalizeLongTakeIdentifier(input?.longTakeIdentifier);
+  const useLastFrameReference = longTakeIdentifier
+    ? normalizeBoolean(
+        input?.useLastFrameReference,
+        Boolean(typeof input?.lastFramePrompt === 'string' && input.lastFramePrompt.trim())
+      )
+    : true;
   const normalizedManualReferenceAssetIds = normalizeReferenceSelectionIds(input?.manualReferenceAssetIds);
   const normalizedExcludedReferenceAssetIds = normalizeReferenceSelectionIds(input?.excludedReferenceAssetIds);
 
