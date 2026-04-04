@@ -1863,16 +1863,8 @@ function validateStoryboardAgainstScript(
     .filter((shot) => shot.useLastFrameReference && !shot.lastFramePrompt.trim())
     .map((shot) => `scene ${shot.sceneNumber} shot ${shot.shotNumber}`);
 
-  const missingStandaloneLastFrameShots = shots
-    .filter((shot) => !shot.longTakeIdentifier && !shot.useLastFrameReference)
-    .map((shot) => `scene ${shot.sceneNumber} shot ${shot.shotNumber}`);
-
   if (missingLastFrameShots.length) {
     issues.push(`useLastFrameReference 为 true 时必须提供 lastFramePrompt，当前缺失：${missingLastFrameShots.join('；')}`);
-  }
-
-  if (missingStandaloneLastFrameShots.length) {
-    issues.push(`非长镜头组镜头必须使用首尾帧双参考，请将 useLastFrameReference 设为 true 并提供 lastFramePrompt，当前异常：${missingStandaloneLastFrameShots.join('；')}`);
   }
 
   return {
@@ -2161,9 +2153,6 @@ function validateStoryboardShotAgainstPlan(
     issues.push('useLastFrameReference 为 true 时必须提供 lastFramePrompt');
   }
 
-  if (!shot.longTakeIdentifier && !shot.useLastFrameReference) {
-    issues.push('非长镜头组镜头必须使用首尾帧双参考，useLastFrameReference 必须为 true 且 lastFramePrompt 不能为空');
-  }
 
   return {
     ok: issues.length === 0,
@@ -2199,7 +2188,7 @@ function buildStoryboardConversationPrelude(
       content: `我们将通过多轮对话完成整部影片的分镜设计。第 1 轮先输出整部影片的分镜规划，必须给出总镜头数和每个镜头的概况；从第 2 轮开始，我会按规划顺序逐轮向你索取单个完整镜头，你必须在连续多轮中保持人物外观、服装、道具、空间关系和情绪推进一致。
 
 全局要求：
-1. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt。非长镜头组镜头（longTakeIdentifier = null）必须固定把 useLastFrameReference 设为 true 并提供 lastFramePrompt，从而统一使用首尾帧双参考；只有长镜头组镜头才允许根据是否需要额外尾帧约束，把 useLastFrameReference 设为 true/false
+1. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
 2. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
 3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写“无语音内容”。${spokenLanguageRequirement}
 4. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
@@ -2212,14 +2201,14 @@ ${sceneRules}
 10. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；这是硬上限，不是建议值。任何一个镜头的 durationSeconds 都不能超过它；如果一段动作、对白或情绪变化超出这个上限，你必须主动拆成多个镜头，不要依赖系统自动拼接兜底
 11. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
 12. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；人物视线必须根据对手、道具、动作目标、画外空间或运动方向来设计，除非这个镜头明确需要主观凝视、对镜交流或正面压迫感，否则不要默认所有角色都面朝镜头或直视屏幕；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
-13. 非长镜头组镜头必须统一使用首尾帧双参考，所以 longTakeIdentifier = null 时，useLastFrameReference 必须固定为 true，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕
-14. 只有长镜头组镜头才允许按镜头连续性需求决定是否额外使用尾帧约束：如果 useLastFrameReference 为 true，lastFramePrompt 必须给出完整结束参考帧生图提示；如果 useLastFrameReference 为 false，lastFramePrompt 必须输出空字符串
+13. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
+14. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
 15. 只有当同一条连续长镜头的总时长预计超过 ${maxVideoSegmentDurationSeconds} 秒、因此不得不拆成多个镜头分段生成时，才允许为这些相邻镜头输出相同的 longTakeIdentifier，例如 scene-2-longtake-1；如果这条连续长镜头在 ${maxVideoSegmentDurationSeconds} 秒内可以拍完，必须保留为一个镜头并输出 longTakeIdentifier = null；没有这种连续长镜头拆段关系时也输出 null
 16. 当某个镜头与前一个镜头的 longTakeIdentifier 相同，系统会直接复用前一个镜头视频的尾帧作为当前镜头首帧，不再单独生成当前镜头的起始参考帧；因此只有在画面、机位、动作和空间关系都应连续承接时，才能复用同一个 longTakeIdentifier
 17. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容；它只能描述当前镜头内部可执行的连续画面，不要写“切到某人反应”“转到另一个机位”“插入特写”“切到下一镜”等段内切镜指令
 18. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
 19. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-20. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；lastFramePrompt 在 useLastFrameReference 为 true 时输出 1 到 2 句、为 false 时输出空字符串，但它一旦需要输出就必须优先保证画面信息完整，不要偷懒简写成剧情提示
+20. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
 21. 如果一个镜头包含对白、旁白、接话停顿、说话口型表演或以语音反应为核心的表演节奏，必须额外输出 dialogueIdentifier；非语音镜头输出 null
 22. dialogueIdentifier 现在只作为“该镜头最终时长在规划归一化阶段自动 +${STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS} 秒，且不超过 ${maxVideoSegmentDurationSeconds} 秒上限”的标记，不再触发额外连续对白简报；字段里只需要输出稳定可读的 groupId，例如 scene-2-dialogue-1，系统会自动补全 sequenceIndex、sequenceLength 和 flowRole
 23. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头后续需要哪些参考图。下方资产列表会在资产阶段统一生成成参考图；你现在要先根据名称、类别、摘要和细节选出这个镜头实际需要依赖的项，不能只看 ID 猜测
@@ -2397,11 +2386,7 @@ function formatGeneratedStoryboardShotContext(shot: StoryboardShot): string {
     `  对话标识：${formatStoryboardDialogueIdentifier(shot.dialogueIdentifier)}`,
     `  长镜头组：${shot.longTakeIdentifier || '无'}`,
     `  对白：${shot.dialogue || '无'}｜画外音：${shot.voiceover || '无'}`,
-    `  结束参考帧：${
-      !shot.longTakeIdentifier || shot.useLastFrameReference
-        ? truncateStoryboardPromptText(shot.lastFramePrompt, 140)
-        : '无'
-    }`,
+    `  结束参考帧：${shot.useLastFrameReference ? truncateStoryboardPromptText(shot.lastFramePrompt, 140) : '无'}`,
     `  转场：${shot.transitionHint}`
   ].join('\n');
 }
@@ -2736,7 +2721,7 @@ ${dialogueDurationNotice}
 4. ${dialogueIdentifierRequirement}
 5. ${longTakeIdentifierRequirement}
 6. dialogue、voiceover、camera、composition、transitionHint 和 speechPrompt 直接根据当前剧本场景、当前镜头规划、前后镜头关系和已完成镜头摘要生成；videoPrompt 只保留当前单镜头内部可执行的动作、表演、运镜和连续性要求，不要把切到反应镜、换机位或进入下一镜直接写进当前视频段
-7. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt。非长镜头组镜头（longTakeIdentifier = null）必须固定把 useLastFrameReference 设为 true 并提供 lastFramePrompt，从而统一使用首尾帧双参考；只有长镜头组镜头才允许根据是否需要额外尾帧约束，把 useLastFrameReference 设为 true/false
+7. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
 8. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
 9. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
 10. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
@@ -2744,13 +2729,13 @@ ${dialogueDurationNotice}
 12. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
 13. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
 14. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；人物视线必须根据对手、道具、动作目标、画外空间或运动方向来设计，除非这个镜头明确需要主观凝视、对镜交流或正面压迫感，否则不要默认所有角色都面朝镜头或直视屏幕；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
-15. 非长镜头组镜头必须统一使用首尾帧双参考，所以 longTakeIdentifier = null 时，useLastFrameReference 必须固定为 true，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕
-16. 只有长镜头组镜头才允许按镜头连续性需求决定是否额外使用尾帧约束：如果 useLastFrameReference 为 true，lastFramePrompt 必须给出完整结束参考帧生图提示；如果 useLastFrameReference 为 false，lastFramePrompt 必须输出空字符串
+15. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
+16. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
 17. 如果当前镜头与前一个镜头使用同一个 longTakeIdentifier，你仍然要给出完整的 firstFramePrompt 作为连续性描述，但系统会直接复用前一个视频尾帧作为当前首帧，不会单独生图；因此这类 longTakeIdentifier 只能用于真正无缝承接的长镜头拆段
 18. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容；它只能描述当前镜头内部可执行的连续画面，不要写“切到某人反应”“转到另一个机位”“插入特写”“切到下一镜”等段内切镜指令
 19. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
 20. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-21. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；lastFramePrompt 在 useLastFrameReference 为 true 时输出 1 到 2 句、为 false 时输出空字符串，但它一旦需要输出就必须优先保证画面信息完整，不要偷懒简写成剧情提示
+21. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
 22. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
 23. 你必须结合上文资产列表里的名称、摘要和细节判断这个镜头后续该用哪些参考图，并把对应 id 写进 referenceAssetIds；资产阶段会统一把这些资产生成成参考图，不能只看 id 猜测含义
 24. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用

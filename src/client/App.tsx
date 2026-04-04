@@ -316,12 +316,6 @@ function isLongTakeContinuationShot(project: Project, shot: Project['storyboard'
   return Boolean(shot.longTakeIdentifier && previousShot?.longTakeIdentifier === shot.longTakeIdentifier);
 }
 
-function shouldUseShotLastFrameReference(
-  shot: Pick<Project['storyboard'][number], 'longTakeIdentifier' | 'useLastFrameReference'>
-): boolean {
-  return !shot.longTakeIdentifier || shot.useLastFrameReference;
-}
-
 function buildShotBrowserGroups(project: Project): ShotBrowserGroup[] {
   const groups: ShotBrowserGroup[] = [];
 
@@ -2540,7 +2534,6 @@ export function App() {
     const lastFramePrompt = (draft?.lastFramePrompt ?? shot.lastFramePrompt).trim();
     const transitionHint = (draft?.transitionHint ?? shot.transitionHint).trim();
     const durationSeconds = parsePositiveIntegerDraft(durationSecondsInput);
-    const requiresLastFrameReference = shouldUseShotLastFrameReference(shot);
 
     if (durationSeconds === null) {
       setNotice('镜头时长必须为正整数秒');
@@ -2552,7 +2545,7 @@ export function App() {
       return;
     }
 
-    if (requiresLastFrameReference && !lastFramePrompt) {
+    if (shot.useLastFrameReference && !lastFramePrompt) {
       setNotice('结束参考帧 Prompt 不能为空');
       return;
     }
@@ -2569,7 +2562,7 @@ export function App() {
         body: JSON.stringify({
           durationSeconds,
           firstFramePrompt,
-          lastFramePrompt: requiresLastFrameReference ? lastFramePrompt : undefined,
+          lastFramePrompt: shot.useLastFrameReference ? lastFramePrompt : undefined,
           transitionHint
         })
       });
@@ -3117,9 +3110,7 @@ export function App() {
         <div className="prompt-block">
           <h5>结束参考帧描述</h5>
           <p>
-            {shouldUseShotLastFrameReference(shot)
-              ? shot.lastFramePrompt
-              : '当前长镜头组镜头不需要结束参考帧约束'}
+            {shot.useLastFrameReference ? shot.lastFramePrompt : '当前镜头不需要结束参考帧约束'}
           </p>
         </div>
         <div className="prompt-block">
@@ -3169,9 +3160,8 @@ export function App() {
     const firstFramePromptValue = technicalPromptDraft?.firstFramePrompt ?? shot.firstFramePrompt;
     const lastFramePromptValue = technicalPromptDraft?.lastFramePrompt ?? shot.lastFramePrompt;
     const imagePromptDirty = firstFramePromptValue.trim() !== shot.firstFramePrompt.trim();
-    const requiresLastFrameReference = shouldUseShotLastFrameReference(shot);
     const lastFramePromptDirty =
-      requiresLastFrameReference && lastFramePromptValue.trim() !== shot.lastFramePrompt.trim();
+      shot.useLastFrameReference && lastFramePromptValue.trim() !== shot.lastFramePrompt.trim();
     const imagePromptPending = pending === `image-prompt:${shot.id}`;
     const imageGeneratePending = pending === `image-generate:${shot.id}`;
     const lastImageGeneratePending = pending === `last-image-generate:${shot.id}`;
@@ -3187,8 +3177,8 @@ export function App() {
     const selectedImageIsCurrent = imageAsset?.relativePath === selectedImage?.relativePath;
     const requiresSegmentedTailFrame = shot.durationSeconds > effectiveMaxVideoSegmentDurationSeconds;
     const supportsLastFrameGeneration =
-      requiresLastFrameReference || requiresSegmentedTailFrame || Boolean(lastImageAsset) || lastImageVersions.length > 0;
-    const showTailFramePanel = supportsLastFrameGeneration;
+      shot.useLastFrameReference || requiresSegmentedTailFrame || Boolean(lastImageAsset) || lastImageVersions.length > 0;
+    const showTailFramePanel = group.shots.length > 1;
     const groupCardContext =
       group.shots.length > 1 ? `长镜头第 ${groupIndex + 1}/${group.shots.length} 段 · ${formatShotBrowserGroupRange(group)}` : null;
 
@@ -3351,11 +3341,11 @@ export function App() {
           <div className="prompt-block">
             <h5>结束参考帧策略</h5>
             <p>
-              {requiresLastFrameReference
+              {shot.useLastFrameReference
                 ? '该镜头会额外生成结束参考帧，并自动注入后续视频工作流。'
                 : requiresSegmentedTailFrame
                   ? `该镜头时长超过单段上限 ${effectiveMaxVideoSegmentDurationSeconds} 秒；系统会为长镜头分段生成额外补尾帧。`
-                  : '该长镜头组镜头当前仅生成起始参考帧，结束画面由视频工作流自然收束。'}
+                  : '该镜头仅生成起始参考帧，结束画面由视频工作流自然收束。'}
             </p>
           </div>
         ) : null}
@@ -3466,7 +3456,7 @@ export function App() {
                     lastImageGeneratePending ||
                     imagePromptPending ||
                     lastFramePromptDirty ||
-                    (requiresLastFrameReference && !lastFramePromptValue.trim())
+                    (shot.useLastFrameReference && !lastFramePromptValue.trim())
                   }
                   onClick={() => void handleGenerateShotLastImage(shot.id)}
                   type="button"
@@ -3487,7 +3477,7 @@ export function App() {
             imagePromptDirty ||
             lastFramePromptDirty ||
             !firstFramePromptValue.trim() ||
-            (requiresLastFrameReference && !lastFramePromptValue.trim())
+            (shot.useLastFrameReference && !lastFramePromptValue.trim())
           }
           onClick={() => void handleGenerateShotImage(shot.id)}
           type="button"
@@ -3509,7 +3499,6 @@ export function App() {
 
     const longTakeContinuation = isLongTakeContinuationShot(project, shot);
     const imageAsset = imageMap.get(shot.id) ?? null;
-    const lastImageAsset = lastImageMap.get(shot.id) ?? null;
     const audioAsset = audioMap.get(shot.id) ?? null;
     const videoAsset = videoMap.get(shot.id) ?? null;
     const videoVersions = getShotAssetVersions(project, 'videos', shot.id);
@@ -3524,7 +3513,7 @@ export function App() {
     const firstFramePromptValue = technicalPromptDraft?.firstFramePrompt ?? shot.firstFramePrompt;
     const lastFramePromptValue = technicalPromptDraft?.lastFramePrompt ?? shot.lastFramePrompt;
     const transitionHintValue = technicalPromptDraft?.transitionHint ?? shot.transitionHint;
-    const requiresLastFrameReference = shouldUseShotLastFrameReference(shot);
+    const requiresLastFrameReference = shot.useLastFrameReference;
     const durationSecondsValue = technicalPromptDraft?.durationSeconds ?? String(shot.durationSeconds);
     const durationSecondsValid = parsePositiveIntegerDraft(durationSecondsValue) !== null;
     const technicalPromptDirty =
@@ -3683,7 +3672,7 @@ export function App() {
           ) : (
             <div className="prompt-subfield">
               <span>结束参考帧</span>
-              <small>当前长镜头组镜头不要求结束参考帧；是否生成结束参考帧由分镜规划决定。</small>
+              <small>当前镜头不要求结束参考帧；是否生成结束参考帧由分镜规划决定。</small>
             </div>
           )}
           <label className="prompt-subfield">
@@ -3861,8 +3850,7 @@ export function App() {
             technicalPromptPending ||
             audioPromptPending ||
             videoGenerationDirty ||
-            (!imageAsset && !longTakeContinuation) ||
-            (requiresLastFrameReference && !lastImageAsset)
+            (!imageAsset && !longTakeContinuation)
           }
           onClick={() => void handleGenerateShotVideo(shot.id)}
           type="button"
