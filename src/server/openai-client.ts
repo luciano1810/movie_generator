@@ -1287,6 +1287,9 @@ function formatScriptMarkdown(script: Omit<ScriptPackage, 'markdown'>): string {
         `${formatSceneBody(scene)}`
     )
     .join('\n\n');
+  const validationWarnings = script.validationWarnings?.trim()
+    ? `## 结构提醒\n${script.validationWarnings.trim()}\n\n`
+    : '';
 
   return `# ${script.title}
 
@@ -1296,6 +1299,7 @@ function formatScriptMarkdown(script: Omit<ScriptPackage, 'markdown'>): string {
 
 风格说明：${script.styleNotes}
 
+${validationWarnings}
 ## 角色设定
 ${characters}
 
@@ -3334,25 +3338,22 @@ function buildValidatedScriptPackage(
   payload: ScriptGenerationPayload,
   settings: ProjectSettings
 ): {
-  script: ScriptPackage | null;
+  script: ScriptPackage;
   feedback: string;
 } {
   const scriptCore = normalizeScriptPackagePayload(payload, settings);
   const validation = validateGeneratedScriptStructure(scriptCore);
-
-  if (!validation.ok) {
-    return {
-      script: null,
-      feedback: validation.feedback
-    };
-  }
+  const scriptDraft = {
+    ...scriptCore,
+    validationWarnings: validation.feedback || undefined
+  };
 
   return {
     script: {
-      ...scriptCore,
-      markdown: formatScriptMarkdown(scriptCore)
+      ...scriptDraft,
+      markdown: formatScriptMarkdown(scriptDraft)
     },
-    feedback: ''
+    feedback: validation.feedback
   };
 }
 
@@ -3385,6 +3386,7 @@ export async function generateScriptFromText(
   }
 ): Promise<ScriptPackage> {
   let retryFeedback = '';
+  let fallbackScript: ScriptPackage | null = null;
 
   if (settings.scriptMode === 'upload') {
     const parsedUpload = tryParseUploadedScriptPackage(sourceText, settings);
@@ -3417,11 +3419,16 @@ export async function generateScriptFromText(
     );
     const validatedScript = buildValidatedScriptPackage(payload, settings);
 
-    if (validatedScript.script) {
+    if (!validatedScript.feedback) {
       return validatedScript.script;
     }
 
+    fallbackScript = validatedScript.script;
     retryFeedback = validatedScript.feedback;
+  }
+
+  if (fallbackScript) {
+    return fallbackScript;
   }
 
   const actionLabel = settings.scriptMode === 'upload' ? '剧本导入失败' : '剧本生成失败';

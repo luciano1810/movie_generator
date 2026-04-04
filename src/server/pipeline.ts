@@ -2940,6 +2940,11 @@ async function runScriptStage(project: Project): Promise<void> {
     signal: getProjectAbortSignal(project.id)
   });
   project.script = script;
+
+  if (script.validationWarnings?.trim()) {
+    appendLog(project, `剧本结构提醒：${script.validationWarnings.trim()}`);
+  }
+
   setStageProgress(project, 'script', {
     completed: 1,
     total: 3,

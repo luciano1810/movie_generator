@@ -223,6 +223,7 @@ export interface ScriptPackage {
   characters: ScriptCharacter[];
   scenes: ScriptScene[];
   referenceAssets?: ScriptReferenceAssetLibrary;
+  validationWarnings?: string;
   markdown: string;
 }
 
