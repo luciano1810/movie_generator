@@ -46,7 +46,7 @@ const VIDEO_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
   '3. Chronological Chaining (时间动作链条): 动作必须按时间顺序展开，用 As..., Suddenly..., Then..., Gradually... 等连接词牵引模型一秒一秒渲染，防止动作糊在一起。',
   '4. Visual Subtext & Micro-Physics (视觉潜台词与微观物理): 禁止直接写抽象情感，必须通过微观动作、表情、物理干涉、环境反馈来外化表现。',
   '5. Audio-Visual Sync (音画同步): 对话严格采用 [Character Name] ([Vocal/Physical cue]): "中文台词" 格式。',
-  '6. Motivated Gaze Direction (动机化视线): 人物视线必须服务于当前互动对象、动作目标、道具位置、画外空间或运动方向；除非用户明确要求主观镜头、对镜独白或压迫性直视镜头，否则不要默认写成 looking into camera / facing camera / staring at viewer，也不要让所有人物同时正对屏幕。',
+  '6. Motivated Gaze Direction (动机化视线): 人物视线必须服务于当前互动对象、动作目标、道具位置、画外空间或运动方向；除非用户明确要求 POV / first-person shot / direct-to-camera monologue / confrontational stare into lens，否则不要默认写成 looking into camera / facing camera / staring at viewer，也不要让所有人物同时正对屏幕。若输入没有明确注视对象，你必须主动设计 off-axis gaze，例如 looking toward the opponent off-camera left/right、down at the object in hand、toward the doorway/deep corridor、or toward the direction of travel，并避免 direct eye contact with the lens。',
   '7. Style & Character Lock (风格与角色锁定): 如果用户输入包含 [结构化摄影风格] 和 [角色硬约束]，必须把它们当作不可改写的视觉锁定条件，只允许翻译、融合和具体化，不允许替换角色脸型五官、发型发色、体型、服装主色、关键配饰、年龄感、气质、说话者身份或项目级镜头光学/布光/色彩/质感方向。',
   '',
   '# Input/Output Constraints',
@@ -695,9 +695,30 @@ function supportsJsonResponseFormatFallback(error: unknown): boolean {
   );
 }
 
-function supportsMaxTokensFallback(error: unknown): boolean {
+function isMaxTokensUnsupportedError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /max_tokens|max completion tokens|max_completion_tokens/i.test(message) && /unsupported|not support|invalid|unknown/i.test(message);
+  return (
+    /max_tokens|max completion tokens|max_completion_tokens/i.test(message) &&
+    /unsupported|not support|invalid|unknown|unrecognized/i.test(message)
+  );
+}
+
+function isMaxTokensTooLargeError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /max_tokens|max completion tokens|max_completion_tokens|max_tokens_limit|maximum context length|context_length_exceeded/i.test(
+      message
+    ) && /exceed|too large|maximum|context_length|less than or equal|at most|up to/i.test(message)
+  );
+}
+
+function normalizeMaxTokensBudget(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
+}
+
+function downshiftMaxTokensBudget(maxTokens: number): number {
+  return Math.max(1_024, Math.floor(maxTokens * 0.75));
 }
 
 async function requestJson<T>(
@@ -707,7 +728,8 @@ async function requestJson<T>(
   const client = createClient();
   const settings = getAppSettings();
   let useJsonResponseFormat = true;
-  let useMaxTokens = typeof options?.maxTokens === 'number' && options.maxTokens > 0;
+  let maxTokens = normalizeMaxTokensBudget(options?.maxTokens);
+  let useMaxTokens = maxTokens > 0;
   let response: Awaited<ReturnType<typeof client.chat.completions.create>> | null = null;
 
   while (!response) {
@@ -715,7 +737,7 @@ async function requestJson<T>(
       model: settings.llm.model,
       temperature: options?.temperature ?? 0.6,
       messages,
-      ...(useMaxTokens ? { max_tokens: Math.round(options?.maxTokens ?? 0) } : {}),
+      ...(useMaxTokens ? { max_tokens: maxTokens } : {}),
       ...(useJsonResponseFormat
         ? {
             response_format: {
@@ -740,8 +762,20 @@ async function requestJson<T>(
         continue;
       }
 
-      if (useMaxTokens && supportsMaxTokensFallback(error)) {
+      if (useMaxTokens && isMaxTokensUnsupportedError(error)) {
         useMaxTokens = false;
+        continue;
+      }
+
+      if (useMaxTokens && isMaxTokensTooLargeError(error)) {
+        const nextMaxTokens = downshiftMaxTokensBudget(maxTokens);
+
+        if (nextMaxTokens >= maxTokens || maxTokens <= 1_024) {
+          useMaxTokens = false;
+        } else {
+          maxTokens = nextMaxTokens;
+        }
+
         continue;
       }
 
@@ -764,7 +798,8 @@ async function requestText(
 ): Promise<string> {
   const client = createClient();
   const settings = getAppSettings();
-  let useMaxTokens = typeof options?.maxTokens === 'number' && options.maxTokens > 0;
+  let maxTokens = normalizeMaxTokensBudget(options?.maxTokens);
+  let useMaxTokens = maxTokens > 0;
   let response: Awaited<ReturnType<typeof client.chat.completions.create>> | null = null;
 
   while (!response) {
@@ -774,7 +809,7 @@ async function requestText(
           model: settings.llm.model,
           temperature: options?.temperature ?? 0.7,
           messages,
-          ...(useMaxTokens ? { max_tokens: Math.round(options?.maxTokens ?? 0) } : {})
+          ...(useMaxTokens ? { max_tokens: maxTokens } : {})
         },
         options?.signal
           ? {
@@ -783,8 +818,20 @@ async function requestText(
           : undefined
       );
     } catch (error) {
-      if (useMaxTokens && supportsMaxTokensFallback(error)) {
+      if (useMaxTokens && isMaxTokensUnsupportedError(error)) {
         useMaxTokens = false;
+        continue;
+      }
+
+      if (useMaxTokens && isMaxTokensTooLargeError(error)) {
+        const nextMaxTokens = downshiftMaxTokensBudget(maxTokens);
+
+        if (nextMaxTokens >= maxTokens || maxTokens <= 1_024) {
+          useMaxTokens = false;
+        } else {
+          maxTokens = nextMaxTokens;
+        }
+
         continue;
       }
 
@@ -851,6 +898,7 @@ function buildImageToVideoPromptOptimizationInput(
       : '',
     '[动作与台词]：',
     motionAndSpeechDetails || '保持当前镜头内部的连续动作演进。',
+    '视线硬约束：如果上方没有明确写“主观镜头 / POV / 对镜独白 / 直视镜头”，则必须把人物眼神改写为看向画外左/右侧对象、手中道具、行进方向或远处环境锚点，并在英文里明确写出 off-camera / toward the object / toward the doorway / in the direction of travel 等离轴注视目标；不要写 looking into camera、staring at viewer、facing camera，也不要只写 looks ahead。',
     '如果上方没有明确提供对白或旁白文本，不要臆造新的中文台词或旁白。',
     '请直接输出最终英文段落，不要标题，不要解释，不要确认规则。'
   ].join('\n');
@@ -1318,10 +1366,17 @@ function getStoryboardShotSplitReferenceSeconds(settings: ProjectSettings): numb
 
 function getMinimumShotsForScene(scene: ScriptScene, settings: ProjectSettings): number {
   const structureRequirement = getStoryboardStructureRequirement(settings);
+  const splitReferenceSeconds = Math.max(
+    1,
+    Math.min(
+      getStoryboardShotSplitReferenceSeconds(settings),
+      getEffectiveMaxVideoSegmentDurationSeconds(settings)
+    )
+  );
 
   return Math.max(
     structureRequirement.minimumShotsPerScene,
-    Math.ceil(scene.durationSeconds / getStoryboardShotSplitReferenceSeconds(settings))
+    Math.ceil(scene.durationSeconds / splitReferenceSeconds)
   );
 }
 
@@ -1338,12 +1393,24 @@ function getPreferredLongShotDurationSeconds(settings: ProjectSettings): number 
   return getStoryLengthReference(settings).preferredLongShotDurationSeconds;
 }
 
-function buildStoryboardShotDurationGuideline(maxVideoSegmentDurationSeconds: number): string {
-  return `每个镜头的 durationSeconds 必须由你在分镜时独立决定。项目篇幅只决定整片总量，不决定单个镜头该拍几秒。请根据当前镜头承载的信息量、动作完整度、表演停顿、对白长度、运镜路径和情绪发酵空间自行给出时长；短反应镜头可以更短，完整动作链、对白来回或情绪收束镜头可以更长，但任何一个镜头都不能超过 ${maxVideoSegmentDurationSeconds} 秒。`;
+function buildStoryboardShotDurationGuideline(settings: ProjectSettings): string {
+  const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
+  const preferredLongShotDurationSeconds = Math.max(
+    2,
+    Math.min(getPreferredLongShotDurationSeconds(settings), maxVideoSegmentDurationSeconds)
+  );
+
+  return `每个镜头的 durationSeconds 必须由你在分镜时独立决定。项目篇幅只决定整片总量，不决定单个镜头该拍几秒。请根据当前镜头承载的信息量、动作完整度、表演停顿、对白长度、运镜路径和情绪发酵空间自行给出时长；反应、插入、视线、道具和动作细节镜头可以明显短一些，大多数镜头优先控制在 ${preferredLongShotDurationSeconds} 秒以内，只有明确需要完整长动作或连续情绪沉浸时才写得更长，但任何一个镜头都不能超过 ${maxVideoSegmentDurationSeconds} 秒。`;
 }
 
-function buildStoryboardShotSplitGuideline(maxVideoSegmentDurationSeconds: number): string {
-  return `是否继续拆镜只取决于当前内容是否包含多个戏剧节拍、对话来回、动作升级、信息反转或人物进出场，不由项目篇幅档位决定；同一段连续动作、同一次反应链、同一段情绪发酵，优先留在一个镜头内部完成，避免频繁硬切。只有当一条连续长镜头的总时长预计会超过 ${maxVideoSegmentDurationSeconds} 秒时，才允许为了分段生成把它拆成多个连续镜头；如果没有超过这个上限，必须保留为一个镜头，不要为了所谓模型稳定性提前拆开。`;
+function buildStoryboardShotSplitGuideline(settings: ProjectSettings): string {
+  const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
+  const preferredLongShotDurationSeconds = Math.max(
+    2,
+    Math.min(getPreferredLongShotDurationSeconds(settings), maxVideoSegmentDurationSeconds)
+  );
+
+  return `是否继续拆镜首先看当前内容是否已经出现新的戏剧节拍、对白接话点、反应点、动作阶段变化、视线目标变化、人物进出场、空间揭示或信息反转；只要这些变化成立，就优先主动拆成多个镜头，用反打、插入、推拉、跟移、过肩、主观视角、细节特写和环境承接镜头把节奏拆细。只有当一个镜头确实只承担单一动作/单一反应/单一情绪停顿，并且明确需要保持一镜到底时，才把它保留在一个镜头内；如果预计单镜头会超过 ${preferredLongShotDurationSeconds} 秒且内部已有多个节拍，优先拆成 2 到 4 个镜头；如果一条连续长镜头总时长超过 ${maxVideoSegmentDurationSeconds} 秒，必须拆成多个带同一 longTakeIdentifier 的连续分段。`;
 }
 
 function getStoryLengthScriptGenerationTarget(settings: ProjectSettings): {
@@ -1365,30 +1432,30 @@ function getStoryLengthScriptGenerationTarget(settings: ProjectSettings): {
 
   if (settings.storyLength === 'long') {
     return {
-      minimumScenes: 8,
-      maximumScenes: 12,
-      minimumTotalDurationSeconds: 600,
-      maximumTotalDurationSeconds: 1200,
-      pacingInstruction: '允许做更完整的铺垫、关系递进和主题回响，但仍要保持电影叙事密度，避免节奏松散或铺陈失焦。'
+      minimumScenes: 12,
+      maximumScenes: 18,
+      minimumTotalDurationSeconds: 900,
+      maximumTotalDurationSeconds: 1800,
+      pacingInstruction: '允许做更完整的铺垫、关系递进、代价升级、支线回收和主题回响；中段可以加入数个直接服务主线的阻碍/误判/反转场，但每场都要有新的信息增量和明确场尾钩子，避免只拉长情绪不推进事件。'
     };
   }
 
   if (settings.storyLength === 'medium') {
     return {
-      minimumScenes: 5,
-      maximumScenes: 8,
-      minimumTotalDurationSeconds: 240,
-      maximumTotalDurationSeconds: 360,
-      pacingInstruction: '需要有完整起承转合，但要持续推进主线，不要为了拉长体量硬塞重复桥段。'
+      minimumScenes: 8,
+      maximumScenes: 12,
+      minimumTotalDurationSeconds: 360,
+      maximumTotalDurationSeconds: 720,
+      pacingInstruction: '需要有完整起承转合和至少一轮中段误判/反打/代价升级；允许增加直接服务主线的过渡场、调查场、追逼场或关系转折场来拉开篇幅，但每场都必须推动局势或人物关系变化。'
     };
   }
 
   return {
-    minimumScenes: 3,
-    maximumScenes: 5,
-    minimumTotalDurationSeconds: 45,
-    maximumTotalDurationSeconds: 75,
-    pacingInstruction: '必须直奔主冲突，聚焦单一主线和关键反转，不要扩写支线，不要把短篇写成长篇。'
+    minimumScenes: 4,
+    maximumScenes: 6,
+    minimumTotalDurationSeconds: 90,
+    maximumTotalDurationSeconds: 180,
+    pacingInstruction: '仍然聚焦单一主线，但允许用更完整的铺垫、对抗升级和场尾反转把短篇写扎实；不要把多个关键事件压缩成一句 summary。'
   };
 }
 
@@ -1406,20 +1473,20 @@ function getStoryboardStructureRequirement(settings: ProjectSettings): {
   if (settings.storyLength === 'long') {
     return {
       minimumScenes: 8,
-      minimumShotsPerScene: 8
+      minimumShotsPerScene: 12
     };
   }
 
   if (settings.storyLength === 'medium') {
     return {
       minimumScenes: 5,
-      minimumShotsPerScene: 5
+      minimumShotsPerScene: 8
     };
   }
 
   return {
     minimumScenes: 3,
-    minimumShotsPerScene: 3
+    minimumShotsPerScene: 4
   };
 }
 
@@ -1467,11 +1534,31 @@ function buildStoryboardSpokenLanguageRequirement(language: string): string {
 }
 
 function getStoryboardPlanGenerationMaxTokens(minimumShots: number): number {
-  return Math.min(16_000, Math.max(4_000, minimumShots * 180));
+  return Math.min(24_000, Math.max(6_000, minimumShots * 260));
 }
 
 function getStoryboardShotGenerationMaxTokens(): number {
-  return 3_500;
+  return 5_000;
+}
+
+function getScriptGenerationMaxTokens(settings: ProjectSettings): number {
+  if (settings.scriptMode === 'upload') {
+    return 12_000;
+  }
+
+  if (settings.storyLength === 'test') {
+    return 6_000;
+  }
+
+  if (settings.storyLength === 'long') {
+    return 24_000;
+  }
+
+  if (settings.storyLength === 'medium') {
+    return 18_000;
+  }
+
+  return 12_000;
 }
 
 function buildStoryboardReferenceSelectionId(kind: ReferenceAssetKind, itemId: string): string {
@@ -1809,10 +1896,19 @@ function validateStoryboardAgainstScript(
   const generatedSceneNumbers = new Set(shots.map((shot) => shot.sceneNumber));
   const missingScenes = expectedSceneNumbers.filter((sceneNumber) => !generatedSceneNumbers.has(sceneNumber));
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
+  const sceneCoverageIssues = getStoryboardSceneCoverageIssues(script, shots, settings);
   const issues: string[] = [];
 
   if (missingScenes.length) {
     issues.push(`必须覆盖全部场景，当前缺少 sceneNumber: ${missingScenes.join(', ')}`);
+  }
+
+  if (sceneCoverageIssues.length) {
+    issues.push(
+      `以下场景镜头数过少：${sceneCoverageIssues
+        .map((issue) => `scene ${issue.sceneNumber} 当前 ${issue.currentShots} 个，至少需要 ${issue.minimumShots} 个`)
+        .join('；')}`
+    );
   }
 
   const overlongShots = shots
@@ -2068,10 +2164,19 @@ function validateStoryboardPlanAgainstScript(
   const generatedSceneNumbers = new Set(shots.map((shot) => shot.sceneNumber));
   const missingScenes = expectedSceneNumbers.filter((sceneNumber) => !generatedSceneNumbers.has(sceneNumber));
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
+  const sceneCoverageIssues = getStoryboardSceneCoverageIssues(script, shots, settings);
   const issues: string[] = [];
 
   if (missingScenes.length) {
     issues.push(`必须覆盖全部场景，当前缺少 sceneNumber: ${missingScenes.join(', ')}`);
+  }
+
+  if (sceneCoverageIssues.length) {
+    issues.push(
+      `以下场景镜头数低于推荐下限：${sceneCoverageIssues
+        .map((issue) => `scene ${issue.sceneNumber} 当前 ${issue.currentShots} 个，至少需要 ${issue.minimumShots} 个`)
+        .join('；')}`
+    );
   }
 
   if (typeof declaredTotalShots === 'number' && declaredTotalShots !== shots.length) {
@@ -2168,12 +2273,12 @@ function buildStoryboardConversationPrelude(
   const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
   const recommendedMinimumShotCount = getRecommendedMinimumStoryboardShotCount(script, settings);
-  const shotDurationGuideline = buildStoryboardShotDurationGuideline(maxVideoSegmentDurationSeconds);
-  const shotSplitGuideline = buildStoryboardShotSplitGuideline(maxVideoSegmentDurationSeconds);
+  const shotDurationGuideline = buildStoryboardShotDurationGuideline(settings);
+  const shotSplitGuideline = buildStoryboardShotSplitGuideline(settings);
   const sceneRules = script.scenes
     .map(
       (scene) =>
-        `- 场景 ${scene.sceneNumber}（${scene.durationSeconds}s）：推荐不少于 ${getMinimumShotsForScene(scene, settings)} 个镜头`
+        `- 场景 ${scene.sceneNumber}（${scene.durationSeconds}s）：至少 ${getMinimumShotsForScene(scene, settings)} 个镜头；如果对白来回、动作阶段、空间揭示或反应点更密集，可以继续增加反打/插入/细节/环境承接镜头`
     )
     .join('\n');
 
@@ -2193,22 +2298,22 @@ function buildStoryboardConversationPrelude(
 3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写“无语音内容”。${spokenLanguageRequirement}
 4. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
 5. 项目篇幅为 ${STORY_LENGTH_LABELS[settings.storyLength]}；当前剧本共有 ${script.scenes.length} 个场景，你必须在多轮对话结束后完整覆盖全部现有场景，不得跳场，也不要臆造新的 scene。如果当前剧本场景数低于该篇幅的推荐值，也继续基于现有场景完成拆镜
-6. 镜头数量不要预设上限，由你根据戏剧节奏、信息密度、动作复杂度、对白来回和情绪变化自行决定；但镜头颗粒度不能过粗。当前剧本总时长约 ${script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0)} 秒，全剧推荐至少 ${recommendedMinimumShotCount} 个镜头，避免把多个戏剧节拍硬塞进一个镜头，也不要把本可在一个连续镜头内完成的动作、反应和情绪停顿机械切碎；如果实际略少于这个参考值，也不要为了凑数重复镜头或硬塞空镜
+6. 镜头数量不要预设上限，由你根据戏剧节奏、信息密度、动作复杂度、对白来回和情绪变化自行决定；但镜头颗粒度不能过粗。当前剧本总时长约 ${script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0)} 秒，全剧至少按 ${recommendedMinimumShotCount} 个镜头起步，允许明显高于这个参考值；尤其在对白交锋、追逐打斗、搜证调查、关键道具动作、视线反应和空间揭示处，要优先多拆反打、过肩、插入、主观、动作细节和环境承接镜头，避免把多个戏剧节拍硬塞进一个镜头。只有确实单一动作/单一反应/明确一镜到底的段落，才保留为一个长一点的镜头
 7. 分场镜头密度参考如下：
 ${sceneRules}
 8. ${shotSplitGuideline}
 9. ${shotDurationGuideline}
 10. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；这是硬上限，不是建议值。任何一个镜头的 durationSeconds 都不能超过它；如果一段动作、对白或情绪变化超出这个上限，你必须主动拆成多个镜头，不要依赖系统自动拼接兜底
 11. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
-12. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；人物视线必须根据对手、道具、动作目标、画外空间或运动方向来设计，除非这个镜头明确需要主观凝视、对镜交流或正面压迫感，否则不要默认所有角色都面朝镜头或直视屏幕；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
+12. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；人物视线必须根据对手、道具、动作目标、画外空间或运动方向来设计，除非这个镜头明确需要主观凝视、对镜交流或正面压迫感，否则不要默认所有角色都面朝镜头或直视屏幕；如果是单人独处镜头且没有明确互动对象，默认让人物看向画外左/右侧、手中物件、门口/窗外/走廊深处等环境锚点或行进方向，不要只写“看向前方”；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
 13. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
-14. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
-15. 只有当同一条连续长镜头的总时长预计超过 ${maxVideoSegmentDurationSeconds} 秒、因此不得不拆成多个镜头分段生成时，才允许为这些相邻镜头输出相同的 longTakeIdentifier，例如 scene-2-longtake-1；如果这条连续长镜头在 ${maxVideoSegmentDurationSeconds} 秒内可以拍完，必须保留为一个镜头并输出 longTakeIdentifier = null；没有这种连续长镜头拆段关系时也输出 null
+14. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；如果是单人独处镜头且没有明确互动对象，默认让人物看向画外左/右侧、手中物件、门口/窗外/走廊深处等环境锚点或下一步运动方向，不要只写“看向前方”；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
+15. longTakeIdentifier 只用于“明确要保持一镜到底，但因总时长超过 ${maxVideoSegmentDurationSeconds} 秒不得不拆段生成”的连续分段，例如 scene-2-longtake-1；如果只是按对白接话、反应点、动作细节、景别变化或空间揭示主动切成多个普通镜头，即使这一组镜头总时长不长，也应分别输出 longTakeIdentifier = null；如果某条一镜到底在 ${maxVideoSegmentDurationSeconds} 秒内可以拍完且内部没有必要拆节拍，也可以保留为一个镜头并输出 null
 16. 当某个镜头与前一个镜头的 longTakeIdentifier 相同，系统会直接复用前一个镜头视频的尾帧作为当前镜头首帧，不再单独生成当前镜头的起始参考帧；因此只有在画面、机位、动作和空间关系都应连续承接时，才能复用同一个 longTakeIdentifier
 17. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容；它只能描述当前镜头内部可执行的连续画面，不要写“切到某人反应”“转到另一个机位”“插入特写”“切到下一镜”等段内切镜指令
 18. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
 19. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-20. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
+20. 为保证单镜头字段可直接执行，每个字段都要写得具体、画面信息完整、动作节奏清楚，但不要堆砌重复形容词：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
 21. 如果一个镜头包含对白、旁白、接话停顿、说话口型表演或以语音反应为核心的表演节奏，必须额外输出 dialogueIdentifier；非语音镜头输出 null
 22. dialogueIdentifier 现在只作为“该镜头最终时长在规划归一化阶段自动 +${STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS} 秒，且不超过 ${maxVideoSegmentDurationSeconds} 秒上限”的标记，不再触发额外连续对白简报；字段里只需要输出稳定可读的 groupId，例如 scene-2-dialogue-1，系统会自动补全 sequenceIndex、sequenceLength 和 flowRole
 23. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头后续需要哪些参考图。下方资产列表会在资产阶段统一生成成参考图；你现在要先根据名称、类别、摘要和细节选出这个镜头实际需要依赖的项，不能只看 ID 猜测
@@ -2277,15 +2382,15 @@ function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectS
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
   const minimumShotCount = getMinimumStoryboardShotCount(script, settings);
   const recommendedMinimumShotCount = getRecommendedMinimumStoryboardShotCount(script, settings);
-  const shotDurationGuideline = buildStoryboardShotDurationGuideline(maxVideoSegmentDurationSeconds);
-  const shotSplitGuideline = buildStoryboardShotSplitGuideline(maxVideoSegmentDurationSeconds);
+  const shotDurationGuideline = buildStoryboardShotDurationGuideline(settings);
+  const shotSplitGuideline = buildStoryboardShotSplitGuideline(settings);
   const retryNotice = retryFeedback
     ? `\n上一次规划结果不合格，必须修正以下问题：\n${retryFeedback}\n本次输出必须一次性给出修正后的完整分镜规划 JSON。\n`
     : '';
   const sceneRules = script.scenes
     .map(
       (scene) =>
-        `- 场景 ${scene.sceneNumber}（${scene.durationSeconds}s）：推荐不少于 ${getMinimumShotsForScene(scene, settings)} 个镜头`
+        `- 场景 ${scene.sceneNumber}（${scene.durationSeconds}s）：至少 ${getMinimumShotsForScene(scene, settings)} 个镜头；如果对白来回、动作阶段、空间揭示或反应点更密集，可以继续增加反打/插入/细节/环境承接镜头`
     )
     .join('\n');
 
@@ -2294,7 +2399,7 @@ function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectS
 要求：
 1. 这一轮只能输出整部剧的分镜规划 JSON，必须先明确 totalShots，并给出全部镜头的概况；不要输出 firstFramePrompt、lastFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt、camera、composition、transitionHint 等完整镜头字段
 2. 项目篇幅为 ${STORY_LENGTH_LABELS[settings.storyLength]}；当前剧本共有 ${script.scenes.length} 个场景，你必须完整覆盖全部现有场景，不得跳场，也不要臆造新的 scene。如果当前剧本场景数低于该篇幅的推荐值，也继续基于现有场景完成规划
-3. 全剧推荐至少 ${recommendedMinimumShotCount} 个镜头，按场景下限累积出的参考值约为 ${minimumShotCount} 个镜头；如果实际略少于这个参考值，也不要为了凑数重复镜头或硬塞空镜
+3. 全剧至少按 ${recommendedMinimumShotCount} 个镜头起步，按场景下限累积出的最低参考值约为 ${minimumShotCount} 个镜头；可以根据对白交锋、动作细节、视线反应、道具插入和空间揭示继续往上加镜头，但不要低于各场景下限，也不要用无效空镜凑数
 4. 分场镜头密度参考如下：
 ${sceneRules}
 5. ${shotSplitGuideline}
@@ -2308,7 +2413,7 @@ ${sceneRules}
 13. shotNumber 必须在每个 scene 内从 1 开始连续递增
 14. 如果一个规划镜头包含对白、旁白、接话停顿、说话口型表演或以语音反应为核心的表演节奏，必须输出 dialogueIdentifier；非语音镜头输出 null
 15. dialogueIdentifier 现在只作为“该镜头最终时长在规划归一化阶段自动 +${STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS} 秒，且不超过 ${maxVideoSegmentDurationSeconds} 秒上限”的标记，不再触发额外连续对白简报；这一轮只需要输出稳定可读的 groupId，例如 scene-1-dialogue-1，系统会自动补全 sequenceIndex、sequenceLength 和 flowRole
-16. 只有当同一条连续长镜头的总时长预计超过 ${maxVideoSegmentDurationSeconds} 秒、因此必须拆成多个镜头分段生成时，才允许输出相同的 longTakeIdentifier，例如 scene-1-longtake-1；如果这条连续长镜头在 ${maxVideoSegmentDurationSeconds} 秒内可以拍完，必须保留为一个规划镜头并输出 longTakeIdentifier = null；不要为了控制模型稳定性提前拆长镜头，没有这种拆段关系时也输出 null
+16. longTakeIdentifier 只用于“明确要保持一镜到底，但因总时长超过 ${maxVideoSegmentDurationSeconds} 秒不得不拆段生成”的连续分段，例如 scene-1-longtake-1；如果只是按对白接话、反应点、动作细节、景别变化或空间揭示主动切成多个普通镜头，即使这一组镜头总时长不长，也应分别输出 longTakeIdentifier = null；如果某条一镜到底在 ${maxVideoSegmentDurationSeconds} 秒内可以拍完且内部没有必要拆节拍，也可以保留为一个规划镜头并输出 null
 17. 只有当前镜头与前一个镜头应该无缝连续承接、并且系统需要直接复用前一个视频尾帧作为当前首帧时，才允许复用同一个 longTakeIdentifier；不要把普通切镜误标成长镜头组
 18. 输出结构：
 {
@@ -2665,7 +2770,7 @@ function buildStoryboardShotTurnPrompt(
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
   const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
   const spokenLanguageLabel = describeProjectLanguage(settings.language);
-  const shotSplitGuideline = buildStoryboardShotSplitGuideline(maxVideoSegmentDurationSeconds);
+  const shotSplitGuideline = buildStoryboardShotSplitGuideline(settings);
   const retryNotice = retryFeedback
     ? `\n上一次结果不合格，必须修正以下问题：\n${retryFeedback}\n本次输出必须一次性给出修正后的完整镜头 JSON。\n`
     : '';
@@ -2728,14 +2833,14 @@ ${dialogueDurationNotice}
 11. ${shotSplitGuideline} 当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
 12. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
 13. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
-14. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；人物视线必须根据对手、道具、动作目标、画外空间或运动方向来设计，除非这个镜头明确需要主观凝视、对镜交流或正面压迫感，否则不要默认所有角色都面朝镜头或直视屏幕；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
+14. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；人物视线必须根据对手、道具、动作目标、画外空间或运动方向来设计，除非这个镜头明确需要主观凝视、对镜交流或正面压迫感，否则不要默认所有角色都面朝镜头或直视屏幕；如果是单人独处镜头且没有明确互动对象，默认让人物看向画外左/右侧、手中物件、门口/窗外/走廊深处等环境锚点或行进方向，不要只写“看向前方”；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图
 15. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
-16. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
+16. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；如果是单人独处镜头且没有明确互动对象，默认让人物看向画外左/右侧、手中物件、门口/窗外/走廊深处等环境锚点或下一步运动方向，不要只写“看向前方”；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
 17. 如果当前镜头与前一个镜头使用同一个 longTakeIdentifier，你仍然要给出完整的 firstFramePrompt 作为连续性描述，但系统会直接复用前一个视频尾帧作为当前首帧，不会单独生图；因此这类 longTakeIdentifier 只能用于真正无缝承接的长镜头拆段
 18. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容；它只能描述当前镜头内部可执行的连续画面，不要写“切到某人反应”“转到另一个机位”“插入特写”“切到下一镜”等段内切镜指令
 19. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
 20. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-21. 为避免输出过长被截断，在保证可生成性的前提下，每个字段写得具体但紧凑：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
+21. 为保证单镜头字段可直接执行，每个字段都要写得具体、画面信息完整、动作节奏清楚，但不要堆砌重复形容词：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
 22. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
 23. 你必须结合上文资产列表里的名称、摘要和细节判断这个镜头后续该用哪些参考图，并把对应 id 写进 referenceAssetIds；资产阶段会统一把这些资产生成成参考图，不能只看 id 猜测含义
 24. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
@@ -3017,12 +3122,12 @@ function buildScriptPromptContext(settings: ProjectSettings): string {
 2. 语气风格：${settings.tone}
 3. 视觉调性：${settings.visualStyle}
 4. 输出语言：${settings.language}
-5. 项目篇幅档位为${STORY_LENGTH_LABELS[settings.storyLength]}；系统会通过调整生成 prompt 来影响剧本目标长度与节奏，请把它当作体量建议而不是机械报数约束。优先保证戏剧结构完整、人物弧线成立和场次功能清晰，再尽量贴近 ${target.minimumScenes} 到 ${target.maximumScenes} 场、总时长约 ${target.minimumTotalDurationSeconds} 到 ${target.maximumTotalDurationSeconds} 秒的建议范围。${target.pacingInstruction}
+5. 项目篇幅档位为${STORY_LENGTH_LABELS[settings.storyLength]}；这不是机械报数，但请优先把剧本写到 ${target.minimumScenes} 到 ${target.maximumScenes} 场、总时长约 ${target.minimumTotalDurationSeconds} 到 ${target.maximumTotalDurationSeconds} 秒的体量区间。若原始素材偏短，可以沿主线补足“行动准备/调查铺垫/正面冲突/反应余波/新钩子”这些有明确因果与戏剧功能的场次，把关键事件拆开写扎实，而不是把多个转折压缩在一场里。${target.pacingInstruction}
 6. 每场必须写成真正可拍的剧本，而不是只有 summary、dialogue 列表的场景大纲；sceneHeading、conflict、turningPoint 和 scriptBlocks 都是硬约束
 7. scriptBlocks 必须按实际发生顺序排列，至少包含 action；需要对白时再写 dialogue，需要画外音时再写 voiceover；只有必要时才写 transition
 8. action 只能写看得见、拍得到的动作、表情、调度、空间变化和道具状态，不要写作者点评、主题说明或空泛总结
 9. dialogue 要口语化、短促、带潜台词；parenthetical 只写必要表演提示，不要每句都加
-10. 每场内部都要在 scriptBlocks 中体现起势、对抗、转折和收束，不能只写 2 到 3 条概括性交代
+10. 每场内部都要在 scriptBlocks 中体现起势、对抗、反应、转折和收束，尽量把动作推进、对白来回、停顿反应和道具调度拆成多条连续 block；除非该场极短，否则不要只写 2 到 3 条概括性交代
 11. durationSeconds 必须给出正整数秒，并按剧情节奏自行决定；如果素材不足，不要为了凑总时长重复同类桥段；如果素材过多，优先压缩、合并和聚焦主线
 12. 人物外观和身份要稳定，便于后续持续生成画面
 13. referenceAssets 是硬约束，必须在剧本阶段一次性输出完整资产列表；后续资产阶段会直接按这个列表生成，不会再单独向模型二次提取
@@ -3030,7 +3135,7 @@ function buildScriptPromptContext(settings: ProjectSettings): string {
 15. referenceAssets.characters 的 generationPrompt 只写稳定的人物外观与身份特征，重点描述年龄感、脸型五官、发型、体型、服装层次、面料材质、标志性配饰、轮廓差异、气质、常态表情，不要写三视图、镜头运动或具体剧情动作
 16. referenceAssets.scenes 提取可复用的场景母版集合，不要限制成“每个地点只有一个角度”；同一地点如有多个明确可拍区域、主机位、纵深关系、或不同时间/天气/光线状态，应拆成多个独立 scene 资产，name 带上分区/视角/时间标记；每个 scene 资产本身必须是单一空镜机位、无人物、无剧情动作，强调空间结构、前中后景、入口动线、光线、材质、陈设和氛围
 17. referenceAssets.objects 不要只保留推动剧情的大道具，也要尽量覆盖反复出现、画面辨识度高、能增加布景质感或角色动作可信度的陈设、小道具、载具、屏幕设备、文件纸张、标志物、服饰配件；如果同一物品有明显状态变化要拆分资产，prompt 强调完整轮廓、材质、状态、摆放方式、尺寸感和可读角度
-18. 如果输入素材很多，优先压缩、合并和聚焦主线；如果输入素材有限，也不要为了“凑够篇幅”硬塞重复桥段、解释性对白或无效过场
+18. 如果输入素材很多，优先保住主线清晰度，但不要把关键对抗、调查过程、关系裂变和场尾反转过度压扁；如果输入素材有限，可以围绕角色动机、行动阻碍、线索推进、追逼反应、道具使用和情绪余波扩写有效场次，但不要靠重复桥段、解释性对白或无效过场凑体量
 19. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
 }
 
@@ -3086,13 +3191,13 @@ ${retryNotice}
 2. 优先修复开场不够抓人、冲突不够集中、情绪不够陡、场次重复、对白拖沓的问题
 3. 开场必须尽快建立强悬念、威胁、欲望目标或核心利益冲突
 4. 每一场都要有明确目标、阻碍、转折或信息增量，避免空转
-5. 每场都必须写成连续剧本块 scriptBlocks，至少要让读者看到人物动作、表情反应、对白来回和场尾转折，不能只给几句概要
+5. 每场都必须写成连续剧本块 scriptBlocks，至少要让读者看到人物动作、表情反应、对白来回、道具调度和场尾转折；可以把原文里一笔带过的关键冲突拆成“铺垫-对抗-余波/新钩子”多个场次或多段 block，不能只给几句概要
 6. 对白要口语化、短促、利于表演，不要写成长篇讲述
 7. 画外音只在必要时使用，避免重复解释画面已经表达的信息
 8. 如果原文结构混乱，可以重组场次顺序，但不要丢失关键剧情信息
 9. 如果原文缺少必要细节，可以补足角色动机、场景信息和情绪推进，使其成为完整可拍的电影剧本
 10. 必须在同一次输出里同步给出 referenceAssets 资产列表，供后续资产阶段直接生成
-11. 请尽量贴近上面的建议篇幅范围；如果素材不足，不要为了凑时长硬塞重复桥段；如果素材过多，优先压缩和合并，不要牺牲主线清晰度
+11. 请优先写到上面的建议篇幅下限以上；如果素材不足，优先围绕主线补足行动准备、调查推进、反应余波、对抗升级和新钩子，而不是硬塞重复桥段；如果素材过多，优先压缩离主线最远的支线，不要牺牲关键对抗过程
 12. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
@@ -3148,13 +3253,13 @@ ${retryNotice}
 1. 将输入素材扩写为完整电影剧本，而不是复述原文
 2. 开场必须尽快建立人物关系、处境、危机、悬念或利益冲突，让观众迅速进入故事
 3. 全剧要有持续升级的冲突链路，避免平铺直叙
-4. 每场都要服务于主线推进，并给出清晰的情绪变化
+4. 每场都要服务于主线推进，并给出清晰的情绪变化；中段可以主动设计调查、试探、误判、追逼、反击、关系破裂、代价加码、线索揭露等直接服务主线的新场次，把故事写得更完整
 5. 角色数量控制在必要范围内，每个核心角色都要有鲜明身份、稳定外观和清晰动机
-6. 每场都必须写成连续剧本块 scriptBlocks，让动作、对白、反应和转折按顺序发生，不能退化成“场景介绍 + 几句台词”
+6. 每场都必须写成连续剧本块 scriptBlocks，让动作、对白、反应、道具调度、空间走位和转折按顺序发生；除非该场极短，否则优先拆成多条连续 block，不能退化成“场景介绍 + 几句台词”
 7. 场景信息要具体到地点、时间和动作状态，方便后续直接拆分镜
 8. 对白要简洁、准确、利于表演，尽量避免大段说明性台词和直白解释
 9. 必须在同一次输出里同步给出 referenceAssets 资产列表，供后续资产阶段直接生成
-10. 请尽量贴近上面的建议篇幅范围；如果素材不足，不要为了凑体量重复同类桥段；如果素材过多，优先压缩和合并情节，不要牺牲叙事清晰度
+10. 请优先写到上面的建议篇幅下限以上；如果素材偏少，可以沿主线补出“铺垫-执行-受阻-反转-余波/新钩子”的动作与情绪链条，不要把多个关键节点压成一场；如果素材过多，优先压缩离主线最远的支线，不要牺牲核心情节密度
 11. 返回结构必须严格符合以下 JSON：
 ${outputSchema}
 
@@ -3165,15 +3270,30 @@ ${sourceText}`
 }
 
 function validateGeneratedScriptStructure(
-  script: Pick<ScriptPackage, 'scenes' | 'referenceAssets'>
+  script: Pick<ScriptPackage, 'scenes' | 'referenceAssets'>,
+  settings: ProjectSettings
 ): {
   ok: boolean;
   feedback: string;
 } {
   const issues: string[] = [];
+  const target = getStoryLengthScriptGenerationTarget(settings);
+  const totalDurationSeconds = script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0);
 
   if (!script.scenes.length) {
     issues.push('必须至少生成 1 场戏。');
+  }
+
+  if (settings.scriptMode !== 'upload' && script.scenes.length < target.minimumScenes) {
+    issues.push(
+      `当前只生成了 ${script.scenes.length} 场戏，低于${STORY_LENGTH_LABELS[settings.storyLength]}建议下限 ${target.minimumScenes} 场；请保留主线清晰度的前提下补足有明确冲突、反应、推进或反转功能的新场次。`
+    );
+  }
+
+  if (settings.scriptMode !== 'upload' && totalDurationSeconds < target.minimumTotalDurationSeconds) {
+    issues.push(
+      `当前剧本总时长约 ${totalDurationSeconds} 秒，低于${STORY_LENGTH_LABELS[settings.storyLength]}建议下限 ${target.minimumTotalDurationSeconds} 秒；请优先通过补足行动过程、对抗升级、关系反应和场尾钩子来扩写，而不是重复同类对白。`
+    );
   }
 
   if (!script.referenceAssets?.characters.length) {
@@ -3343,7 +3463,7 @@ function buildValidatedScriptPackage(
   feedback: string;
 } {
   const scriptCore = normalizeScriptPackagePayload(payload, settings);
-  const validation = validateGeneratedScriptStructure(scriptCore);
+  const validation = validateGeneratedScriptStructure(scriptCore, settings);
   const scriptDraft = {
     ...scriptCore,
     validationWarnings: validation.feedback || undefined
@@ -3403,19 +3523,20 @@ export async function generateScriptFromText(
     const payload = await requestJson<ScriptGenerationPayload>(
       buildScriptMessages(sourceText, settings, retryFeedback),
       {
-      temperature:
-        attempt === 0
-          ? settings.scriptMode === 'generate'
-            ? 0.8
-            : settings.scriptMode === 'optimize'
-              ? 0.7
-              : 0.2
-          : settings.scriptMode === 'generate'
-            ? 0.6
-            : settings.scriptMode === 'optimize'
-              ? 0.55
-              : 0.15,
-      signal: options?.signal
+        temperature:
+          attempt === 0
+            ? settings.scriptMode === 'generate'
+              ? 0.8
+              : settings.scriptMode === 'optimize'
+                ? 0.7
+                : 0.2
+            : settings.scriptMode === 'generate'
+              ? 0.6
+              : settings.scriptMode === 'optimize'
+                ? 0.55
+                : 0.15,
+        maxTokens: getScriptGenerationMaxTokens(settings),
+        signal: options?.signal
       }
     );
     const validatedScript = buildValidatedScriptPackage(payload, settings);

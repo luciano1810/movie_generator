@@ -161,6 +161,8 @@ const NO_REFERENCE_TTS_VOICE_PRESETS = [
     instruction: '音色更成熟，带轻微颗粒感，表达沉着，不要油腻夸张。'
   }
 ] as const;
+const DIRECT_CAMERA_GAZE_PATTERN =
+  /主观镜头|主观视角|第一人称视角|对镜独白|直视镜头|正视镜头|看向镜头|盯着镜头|凝视镜头|看向观众|凝视观众|正面压迫感|压迫性直视|POV shot|first-person POV|direct-to-camera|look(?:ing)? (?:into|at) (?:the )?camera|stare(?:s|ing)? at (?:the )?(?:viewer|camera)|face(?:s|ing)? (?:the )?camera|direct eye contact with (?:the )?(?:viewer|camera|lens)/i;
 
 function inferCharacterGenderHint(
   item: Pick<ReferenceAssetItem, 'genderHint' | 'summary' | 'generationPrompt'>
@@ -263,7 +265,7 @@ function buildCharacterAssetWorkflowPrompt(
   const resolvedEthnicity = ethnicityHint.trim() || '人种未说明';
   const resolvedDescription = trimmedPrompt || '人物描述未说明';
 
-  return `单人角色设定参考图，${trimmedName}，${resolvedGender}，${resolvedAge}，${resolvedEthnicity}，${resolvedDescription}。要求：全身完整入画，采用自然站姿或轻微 3/4 侧身，不要僵硬证件照正立；强化独特身体轮廓、发型边缘、服装层次、面料材质对比、标志性配饰、局部磨损/年代细节和角色气质差异；干净中性背景，柔和电影感布光，画面中只出现这一位角色，不要多角色、不要文字、不要剧情动作、不要肢体裁切。`;
+  return `单人角色设定参考图，${trimmedName}，${resolvedGender}，${resolvedAge}，${resolvedEthnicity}，${resolvedDescription}。要求：全身完整入画，采用自然站姿或轻微 3/4 侧身，不要僵硬证件照正立；眼神自然看向画外侧前方、轻微下方或远处虚拟参照点，不要正视镜头、不要与观众对视；强化独特身体轮廓、发型边缘、服装层次、面料材质对比、标志性配饰、局部磨损/年代细节和角色气质差异；干净中性背景，柔和电影感布光，画面中只出现这一位角色，不要多角色、不要文字、不要剧情动作、不要肢体裁切。`;
 }
 
 function buildSceneAssetWorkflowPrompt(sceneName: string, prompt: string): string {
@@ -1148,11 +1150,41 @@ function buildVideoSingleTakeGuardPrompt(): string {
   ].join('\n');
 }
 
-function buildVideoContinuityPrompt(): string {
+function allowsDirectCameraGaze(shot: Project['storyboard'][number]): boolean {
+  const haystack = [
+    shot.title,
+    shot.purpose,
+    shot.dialogue,
+    shot.voiceover,
+    shot.camera,
+    shot.composition,
+    shot.transitionHint,
+    shot.firstFramePrompt,
+    shot.lastFramePrompt,
+    shot.videoPrompt,
+    shot.backgroundSoundPrompt,
+    shot.speechPrompt
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return DIRECT_CAMERA_GAZE_PATTERN.test(haystack);
+}
+
+function buildOffAxisGazeConstraintPrompt(shot: Project['storyboard'][number]): string {
+  if (allowsDirectCameraGaze(shot)) {
+    return '- 当前镜头文本已经明确包含主观视角/对镜表达/直视观众需求时，允许角色看向镜头；但也只能让被明确指定的主体执行对镜视线，其他人物仍应看向对手、道具、画外空间或运动方向。';
+  }
+
+  return '- 离轴视线硬约束：人物面部朝向和眼神默认不要沿镜头光轴正对观众，优先保持约 15°-45° 的侧向离轴注视，让视线落在对话对象、手中道具、动作目标、行进方向、画外左/右侧空间或远处环境锚点；如果是单人独处镜头且没有明确互动对象，就默认看向画外侧前方、窗外/门外/走廊深处等环境锚点，或低头看向手中物件。禁止默认直视镜头、正对屏幕、与观众对视，也不要只写“看向前方”。';
+}
+
+function buildVideoContinuityPrompt(shot: Project['storyboard'][number]): string {
   return [
     '连贯性要求：',
     '- 镜头内部优先通过人物走位、视线变化、前后景层次和轻微运镜推进节奏，不要频繁跳变构图或突然切到另一个状态。',
     '- 人物眼神和头部朝向必须由当前对话对象、动作目标、道具位置、画外空间或运动方向驱动；除非镜头明确要求主观凝视、对镜交流或压迫性直视镜头，否则不要让所有人物都默认面朝屏幕或一直盯着镜头。',
+    buildOffAxisGazeConstraintPrompt(shot),
     '- 表演与动作要连续自然，保留细微停顿、呼吸感和余韵，避免生硬跳切感。',
     '- 必须严格承接首帧输入图里的角色位置、服装、道具、光线方向和空间关系，不要重新起镜或换一套画面状态。'
   ].join('\n');
@@ -1300,13 +1332,17 @@ function appendReferenceContext(prompt: string, referenceContext: string): strin
 
 type ReferenceFrameKind = ShotReferenceFrameKind;
 
-function buildReferenceFrameGazePrompt(frameKind: ReferenceFrameKind): string {
+function buildReferenceFrameGazePrompt(
+  shot: Project['storyboard'][number],
+  frameKind: ReferenceFrameKind
+): string {
   const gazeTargetRule =
     '视线必须根据当前人物关系、说话对象、动作目标、道具方位、画外空间和运动方向来设计；除非镜头明确要求主观视角、对镜独白或正面压迫感，否则不要默认所有角色都面朝镜头、直视屏幕或统一看向画面正中央。';
+  const offAxisRule = buildOffAxisGazeConstraintPrompt(shot);
 
   return frameKind === 'start'
-    ? `人物眼神要求：如画面中出现人物，必须明确主要人物在镜头开始瞬间的眼神方向、注视对象和眼神状态，写清是在看谁、看向哪里，以及这种眼神传达出的情绪与心理张力；不要只写“看向前方”或只写表情。${gazeTargetRule}`
-    : `人物眼神要求：如画面中出现人物，必须明确主要人物在镜头结束瞬间的眼神方向、注视对象和眼神状态，写清是在看谁、看向哪里，以及这种眼神传达出的情绪与心理张力；不要只写“看向前方”或只写表情。${gazeTargetRule}`;
+    ? `人物眼神要求：如画面中出现人物，必须明确主要人物在镜头开始瞬间的眼神方向、注视对象和眼神状态，写清是在看谁、看向哪里，以及这种眼神传达出的情绪与心理张力；不要只写“看向前方”或只写表情。${gazeTargetRule}\n${offAxisRule}`
+    : `人物眼神要求：如画面中出现人物，必须明确主要人物在镜头结束瞬间的眼神方向、注视对象和眼神状态，写清是在看谁、看向哪里，以及这种眼神传达出的情绪与心理张力；不要只写“看向前方”或只写表情。${gazeTargetRule}\n${offAxisRule}`;
 }
 
 function buildReferenceFrameShotDirectivePrompt(
@@ -1397,7 +1433,7 @@ function buildReferenceFrameWorkflowPrompt(
   const cinematicProfilePrompt = buildReferenceFrameCinematicProfilePrompt(project);
 
   if (workflow === 'text_to_image') {
-    return [basePrompt, cinematicProfilePrompt, buildReferenceFrameGazePrompt(frameKind)]
+    return [basePrompt, cinematicProfilePrompt, buildReferenceFrameGazePrompt(shot, frameKind)]
       .filter(Boolean)
       .join('\n\n');
   }
@@ -1407,7 +1443,7 @@ function buildReferenceFrameWorkflowPrompt(
     buildReferenceFrameShotDirectivePrompt(shot, frameKind),
     basePrompt,
     cinematicProfilePrompt,
-    buildReferenceFrameGazePrompt(frameKind),
+    buildReferenceFrameGazePrompt(shot, frameKind),
     characterPrompt,
     buildReferenceFrameQualityPrompt(workflow, frameKind),
     frameKind === 'start'
@@ -1448,7 +1484,7 @@ function buildMergedVideoPrompt(
     buildVideoShotDirectivePromptWithDuration(shot, options.durationSeconds ?? shot.durationSeconds),
     videoPrompt,
     buildVideoSingleTakeGuardPrompt(),
-    buildVideoContinuityPrompt(),
+    buildVideoContinuityPrompt(shot),
     buildVideoQualityGuardPrompt(hasDialogueContent)
   ];
 
@@ -1546,7 +1582,12 @@ function getVideoWorkflowPrompt(
   const optimizedVideoPromptOnly = getOptimizedVideoPromptOnly(project, options.baseVideoPrompt);
 
   if (optimizedVideoPromptOnly) {
-    return optimizedVideoPromptOnly;
+    return sanitizeVideoPromptText(
+      appendTransitionHint(
+        [optimizedVideoPromptOnly, buildOffAxisGazeConstraintPrompt(shot)].filter(Boolean).join('\n\n'),
+        shot
+      )
+    );
   }
 
   return sanitizeVideoPromptText(
@@ -1561,16 +1602,24 @@ function getVideoWorkflowPrompt(
   );
 }
 
-function buildVideoNegativePrompt(baseNegativePrompt: string): string {
-  const extraNegativePrompt =
+function buildVideoNegativePrompt(baseNegativePrompt: string, allowDirectCameraGaze = false): string {
+  const baseExtraNegativePrompt =
     'subtitle, text overlay, logo, identity drift, face drift, temporal inconsistency, flickering, duplicate person, extra limbs, wrong mouth movement, camera cut, shot change, jump cut, cutaway, montage, split screen, flashback';
+  const gazeNegativePrompt = allowDirectCameraGaze
+    ? ''
+    : 'looking at camera, looking into camera, staring at viewer, direct eye contact, facing camera, front-facing to camera';
+  const extraNegativePrompt = [baseExtraNegativePrompt, gazeNegativePrompt].filter(Boolean).join(', ');
 
   return baseNegativePrompt.trim() ? `${baseNegativePrompt}, ${extraNegativePrompt}` : extraNegativePrompt;
 }
 
-function buildImageNegativePrompt(baseNegativePrompt: string): string {
-  const extraNegativePrompt =
+function buildImageNegativePrompt(baseNegativePrompt: string, allowDirectCameraGaze = false): string {
+  const baseExtraNegativePrompt =
     'low quality, blurry, soft focus, out of frame, duplicate person, extra limbs, extra fingers, missing fingers, bad anatomy, asymmetrical eyes, deformed face, waxy skin, broken hands, fused fingers, bad perspective, collage, split screen, storyboard sheet, concept art page, sketch, text, subtitle, watermark, logo';
+  const gazeNegativePrompt = allowDirectCameraGaze
+    ? ''
+    : 'looking at camera, looking into camera, staring at viewer, direct eye contact, front-facing portrait, mugshot, ID photo';
+  const extraNegativePrompt = [baseExtraNegativePrompt, gazeNegativePrompt].filter(Boolean).join(', ');
 
   return baseNegativePrompt.trim() ? `${baseNegativePrompt}, ${extraNegativePrompt}` : extraNegativePrompt;
 }
@@ -2264,8 +2313,8 @@ function buildComfyVariables(
   );
   const negativePrompt =
     workflow === 'image_to_video'
-      ? buildVideoNegativePrompt(project.settings.negativePrompt)
-      : buildImageNegativePrompt(project.settings.negativePrompt);
+      ? buildVideoNegativePrompt(project.settings.negativePrompt, allowsDirectCameraGaze(shot))
+      : buildImageNegativePrompt(project.settings.negativePrompt, allowsDirectCameraGaze(shot));
 
   return {
     prompt:
@@ -3115,7 +3164,7 @@ async function generateReferenceAssetForProject(
         resolvedWorkflowPath,
         {
           prompt: workflowPrompt,
-          negative_prompt: project.settings.negativePrompt,
+          negative_prompt: buildImageNegativePrompt(project.settings.negativePrompt),
           output_prefix: `${project.id}_${kind}_${itemId}_reference`,
           image_width: resolvedImageDimensions.imageWidth,
           image_height: resolvedImageDimensions.imageHeight,

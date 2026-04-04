@@ -660,20 +660,20 @@ const STORY_LENGTH_REFERENCE = {
   short: {
     defaultShotDurationSeconds: 4,
     defaultSceneDurationSeconds: 15,
-    storyboardSplitReferenceSeconds: 6,
-    preferredLongShotDurationSeconds: 5
+    storyboardSplitReferenceSeconds: 4,
+    preferredLongShotDurationSeconds: 4
   },
   medium: {
     defaultShotDurationSeconds: 5,
     defaultSceneDurationSeconds: 45,
-    storyboardSplitReferenceSeconds: 8,
-    preferredLongShotDurationSeconds: 6
+    storyboardSplitReferenceSeconds: 5,
+    preferredLongShotDurationSeconds: 5
   },
   long: {
     defaultShotDurationSeconds: 6,
     defaultSceneDurationSeconds: 90,
-    storyboardSplitReferenceSeconds: 10,
-    preferredLongShotDurationSeconds: 7
+    storyboardSplitReferenceSeconds: 6,
+    preferredLongShotDurationSeconds: 6
   }
 } satisfies Record<
   StoryLength,
