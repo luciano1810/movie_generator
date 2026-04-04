@@ -2899,37 +2899,104 @@ export function App() {
             </div>
           </div>
         ) : null}
-        {item.referenceImage ? (
-          <div className="reference-preview">
-            <img src={assetUrl(item.referenceImage.relativePath)} alt={`${item.name} 上传参考图`} />
-            <a href={assetUrl(item.referenceImage.relativePath)} target="_blank" rel="noreferrer">
-              打开上传参考图
-            </a>
-            <button
-              className="button ghost mini-button"
-              disabled={
-                Boolean(project.runState.isRunning) ||
-                item.status === 'running' ||
-                pending === `reference-remove:${kind}:${item.id}`
-              }
-              onClick={() => void handleRemoveReferenceImage(kind, item)}
-              type="button"
-            >
-              {pending === `reference-remove:${kind}:${item.id}` ? '移除中...' : '移除参考图'}
-            </button>
+        <div className="asset-stack reference-asset-stack">
+          <div className="asset-box">
+            <span>上传参考图</span>
+            <div className="asset-preview-frame">
+              {item.referenceImage ? (
+                <img src={assetUrl(item.referenceImage.relativePath)} alt={`${item.name} 上传参考图`} />
+              ) : (
+                <div className="asset-preview-placeholder">
+                  <small>{kind === 'character' ? '未上传人物参考图，将按角色名和文本特征直接生成。' : '未上传参考图，将按 Prompt 直接生成。'}</small>
+                </div>
+              )}
+            </div>
+            {item.referenceImage ? (
+              <>
+                <a href={assetUrl(item.referenceImage.relativePath)} target="_blank" rel="noreferrer">
+                  打开上传参考图
+                </a>
+                <button
+                  className="button ghost mini-button"
+                  disabled={
+                    Boolean(project.runState.isRunning) ||
+                    item.status === 'running' ||
+                    pending === `reference-remove:${kind}:${item.id}`
+                  }
+                  onClick={() => void handleRemoveReferenceImage(kind, item)}
+                  type="button"
+                >
+                  {pending === `reference-remove:${kind}:${item.id}` ? '移除中...' : '移除参考图'}
+                </button>
+              </>
+            ) : null}
+            <small>
+              {item.referenceImage
+                ? kind === 'character'
+                  ? '已上传参考图，生成成功后会自动清除这张临时参考图。'
+                  : '已上传参考图，生成按钮会按“参考图 + Prompt”处理。'
+                : kind === 'character'
+                  ? '未上传时会把角色名、人种/族裔提示和人物特点一起拼入生成 Prompt。'
+                  : '未上传时会仅使用文本 Prompt 生成资产图。'}
+            </small>
           </div>
-        ) : null}
-        {item.referenceImage ? (
-          <p className="settings-hint">
-            {kind === 'character'
-              ? '已上传参考图；角色参考图会按用户上传参考图生成，成功后会自动清除这张临时参考图。继续上传即可更换。'
-              : '已上传参考图；生成按钮会自动按“参考图 + Prompt”处理，成功后会自动清除这张临时参考图。继续上传即可更换。'}
-          </p>
-        ) : kind === 'character' ? (
-          <p className="settings-hint">
-            未上传人物参考图时，角色参考图会自动把“角色名 + 人种/族裔提示 + 人物特点”拼进实际生成 Prompt；这里的人物特点 Prompt 也会并入后续视频生成提示词。
-          </p>
-        ) : null}
+          <div className="asset-box">
+            <span>生成资产版本</span>
+            <div className="asset-preview-frame">
+              {selectedAsset ? (
+                <img src={assetUrl(selectedAsset.relativePath)} alt={item.name} />
+              ) : (
+                <div className="asset-preview-placeholder">
+                  <small>当前还没有已生成资产</small>
+                </div>
+              )}
+            </div>
+            {selectedAsset ? (
+              <>
+                <a href={assetUrl(selectedAsset.relativePath)} target="_blank" rel="noreferrer">
+                  打开生成资产
+                </a>
+                {assetVersions.length > 1 ? (
+                  <div className="inline-actions">
+                    <button
+                      className="button ghost mini-button"
+                      disabled={selectedAssetIndex <= 0}
+                      onClick={() =>
+                        setReferenceAssetVersionIndices((current) => ({
+                          ...current,
+                          [key]: Math.max(0, selectedAssetIndex - 1)
+                        }))
+                      }
+                      type="button"
+                    >
+                      较新
+                    </button>
+                    <button
+                      className="button ghost mini-button"
+                      disabled={selectedAssetIndex >= assetVersions.length - 1}
+                      onClick={() =>
+                        setReferenceAssetVersionIndices((current) => ({
+                          ...current,
+                          [key]: Math.min(assetVersions.length - 1, selectedAssetIndex + 1)
+                        }))
+                      }
+                      type="button"
+                    >
+                      较旧
+                    </button>
+                    <small className="version-indicator">
+                      {selectedAssetIndex + 1}/{assetVersions.length} · {formatTime(selectedAsset.createdAt)}
+                    </small>
+                  </div>
+                ) : (
+                  <small>{`生成于 ${formatTime(selectedAsset.createdAt)}`}</small>
+                )}
+              </>
+            ) : (
+              <small>生成后会在这里固定占位展示，和左侧上传参考图等高对齐。</small>
+            )}
+          </div>
+        </div>
         {kind === 'character' && item.referenceAudio ? (
           <div className="reference-preview">
             <audio src={assetUrl(item.referenceAudio.relativePath)} controls preload="none" />
@@ -2958,47 +3025,6 @@ export function App() {
           </p>
         ) : null}
         {item.error ? <div className="error-box">{item.error}</div> : null}
-        {selectedAsset ? (
-          <div className="reference-preview">
-            <img src={assetUrl(selectedAsset.relativePath)} alt={item.name} />
-            <a href={assetUrl(selectedAsset.relativePath)} target="_blank" rel="noreferrer">
-              打开生成资产
-            </a>
-            {assetVersions.length > 1 ? (
-              <div className="inline-actions">
-                <button
-                  className="button ghost mini-button"
-                  disabled={selectedAssetIndex <= 0}
-                  onClick={() =>
-                    setReferenceAssetVersionIndices((current) => ({
-                      ...current,
-                      [key]: Math.max(0, selectedAssetIndex - 1)
-                    }))
-                  }
-                  type="button"
-                >
-                  较新
-                </button>
-                <button
-                  className="button ghost mini-button"
-                  disabled={selectedAssetIndex >= assetVersions.length - 1}
-                  onClick={() =>
-                    setReferenceAssetVersionIndices((current) => ({
-                      ...current,
-                      [key]: Math.min(assetVersions.length - 1, selectedAssetIndex + 1)
-                    }))
-                  }
-                  type="button"
-                >
-                  较旧
-                </button>
-                <small className="version-indicator">
-                  {selectedAssetIndex + 1}/{assetVersions.length} · {formatTime(selectedAsset.createdAt)}
-                </small>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
         <button
           className="button secondary"
           disabled={
@@ -3173,7 +3199,7 @@ export function App() {
             </div>
             {availableAssets.length ? (
               <>
-                  <ReferenceLibraryPicker
+                <ReferenceLibraryPicker
                   assets={availableAssets}
                   disabled={Boolean(currentProject.runState.isRunning) || addPending}
                   selectedValue={selectionValue}
@@ -3330,12 +3356,20 @@ export function App() {
               : '当前镜头未启用长镜头尾帧承接。'}
           </p>
         </div>
-        <div className="asset-stack">
+        <div className={`asset-stack ${showTailFramePanel ? '' : 'single-asset-stack'}`}>
           <div className="asset-box">
             <span>起始参考帧版本</span>
+            <div className="asset-preview-frame">
+              {selectedImage ? (
+                <img src={assetUrl(selectedImage.relativePath)} alt={shot.title} />
+              ) : (
+                <div className="asset-preview-placeholder">
+                  <small>当前镜头还没有起始参考帧图片。</small>
+                </div>
+              )}
+            </div>
             {selectedImage ? (
               <>
-                <img src={assetUrl(selectedImage.relativePath)} alt={shot.title} />
                 <a href={assetUrl(selectedImage.relativePath)} target="_blank" rel="noreferrer">
                   打开原图
                 </a>
@@ -3383,16 +3417,24 @@ export function App() {
                   </button>
                 ) : null}
               </>
-            ) : (
-              <small>当前镜头还没有起始参考帧图片。</small>
-            )}
+            ) : null}
           </div>
           {showTailFramePanel ? (
             <div className="asset-box">
               <span>结束参考帧</span>
+              <div className="asset-preview-frame">
+                {lastImageAsset ? (
+                  <img src={assetUrl(lastImageAsset.relativePath)} alt={`${shot.title} 尾帧`} />
+                ) : (
+                  <div className="asset-preview-placeholder">
+                    <small>
+                      {supportsLastFrameGeneration ? '当前镜头还没有结束参考帧图片。' : '当前镜头暂不需要独立结束参考帧。'}
+                    </small>
+                  </div>
+                )}
+              </div>
               {lastImageAsset ? (
                 <>
-                  <img src={assetUrl(lastImageAsset.relativePath)} alt={`${shot.title} 尾帧`} />
                   <a href={assetUrl(lastImageAsset.relativePath)} target="_blank" rel="noreferrer">
                     打开尾帧
                   </a>
@@ -3402,11 +3444,7 @@ export function App() {
                       : `生成于 ${formatTime(lastImageAsset.createdAt)}`}
                   </small>
                 </>
-              ) : (
-                <small>
-                  {supportsLastFrameGeneration ? '当前镜头还没有结束参考帧图片。' : '当前镜头暂不需要独立结束参考帧。'}
-                </small>
-              )}
+              ) : null}
               {supportsLastFrameGeneration ? (
                 <button
                   className="button ghost mini-button"
@@ -3706,22 +3744,34 @@ export function App() {
         <div className="asset-stack">
           <div className="asset-box">
             <span>输入图片</span>
-            {imageAsset ? (
-              <>
+            <div className="asset-preview-frame">
+              {imageAsset ? (
                 <img src={assetUrl(imageAsset.relativePath)} alt={shot.title} />
-                <a href={assetUrl(imageAsset.relativePath)} target="_blank" rel="noreferrer">
-                  打开原图
-                </a>
-              </>
-            ) : (
-              <small>{longTakeContinuation ? '当前镜头会复用上一镜头视频尾帧作为输入首帧。' : '未生成'}</small>
-            )}
+              ) : (
+                <div className="asset-preview-placeholder">
+                  <small>{longTakeContinuation ? '当前镜头会复用上一镜头视频尾帧作为输入首帧。' : '未生成'}</small>
+                </div>
+              )}
+            </div>
+            {imageAsset ? (
+              <a href={assetUrl(imageAsset.relativePath)} target="_blank" rel="noreferrer">
+                打开原图
+              </a>
+            ) : null}
           </div>
           <div className="asset-box">
             <span>视频片段</span>
+            <div className="asset-preview-frame">
+              {selectedVideo ? (
+                <video src={assetUrl(selectedVideo.relativePath)} controls playsInline />
+              ) : (
+                <div className="asset-preview-placeholder">
+                  <small>未生成</small>
+                </div>
+              )}
+            </div>
             {selectedVideo ? (
               <>
-                <video src={assetUrl(selectedVideo.relativePath)} controls playsInline />
                 <a href={assetUrl(selectedVideo.relativePath)} target="_blank" rel="noreferrer">
                   打开片段
                 </a>
@@ -3782,9 +3832,7 @@ export function App() {
                   </button>
                 ) : null}
               </>
-            ) : (
-              <small>未生成</small>
-            )}
+            ) : null}
           </div>
         </div>
         <button
@@ -3900,17 +3948,19 @@ export function App() {
             <small>{formatTime(asset.createdAt)}</small>
           </div>
         </div>
-        {asset.kind === 'image' ? (
-          <img className="library-detail-preview media-preview" src={assetUrl(asset.relativePath)} alt={asset.projectTitle} />
-        ) : (
-          <video
-            className="library-detail-preview media-preview"
-            src={assetUrl(asset.relativePath)}
-            controls
-            playsInline
-            preload="metadata"
-          />
-        )}
+        <div className="asset-preview-frame library-detail-preview-frame">
+          {asset.kind === 'image' ? (
+            <img className="library-detail-preview media-preview" src={assetUrl(asset.relativePath)} alt={asset.projectTitle} />
+          ) : (
+            <video
+              className="library-detail-preview media-preview"
+              src={assetUrl(asset.relativePath)}
+              controls
+              playsInline
+              preload="metadata"
+            />
+          )}
+        </div>
         <dl className="shot-meta library-detail-meta">
           <div>
             <dt>来源项目</dt>
@@ -3974,7 +4024,9 @@ export function App() {
             <small>{formatTime(asset.createdAt)}</small>
           </div>
         </div>
-        <img className="library-detail-preview media-preview" src={assetUrl(asset.relativePath)} alt={asset.name} />
+        <div className="asset-preview-frame library-detail-preview-frame">
+          <img className="library-detail-preview media-preview" src={assetUrl(asset.relativePath)} alt={asset.name} />
+        </div>
         <dl className="shot-meta library-detail-meta">
           <div>
             <dt>来源项目</dt>
@@ -4717,7 +4769,14 @@ export function App() {
                     </div>
                     {project.assets.finalVideo ? (
                       <div className="final-video">
-                        <video className="final-video-preview" src={assetUrl(project.assets.finalVideo.relativePath)} controls playsInline />
+                        <div className="asset-preview-frame final-video-frame">
+                          <video
+                            className="final-video-preview"
+                            src={assetUrl(project.assets.finalVideo.relativePath)}
+                            controls
+                            playsInline
+                          />
+                        </div>
                         <div className="final-video-actions">
                           <a className="button secondary button-link" href={finalVideoDownloadUrl(project.id)}>
                             下载视频
