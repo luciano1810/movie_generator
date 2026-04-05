@@ -52,7 +52,7 @@ const VIDEO_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
   '# Input/Output Constraints',
   '- English Only: 所有视觉、动作、环境描述必须使用高水准的好莱坞剧本级英语。',
   '- Keep Chinese: 只有对白必须保留原始中文，严禁翻译成英文。',
-  '- Sentence Count: 保持在 5-10 句之间，构建一个从静到动的完整电影图景。',
+  '- Sentence Count: 保持在 8-16 句之间，按“起幅锚定 -> 动作推进 -> 微表演/物理反馈 -> 台词/声音 -> 收束落幅”充分展开；可以写成长段落，但不要压缩成过短摘要。',
   '- Output Format: 直接输出一段连贯的英文段落（插入中文台词），不要标题，不要解释。',
   '',
   '# The Formula',
@@ -1538,7 +1538,7 @@ function getStoryboardPlanGenerationMaxTokens(minimumShots: number): number {
 }
 
 function getStoryboardShotGenerationMaxTokens(): number {
-  return 5_000;
+  return 8_000;
 }
 
 function getScriptGenerationMaxTokens(settings: ProjectSettings): number {
@@ -1814,12 +1814,6 @@ interface StoryboardDialogueSequenceShotContext {
   shot: StoryboardDialogueSequenceShotBrief;
 }
 
-interface StoryboardSceneCoverageIssue {
-  sceneNumber: number;
-  currentShots: number;
-  minimumShots: number;
-}
-
 interface StoryboardPlanGeneratedEvent {
   planShots: StoryboardPlanShot[];
   totalShots: number;
@@ -1850,33 +1844,46 @@ interface StoryboardGenerationOptions {
   onShotGenerated?: (event: StoryboardShotGeneratedEvent) => Promise<void> | void;
 }
 
-function getStoryboardSceneCoverageIssues(
-  script: ScriptPackage,
-  shots: Array<Pick<StoryboardShot, 'sceneNumber'>>,
-  settings: ProjectSettings
-): StoryboardSceneCoverageIssue[] {
-  const shotCountByScene = new Map<number, number>();
+interface StoryboardReferenceAssetReviewShotAssignmentPayload {
+  sceneNumber?: number;
+  shotNumber?: number;
+  referenceAssetIds?: string[];
+}
 
-  for (const shot of shots) {
-    shotCountByScene.set(shot.sceneNumber, (shotCountByScene.get(shot.sceneNumber) ?? 0) + 1);
-  }
+interface StoryboardReferenceAssetReviewCharacterPayload {
+  tempId?: string;
+  name?: string;
+  summary?: string;
+  genderHint?: string;
+  ageHint?: string;
+  ethnicityHint?: string;
+  generationPrompt?: string;
+}
 
-  return script.scenes
-    .map((scene) => {
-      const currentShots = shotCountByScene.get(scene.sceneNumber) ?? 0;
-      const minimumShots = getMinimumShotsForScene(scene, settings);
+interface StoryboardReferenceAssetReviewVisualPayload {
+  tempId?: string;
+  name?: string;
+  summary?: string;
+  generationPrompt?: string;
+}
 
-      if (currentShots >= minimumShots) {
-        return null;
-      }
+interface StoryboardReferenceAssetReviewPayload {
+  shotAssignments?: StoryboardReferenceAssetReviewShotAssignmentPayload[];
+  newAssets?: {
+    characters?: StoryboardReferenceAssetReviewCharacterPayload[];
+    scenes?: StoryboardReferenceAssetReviewVisualPayload[];
+    objects?: StoryboardReferenceAssetReviewVisualPayload[];
+  };
+}
 
-      return {
-        sceneNumber: scene.sceneNumber,
-        currentShots,
-        minimumShots
-      };
-    })
-    .filter((issue): issue is StoryboardSceneCoverageIssue => issue !== null);
+export interface StoryboardReferenceAssetReviewResult {
+  storyboard: StoryboardShot[];
+  referenceLibrary: ProjectReferenceLibrary;
+  addedReferenceAssetCount: number;
+  addedCharacterCount: number;
+  addedSceneCount: number;
+  addedObjectCount: number;
+  reassignedShotCount: number;
 }
 
 function validateStoryboardAgainstScript(
@@ -1896,19 +1903,10 @@ function validateStoryboardAgainstScript(
   const generatedSceneNumbers = new Set(shots.map((shot) => shot.sceneNumber));
   const missingScenes = expectedSceneNumbers.filter((sceneNumber) => !generatedSceneNumbers.has(sceneNumber));
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
-  const sceneCoverageIssues = getStoryboardSceneCoverageIssues(script, shots, settings);
   const issues: string[] = [];
 
   if (missingScenes.length) {
     issues.push(`必须覆盖全部场景，当前缺少 sceneNumber: ${missingScenes.join(', ')}`);
-  }
-
-  if (sceneCoverageIssues.length) {
-    issues.push(
-      `以下场景镜头数过少：${sceneCoverageIssues
-        .map((issue) => `scene ${issue.sceneNumber} 当前 ${issue.currentShots} 个，至少需要 ${issue.minimumShots} 个`)
-        .join('；')}`
-    );
   }
 
   const overlongShots = shots
@@ -2164,19 +2162,10 @@ function validateStoryboardPlanAgainstScript(
   const generatedSceneNumbers = new Set(shots.map((shot) => shot.sceneNumber));
   const missingScenes = expectedSceneNumbers.filter((sceneNumber) => !generatedSceneNumbers.has(sceneNumber));
   const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
-  const sceneCoverageIssues = getStoryboardSceneCoverageIssues(script, shots, settings);
   const issues: string[] = [];
 
   if (missingScenes.length) {
     issues.push(`必须覆盖全部场景，当前缺少 sceneNumber: ${missingScenes.join(', ')}`);
-  }
-
-  if (sceneCoverageIssues.length) {
-    issues.push(
-      `以下场景镜头数低于推荐下限：${sceneCoverageIssues
-        .map((issue) => `scene ${issue.sceneNumber} 当前 ${issue.currentShots} 个，至少需要 ${issue.minimumShots} 个`)
-        .join('；')}`
-    );
   }
 
   if (typeof declaredTotalShots === 'number' && declaredTotalShots !== shots.length) {
@@ -3635,4 +3624,543 @@ export async function generateStoryboardFromScript(
   }
 
   return storyboard;
+}
+
+function normalizeReferenceAssetReviewIdentityText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\s"'`“”‘’「」『』（）()【】[\]{}<>《》，,。.!！？?；;：:/\\|_-]+/g, '')
+    .trim();
+}
+
+function getStoryboardReferenceAssetReviewMaxTokens(storyboard: StoryboardShot[]): number {
+  return Math.min(32_000, Math.max(8_000, storyboard.length * 220 + 4_000));
+}
+
+function buildStoryboardReferenceAssetReviewShotContext(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[]
+): string {
+  const sceneHeadingMap = new Map(
+    script.scenes.map((scene) => [
+      scene.sceneNumber,
+      scene.sceneHeading || buildFallbackSceneHeading(scene.location, scene.timeOfDay)
+    ])
+  );
+
+  return storyboard
+    .map((shot) =>
+      [
+        `- 镜头: scene ${shot.sceneNumber} shot ${shot.shotNumber} | id: ${shot.id}`,
+        `  场景标头: ${sceneHeadingMap.get(shot.sceneNumber) ?? `场景 ${shot.sceneNumber}`}`,
+        `  标题/作用: ${shot.title} | ${shot.purpose}`,
+        `  景别构图: ${shot.camera} | ${shot.composition}`,
+        `  首帧画面: ${shot.firstFramePrompt}`,
+        `  视频动作: ${shot.videoPrompt}`,
+        shot.dialogue.trim() ? `  对白: ${shot.dialogue.trim()}` : '',
+        shot.voiceover.trim() ? `  旁白: ${shot.voiceover.trim()}` : '',
+        shot.referenceAssetIds.length ? `  当前资产: ${shot.referenceAssetIds.join(', ')}` : '  当前资产: 无'
+      ]
+        .filter(Boolean)
+        .join('\n')
+    )
+    .join('\n\n');
+}
+
+function buildStoryboardReferenceAssetReviewPrompt(
+  script: ScriptPackage,
+  settings: ProjectSettings,
+  storyboard: StoryboardShot[],
+  referenceLibrary: ProjectReferenceLibrary,
+  retryFeedback = ''
+): string {
+  const retryNotice = retryFeedback
+    ? `\n上一次输出存在以下问题，这次必须修正后再返回完整 JSON：\n${retryFeedback}\n`
+    : '';
+
+  return `请对“已生成全量分镜 + 当前资产库”做一次全局资产复盘，逐镜头决定应该复用哪些旧资产、应该新增哪些资产，并输出每个镜头最终要绑定的 referenceAssetIds。${retryNotice}
+
+复盘目标：
+1. 提高资产数量和视觉多样性，不要把大量不同机位/不同空间分区/不同时间光线/不同状态镜头都硬复用同一两个 scene/object 资产
+2. 对同一地点，如果镜头在主机位、空间分区、拍摄方向、纵深关系、时间段、天气、光线氛围、陈设状态上明显不同，而当前资产库没有对应母版，就新增 scene 变体资产；name 必须直接带视角/分区/时间/光线标记
+3. 对同一人物，如果镜头中存在明显服装造型、年龄阶段、伤妆、湿身、伪装、制服/礼服切换等外观状态变化，而当前资产库没有对应角色变体，就新增 character 变体资产；name 必须带年龄/造型/状态后缀
+4. 对关键道具、载具、屏幕设备、文件、标志物、配饰和高辨识度陈设，如果镜头里有重要构图/动作/状态变化且当前资产库没有对应道具资产，就新增 object 资产；完好/破损、亮屏/熄屏、展开/收纳、干净/沾血等状态不同要拆成独立资产
+5. 如果现有资产已经能准确覆盖某个镜头，就优先复用现有 id，不要为了“显得新增很多”而重复造同义资产；但如果现有 scene 资产只有单一宽泛母版，面对明显不同机位/分区/光线的镜头时必须主动补 scene 变体
+6. scene 资产必须是空镜环境设定图：无人物、无角色名字、无剧情动作、无事件瞬间，只描述可复用空间结构、材质、入口/动线/遮挡、前中后景层次、时间光线和氛围
+7. character 资产 prompt 只写稳定人物外观和身份特征，重点写年龄感、脸型五官、发型、体型、服装层次、材质、标志性配饰、轮廓差异、气质和常态表情，不要写镜头运动或具体剧情动作
+8. object 资产 prompt 重点写完整轮廓、材质、磨损/污渍/反光状态、摆放方式、尺寸感和可读角度，不要写成被角色手持动作中的剧情瞬间
+9. 每个镜头的 referenceAssetIds 可以混合使用“现有资产 id”和“本轮新增资产 tempId”；如果某个纯人物/纯道具特写不需要 scene 参考图，允许只绑定 character/object 资产，避免 scene 参考图过度锁死构图和光线；但只要镜头里确实有需要统一的角色、空间或关键道具，就不要漏配
+10. 新增资产 tempId 必须使用稳定短 id，建议 new-character-1 / new-scene-1 / new-object-1 这类格式；不要和现有资产 id 重名；如果新增资产与现有资产同名但视觉状态不同，必须在 name 和 tempId 里直接加变体后缀，不要复用旧名字伪装新资产
+11. 必须覆盖下方列出的每一个镜头，为每个镜头都输出一条 shotAssignments 记录；sceneNumber、shotNumber 必须和原分镜一致
+12. generationPrompt 必须适合直接用于 AI 生图，并统一符合项目视觉风格：${settings.visualStyle}
+13. 只输出 JSON，结构如下：
+{
+  "newAssets": {
+    "characters": [
+      {
+        "tempId": "new-character-1",
+        "name": "角色名（造型/状态变体）",
+        "summary": "该角色资产的外观和用途摘要",
+        "genderHint": "简短性别提示",
+        "ageHint": "简短年龄阶段提示",
+        "ethnicityHint": "简短人种/族裔提示",
+        "generationPrompt": "可直接生成人物参考图的详细外观提示词"
+      }
+    ],
+    "scenes": [
+      {
+        "tempId": "new-scene-1",
+        "name": "场景名-机位/分区/时间/光线变体",
+        "summary": "空间用途、分区、光线氛围摘要，不要写剧情动作",
+        "generationPrompt": "可直接生成空镜场景设定图的详细提示词"
+      }
+    ],
+    "objects": [
+      {
+        "tempId": "new-object-1",
+        "name": "物品名（状态变体）",
+        "summary": "道具外观、状态和用途摘要",
+        "generationPrompt": "可直接生成道具参考图的详细提示词"
+      }
+    ]
+  },
+  "shotAssignments": [
+    {
+      "sceneNumber": 1,
+      "shotNumber": 1,
+      "referenceAssetIds": ["现有资产ID 或 new-scene-1/new-character-1/new-object-1"]
+    }
+  ]
+}
+
+当前资产库：
+${buildStoryboardReferenceLibraryPrompt(referenceLibrary)}
+
+全量分镜：
+${buildStoryboardReferenceAssetReviewShotContext(script, storyboard)}`;
+}
+
+function cloneProjectReferenceLibrary(referenceLibrary: ProjectReferenceLibrary): ProjectReferenceLibrary {
+  return {
+    characters: [...referenceLibrary.characters],
+    scenes: [...referenceLibrary.scenes],
+    objects: [...referenceLibrary.objects]
+  };
+}
+
+function buildReferenceAssetSelectionIndex(
+  referenceLibrary: ProjectReferenceLibrary
+): {
+  availableSelectionIds: Set<string>;
+  selectionIdByItemId: Map<string, string>;
+} {
+  const availableSelectionIds = new Set<string>();
+  const selectionIdByItemId = new Map<string, string>();
+
+  for (const item of referenceLibrary.characters) {
+    const selectionId = buildStoryboardReferenceSelectionId('character', item.id);
+    availableSelectionIds.add(selectionId);
+    selectionIdByItemId.set(item.id, selectionId);
+  }
+
+  for (const item of referenceLibrary.scenes) {
+    const selectionId = buildStoryboardReferenceSelectionId('scene', item.id);
+    availableSelectionIds.add(selectionId);
+    selectionIdByItemId.set(item.id, selectionId);
+  }
+
+  for (const item of referenceLibrary.objects) {
+    const selectionId = buildStoryboardReferenceSelectionId('object', item.id);
+    availableSelectionIds.add(selectionId);
+    selectionIdByItemId.set(item.id, selectionId);
+  }
+
+  return {
+    availableSelectionIds,
+    selectionIdByItemId
+  };
+}
+
+function getReferenceAssetItemsByKind(
+  referenceLibrary: ProjectReferenceLibrary,
+  kind: ReferenceAssetKind
+): ReferenceAssetItem[] {
+  if (kind === 'character') {
+    return referenceLibrary.characters;
+  }
+
+  if (kind === 'scene') {
+    return referenceLibrary.scenes;
+  }
+
+  return referenceLibrary.objects;
+}
+
+function buildReferenceAssetIdentityMap(
+  referenceLibrary: ProjectReferenceLibrary,
+  kind: ReferenceAssetKind
+): Map<string, ReferenceAssetItem> {
+  const identityMap = new Map<string, ReferenceAssetItem>();
+
+  for (const item of getReferenceAssetItemsByKind(referenceLibrary, kind)) {
+    const key = normalizeReferenceAssetReviewIdentityText(item.name);
+    if (key && !identityMap.has(key)) {
+      identityMap.set(key, item);
+    }
+  }
+
+  return identityMap;
+}
+
+function createUniqueReferenceAssetItem(
+  kind: ReferenceAssetKind,
+  name: string,
+  summary: string,
+  generationPrompt: string,
+  referenceLibrary: ProjectReferenceLibrary,
+  usedReferenceItemIds: Set<string>,
+  options: {
+    ethnicityHint?: string;
+    genderHint?: string;
+    ageHint?: string;
+  } = {}
+): ReferenceAssetItem {
+  const existingCount = getReferenceAssetItemsByKind(referenceLibrary, kind).length;
+  let index = existingCount;
+  let item = createReferenceItem(
+    kind,
+    name,
+    summary,
+    generationPrompt,
+    index,
+    options.ethnicityHint ?? '',
+    options.genderHint ?? '',
+    options.ageHint ?? ''
+  );
+
+  while (usedReferenceItemIds.has(item.id)) {
+    index += 1;
+    item = createReferenceItem(
+      kind,
+      name,
+      summary,
+      generationPrompt,
+      index,
+      options.ethnicityHint ?? '',
+      options.genderHint ?? '',
+      options.ageHint ?? ''
+    );
+  }
+
+  usedReferenceItemIds.add(item.id);
+  return item;
+}
+
+function mergeStoryboardReferenceAssetReviewItems(
+  payload: StoryboardReferenceAssetReviewPayload,
+  referenceLibrary: ProjectReferenceLibrary,
+  settings: ProjectSettings
+): {
+  referenceLibrary: ProjectReferenceLibrary;
+  tempSelectionIdMap: Map<string, string>;
+  addedCharacterCount: number;
+  addedSceneCount: number;
+  addedObjectCount: number;
+} {
+  const mergedReferenceLibrary = cloneProjectReferenceLibrary(referenceLibrary);
+  const tempSelectionIdMap = new Map<string, string>();
+  const usedReferenceItemIds = new Set(
+    [
+      ...mergedReferenceLibrary.characters,
+      ...mergedReferenceLibrary.scenes,
+      ...mergedReferenceLibrary.objects
+    ].map((item) => item.id)
+  );
+  const characterIdentityMap = buildReferenceAssetIdentityMap(mergedReferenceLibrary, 'character');
+  const sceneIdentityMap = buildReferenceAssetIdentityMap(mergedReferenceLibrary, 'scene');
+  const objectIdentityMap = buildReferenceAssetIdentityMap(mergedReferenceLibrary, 'object');
+  let addedCharacterCount = 0;
+  let addedSceneCount = 0;
+  let addedObjectCount = 0;
+
+  for (const [index, item] of (payload.newAssets?.characters ?? []).entries()) {
+    const tempId = normalizeString(item.tempId, `new-character-${index + 1}`);
+    const name = normalizeString(item.name, `新增角色${index + 1}`);
+    const summary = normalizeString(item.summary, '新增角色资产');
+    const generationPrompt = normalizeString(
+      item.generationPrompt,
+      `${settings.visualStyle}，${name}，人物外观与服装特征稳定设定`
+    );
+    const identityKey = normalizeReferenceAssetReviewIdentityText(name);
+    const reusedItem = identityKey ? characterIdentityMap.get(identityKey) : undefined;
+
+    if (reusedItem) {
+      registerStoryboardReviewTempSelectionId(
+        tempSelectionIdMap,
+        'character',
+        tempId,
+        buildStoryboardReferenceSelectionId('character', reusedItem.id)
+      );
+      continue;
+    }
+
+    const createdItem = createUniqueReferenceAssetItem(
+      'character',
+      name,
+      summary,
+      generationPrompt,
+      mergedReferenceLibrary,
+      usedReferenceItemIds,
+      {
+        ethnicityHint: normalizeOptionalString(item.ethnicityHint),
+        genderHint: normalizeOptionalString(item.genderHint),
+        ageHint: normalizeOptionalString(item.ageHint)
+      }
+    );
+    mergedReferenceLibrary.characters.push(createdItem);
+    if (identityKey) {
+      characterIdentityMap.set(identityKey, createdItem);
+    }
+    registerStoryboardReviewTempSelectionId(
+      tempSelectionIdMap,
+      'character',
+      tempId,
+      buildStoryboardReferenceSelectionId('character', createdItem.id)
+    );
+    addedCharacterCount += 1;
+  }
+
+  for (const [index, item] of (payload.newAssets?.scenes ?? []).entries()) {
+    const tempId = normalizeString(item.tempId, `new-scene-${index + 1}`);
+    const name = normalizeString(item.name, `新增场景${index + 1}`);
+    const summary = normalizeString(item.summary, '新增场景资产');
+    const generationPrompt = normalizeSceneReferencePrompt(item.generationPrompt, settings, name);
+    const identityKey = normalizeReferenceAssetReviewIdentityText(name);
+    const reusedItem = identityKey ? sceneIdentityMap.get(identityKey) : undefined;
+
+    if (reusedItem) {
+      registerStoryboardReviewTempSelectionId(
+        tempSelectionIdMap,
+        'scene',
+        tempId,
+        buildStoryboardReferenceSelectionId('scene', reusedItem.id)
+      );
+      continue;
+    }
+
+    const createdItem = createUniqueReferenceAssetItem(
+      'scene',
+      name,
+      summary,
+      generationPrompt,
+      mergedReferenceLibrary,
+      usedReferenceItemIds
+    );
+    mergedReferenceLibrary.scenes.push(createdItem);
+    if (identityKey) {
+      sceneIdentityMap.set(identityKey, createdItem);
+    }
+    registerStoryboardReviewTempSelectionId(
+      tempSelectionIdMap,
+      'scene',
+      tempId,
+      buildStoryboardReferenceSelectionId('scene', createdItem.id)
+    );
+    addedSceneCount += 1;
+  }
+
+  for (const [index, item] of (payload.newAssets?.objects ?? []).entries()) {
+    const tempId = normalizeString(item.tempId, `new-object-${index + 1}`);
+    const name = normalizeString(item.name, `新增物品${index + 1}`);
+    const summary = normalizeString(item.summary, '新增物品资产');
+    const generationPrompt = normalizeString(item.generationPrompt, `${settings.visualStyle}，${name}，关键道具特写`);
+    const identityKey = normalizeReferenceAssetReviewIdentityText(name);
+    const reusedItem = identityKey ? objectIdentityMap.get(identityKey) : undefined;
+
+    if (reusedItem) {
+      registerStoryboardReviewTempSelectionId(
+        tempSelectionIdMap,
+        'object',
+        tempId,
+        buildStoryboardReferenceSelectionId('object', reusedItem.id)
+      );
+      continue;
+    }
+
+    const createdItem = createUniqueReferenceAssetItem(
+      'object',
+      name,
+      summary,
+      generationPrompt,
+      mergedReferenceLibrary,
+      usedReferenceItemIds
+    );
+    mergedReferenceLibrary.objects.push(createdItem);
+    if (identityKey) {
+      objectIdentityMap.set(identityKey, createdItem);
+    }
+    registerStoryboardReviewTempSelectionId(
+      tempSelectionIdMap,
+      'object',
+      tempId,
+      buildStoryboardReferenceSelectionId('object', createdItem.id)
+    );
+    addedObjectCount += 1;
+  }
+
+  return {
+    referenceLibrary: mergedReferenceLibrary,
+    tempSelectionIdMap,
+    addedCharacterCount,
+    addedSceneCount,
+    addedObjectCount
+  };
+}
+
+function registerStoryboardReviewTempSelectionId(
+  tempSelectionIdMap: Map<string, string>,
+  kind: ReferenceAssetKind,
+  tempId: string,
+  selectionId: string
+): void {
+  tempSelectionIdMap.set(tempId, selectionId);
+  tempSelectionIdMap.set(buildStoryboardReferenceSelectionId(kind, tempId), selectionId);
+}
+
+function resolveStoryboardReferenceAssetReviewSelectionIds(
+  value: unknown,
+  availableSelectionIds: Set<string>,
+  selectionIdByItemId: Map<string, string>,
+  tempSelectionIdMap: Map<string, string>
+): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const resolved = value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      if (availableSelectionIds.has(item)) {
+        return item;
+      }
+
+      return tempSelectionIdMap.get(item) ?? selectionIdByItemId.get(item) ?? '';
+    })
+    .filter(Boolean);
+
+  return [...new Set(resolved)];
+}
+
+function applyStoryboardReferenceAssetReviewAssignments(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[],
+  referenceLibrary: ProjectReferenceLibrary,
+  payload: StoryboardReferenceAssetReviewPayload,
+  tempSelectionIdMap: Map<string, string>
+): {
+  storyboard: StoryboardShot[];
+  reassignedShotCount: number;
+} {
+  const assignmentMap = new Map<string, StoryboardReferenceAssetReviewShotAssignmentPayload>();
+  for (const assignment of payload.shotAssignments ?? []) {
+    const sceneNumber = normalizePositiveInteger(assignment.sceneNumber, 0);
+    const shotNumber = normalizePositiveInteger(assignment.shotNumber, 0);
+    if (sceneNumber > 0 && shotNumber > 0) {
+      assignmentMap.set(`${sceneNumber}:${shotNumber}`, assignment);
+    }
+  }
+
+  const { availableSelectionIds, selectionIdByItemId } = buildReferenceAssetSelectionIndex(referenceLibrary);
+  let reassignedShotCount = 0;
+
+  const updatedStoryboard = storyboard.map((shot) => {
+    const assignment = assignmentMap.get(`${shot.sceneNumber}:${shot.shotNumber}`);
+    const nextReferenceAssetIds = resolveStoryboardReferenceAssetReviewSelectionIds(
+      assignment?.referenceAssetIds ?? shot.referenceAssetIds,
+      availableSelectionIds,
+      selectionIdByItemId,
+      tempSelectionIdMap
+    );
+    const nextShot = applyStoryboardReferenceAssetFallback(
+      {
+        ...shot,
+        referenceAssetIds: nextReferenceAssetIds
+      },
+      script,
+      referenceLibrary
+    );
+
+    if (nextShot.referenceAssetIds.join('|') !== shot.referenceAssetIds.join('|')) {
+      reassignedShotCount += 1;
+    }
+
+    return nextShot;
+  });
+
+  return {
+    storyboard: updatedStoryboard,
+    reassignedShotCount
+  };
+}
+
+export async function reviewStoryboardReferenceAssets(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[],
+  referenceLibrary: ProjectReferenceLibrary,
+  settings: ProjectSettings,
+  options?: {
+    signal?: AbortSignal;
+  }
+): Promise<StoryboardReferenceAssetReviewResult> {
+  if (!storyboard.length) {
+    return {
+      storyboard,
+      referenceLibrary,
+      addedReferenceAssetCount: 0,
+      addedCharacterCount: 0,
+      addedSceneCount: 0,
+      addedObjectCount: 0,
+      reassignedShotCount: 0
+    };
+  }
+
+  const payload = await requestJson<StoryboardReferenceAssetReviewPayload>(
+    [
+      {
+        role: 'system',
+        content:
+          '你是一名影视资产统筹、美术设定导演和分镜连续性审核员。请通看全量分镜和现有资产库，决定每个镜头该复用哪些资产、该补哪些新资产，让资产库更丰富、更分层、更能支撑镜头变化，同时避免同义重复资产。只输出 JSON，不要输出任何额外说明。'
+      },
+      {
+        role: 'user',
+        content: buildStoryboardReferenceAssetReviewPrompt(script, settings, storyboard, referenceLibrary)
+      }
+    ],
+    {
+      temperature: 0.35,
+      maxTokens: getStoryboardReferenceAssetReviewMaxTokens(storyboard),
+      signal: options?.signal
+    }
+  );
+  const mergeResult = mergeStoryboardReferenceAssetReviewItems(payload, referenceLibrary, settings);
+  const assignmentResult = applyStoryboardReferenceAssetReviewAssignments(
+    script,
+    storyboard,
+    mergeResult.referenceLibrary,
+    payload,
+    mergeResult.tempSelectionIdMap
+  );
+
+  return {
+    storyboard: assignmentResult.storyboard,
+    referenceLibrary: mergeResult.referenceLibrary,
+    addedReferenceAssetCount:
+      mergeResult.addedCharacterCount + mergeResult.addedSceneCount + mergeResult.addedObjectCount,
+    addedCharacterCount: mergeResult.addedCharacterCount,
+    addedSceneCount: mergeResult.addedSceneCount,
+    addedObjectCount: mergeResult.addedObjectCount,
+    reassignedShotCount: assignmentResult.reassignedShotCount
+  };
 }

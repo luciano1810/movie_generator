@@ -37,6 +37,7 @@ import {
   generateScriptFromText,
   generateStoryboardFromScript,
   optimizeImageToVideoPrompt,
+  reviewStoryboardReferenceAssets,
   type StoryboardPlanShot
 } from './openai-client.js';
 import {
@@ -3836,6 +3837,46 @@ async function runStoryboardStage(project: Project): Promise<void> {
   });
   project.storyboard = storyboard;
   await persistStoryboard(project, storyboardPlan);
+  setStageProgress(project, 'storyboard', {
+    completed: storyboard.length,
+    total: storyboard.length || 1,
+    unitLabel: '镜头',
+    currentItemLabel: '复盘镜头资产'
+  });
+  appendLog(project, '分镜逐镜生成完成，开始通看全片分镜并复盘每个镜头要复用/新增哪些资产。');
+  await saveProject(project);
+
+  try {
+    const reviewResult = await reviewStoryboardReferenceAssets(
+      project.script,
+      project.storyboard,
+      project.referenceLibrary,
+      project.settings,
+      {
+        signal: getProjectAbortSignal(project.id)
+      }
+    );
+
+    project.storyboard = reviewResult.storyboard;
+    project.referenceLibrary = reviewResult.referenceLibrary;
+    await persistStoryboard(project, storyboardPlan);
+    await persistReferenceLibrary(project);
+    appendLog(
+      project,
+      `镜头资产复盘完成：新增资产 ${reviewResult.addedReferenceAssetCount} 个（角色 ${reviewResult.addedCharacterCount} 个，场景 ${reviewResult.addedSceneCount} 个，物品 ${reviewResult.addedObjectCount} 个），重绑镜头资产 ${reviewResult.reassignedShotCount} 个。`
+    );
+  } catch (error) {
+    if (isStopRequested(project.id) || isPauseRequested(project.id)) {
+      throw error;
+    }
+
+    appendLog(
+      project,
+      `镜头资产复盘失败，已保留原分镜资产绑定并继续结束分镜阶段：${error instanceof Error ? error.message : String(error)}`,
+      'warn'
+    );
+  }
+
   setStageProgress(project, 'storyboard', {
     completed: storyboard.length || 1,
     total: storyboard.length || 1,
