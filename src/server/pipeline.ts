@@ -1078,10 +1078,15 @@ function buildVideoCharacterReferencePrompt(
     ? characters.filter((item) => haystack.includes(item.name.toLowerCase()))
     : characters;
   const selectedCharacters = (matchedCharacters.length ? matchedCharacters : characters).slice(0, hasSpeechContent ? 4 : 6);
+  const selectedCharacterNames = [...new Set(selectedCharacters.map((item) => item.name.trim()).filter(Boolean))];
 
   return [
     hasSpeechContent ? '人物一致性与说话者识别：' : '人物一致性约束：',
     ...selectedCharacters.map((item) => `- ${item.name}：${item.detail}`),
+    '- 上述人物参考只用于锁定可能出镜的命名角色，不代表他们都必须同时进入当前镜头；只有分镜文本明确要求出镜的人才进入画面。',
+    selectedCharacterNames.length
+      ? `- 人物单实例硬约束：当前镜头中 ${selectedCharacterNames.join('、')} 如需出镜，各自都只能出现 1 次；不要把同一角色复制成两个实体，不要生成同脸分身、克隆、双胞胎式重复、不同站位的第二个副本，也不要把同一角色伪装成背景路人重复塞进画面。只有镜头文本明确要求镜子、玻璃、监控屏、照片或投影时，才允许出现该角色的真实反射或影像，而且那也不能变成第二个独立人物实体。`
+      : '',
     hasSpeechContent
       ? '上述设定属于硬约束：脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和气质保持稳定。镜头内如有对白或旁白，必须根据这些人物外观、身份和气质特征明确当前说话者，并让对应人物的口型、表情、动作与发声主体一致，不要只写角色名。'
       : '上述设定属于硬约束：脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和气质保持稳定，除非剧情明确要求，否则不要擅自换脸、换装或改变人物年龄感。'
@@ -1100,6 +1105,7 @@ function buildFirstFrameCharacterReferencePrompt(
     }))
     .filter((item) => item.name && item.detail)
     .slice(0, 6);
+  const characterNames = [...new Set(characters.map((item) => item.name.trim()).filter(Boolean))];
 
   if (!characters.length) {
     return '';
@@ -1108,6 +1114,10 @@ function buildFirstFrameCharacterReferencePrompt(
   return [
     '人物一致性约束：',
     ...characters.map((item) => `- ${item.name}：${item.detail}`),
+    '- 上述人物参考只用于锁定可能出镜的命名角色，不代表所有人都必须同时进入当前画面。',
+    characterNames.length
+      ? `- 人物单实例硬约束：当前参考帧中 ${characterNames.join('、')} 如需出镜，各自都只能出现 1 次；不要出现同脸分身、克隆副本、双胞胎式重复、不同位置的第二个同角色，也不要把同一角色重复塞进背景。只有镜头文本明确要求镜子、玻璃、监控屏、照片或投影时，才允许出现该角色的真实反射或影像，而且不能多出第二个独立人物实体。`
+      : '',
     '- 上述人物设定属于硬约束：脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质保持稳定；当前首帧里实际出镜的人物必须与这些设定一致，不要换脸、换装、换年龄感，也不要混入额外主角。'
   ].join('\n');
 }
@@ -1186,6 +1196,7 @@ function buildVideoContinuityPrompt(shot: Project['storyboard'][number]): string
     '- 镜头内部优先通过人物走位、视线变化、前后景层次和轻微运镜推进节奏，不要频繁跳变构图或突然切到另一个状态。',
     '- 人物眼神和头部朝向必须由当前对话对象、动作目标、道具位置、画外空间或运动方向驱动；除非镜头明确要求主观凝视、对镜交流或压迫性直视镜头，否则不要让所有人物都默认面朝屏幕或一直盯着镜头。',
     buildOffAxisGazeConstraintPrompt(shot),
+    '- 人物单实例要求：同一个命名角色在当前整段视频里只能存在一个实体，不要在画面不同位置生成第二个同脸人物、分身、克隆副本、镜像错位体或伪装成背景路人的重复角色；只有镜头文本明确要求镜子、玻璃、监控屏、照片或投影时，才允许出现其真实反射或影像，而且不能多出第二个独立身体。',
     '- 表演与动作要连续自然，保留细微停顿、呼吸感和余韵，避免生硬跳切感。',
     '- 必须严格承接首帧输入图里的角色位置、服装、道具、光线方向和空间关系，不要重新起镜或换一套画面状态。'
   ].join('\n');
@@ -1195,6 +1206,7 @@ function buildVideoQualityGuardPrompt(hasSpeechContent: boolean): string {
   return [
     '质量约束：',
     '- 人物脸型五官、发型发色、体型比例、服装主色、关键配饰和道具状态在整段镜头内保持稳定，不要中途漂移、闪变或替换人物。',
+    '- 同一个命名角色在当前镜头内只能出现一次，不要生成同脸克隆、不同站位的第二个同角色、镜像错位副本、双胞胎式重复或背景里的同角色复制体。',
     '- 动作要符合真实受力、惯性和节奏，避免突然抽动、无意义抖动、瞬移、肢体穿模、手指数量异常和背景呼吸感。',
     hasSpeechContent
       ? '- 有语音时，只有正确的说话主体出现明显口型、下颌和呼吸节奏变化，其他人物不要误开口；口型、表情、视线和身体动作必须互相匹配。'
@@ -1360,7 +1372,8 @@ function buildReferenceFrameShotDirectivePrompt(
       : '- 定格要求：这是镜头结束瞬间的静态画面，要明确主体最终位置、朝向、视线方向、眼神焦点、眼神状态、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次；人物朝向和视线要符合互动对象、动作落点和空间调度，不要默认正对镜头。',
     frameKind === 'start'
       ? '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物起始动作，不要只写剧情概述，不要只写某人正在做某事这种过于简略的提示。'
-      : '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物收束后的最终状态，不要只写剧情概述，不要只写某人做完某事这种过于简略的提示。'
+      : '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物收束后的最终状态，不要只写剧情概述，不要只写某人做完某事这种过于简略的提示。',
+    '- 人物唯一性：如有多人同框，同一个命名角色在当前画面里只能出现一次；不要生成同脸重复人物、分身、克隆或背景里的第二个同角色。'
   ];
 
   if (shot.dialogue.trim()) {
@@ -1382,7 +1395,7 @@ function buildReferenceFrameQualityPrompt(
   const parts = [
     `${frameLabel}质量要求：`,
     '- 输出必须是一张电影级写实静帧，不是概念草图、分镜示意图、海报、拼贴图、多联画、人物设定板或 UI 截图。',
-    '- 主体边缘清晰，人物五官稳定，双眼对称，手部结构正确，道具形体完整；避免糊脸、崩手、重复人物、额外肢体、奇怪透视和背景漂移。',
+    '- 主体边缘清晰，人物五官稳定，双眼对称，手部结构正确，道具形体完整；避免糊脸、崩手、重复人物、同脸克隆、同角色二次出现、额外肢体、奇怪透视和背景漂移。',
     '- 画面要同时具备明确主体、可读动作定格、前中后景层次、可信光线方向、材质细节和空间深度，优先选择最能代表镜头开场信息的决定性瞬间。',
     '- 不要生成字幕、水印、logo、边框、贴纸、说明文字、时间戳，也不要做成二次元线稿感或低完成度草模感。'
   ];
@@ -1432,21 +1445,22 @@ function buildReferenceFrameWorkflowPrompt(
 ): string {
   const basePrompt = (frameKind === 'start' ? shot.firstFramePrompt : shot.lastFramePrompt).trim();
   const cinematicProfilePrompt = buildReferenceFrameCinematicProfilePrompt(project);
+  const characterPrompt = buildFirstFrameCharacterReferencePrompt(project, shot);
+  const qualityPrompt = buildReferenceFrameQualityPrompt(workflow, frameKind);
 
   if (workflow === 'text_to_image') {
-    return [basePrompt, cinematicProfilePrompt, buildReferenceFrameGazePrompt(shot, frameKind)]
+    return [basePrompt, cinematicProfilePrompt, buildReferenceFrameGazePrompt(shot, frameKind), characterPrompt, qualityPrompt]
       .filter(Boolean)
       .join('\n\n');
   }
 
-  const characterPrompt = buildFirstFrameCharacterReferencePrompt(project, shot);
   const parts = [
     buildReferenceFrameShotDirectivePrompt(shot, frameKind),
     basePrompt,
     cinematicProfilePrompt,
     buildReferenceFrameGazePrompt(shot, frameKind),
     characterPrompt,
-    buildReferenceFrameQualityPrompt(workflow, frameKind),
+    qualityPrompt,
     frameKind === 'start'
       ? '补充要求：把镜头开场一瞬间写实地冻结成一张完整画面，优先具体化角色状态、空间关系和环境信息。'
       : '补充要求：把镜头结束一瞬间写实地冻结成一张完整画面，优先具体化角色收束状态、空间关系和环境信息。'
@@ -1605,7 +1619,7 @@ function getVideoWorkflowPrompt(
 
 function buildVideoNegativePrompt(baseNegativePrompt: string, allowDirectCameraGaze = false): string {
   const baseExtraNegativePrompt =
-    'subtitle, text overlay, logo, identity drift, face drift, temporal inconsistency, flickering, duplicate person, extra limbs, wrong mouth movement, camera cut, shot change, jump cut, cutaway, montage, split screen, flashback';
+    'subtitle, text overlay, logo, identity drift, face drift, temporal inconsistency, flickering, duplicate person, same person twice, duplicate same character, character clone, cloned face, twin duplicate, mirrored duplicate, extra limbs, wrong mouth movement, camera cut, shot change, jump cut, cutaway, montage, split screen, flashback';
   const gazeNegativePrompt = allowDirectCameraGaze
     ? ''
     : 'looking at camera, looking into camera, staring at viewer, direct eye contact, facing camera, front-facing to camera';
@@ -1616,7 +1630,7 @@ function buildVideoNegativePrompt(baseNegativePrompt: string, allowDirectCameraG
 
 function buildImageNegativePrompt(baseNegativePrompt: string, allowDirectCameraGaze = false): string {
   const baseExtraNegativePrompt =
-    'low quality, blurry, soft focus, out of frame, duplicate person, extra limbs, extra fingers, missing fingers, bad anatomy, asymmetrical eyes, deformed face, waxy skin, broken hands, fused fingers, bad perspective, collage, split screen, storyboard sheet, concept art page, sketch, text, subtitle, watermark, logo';
+    'low quality, blurry, soft focus, out of frame, duplicate person, same person twice, duplicate same character, character clone, cloned face, twin duplicate, mirrored duplicate, extra limbs, extra fingers, missing fingers, bad anatomy, asymmetrical eyes, deformed face, waxy skin, broken hands, fused fingers, bad perspective, collage, split screen, storyboard sheet, concept art page, sketch, text, subtitle, watermark, logo';
   const gazeNegativePrompt = allowDirectCameraGaze
     ? ''
     : 'looking at camera, looking into camera, staring at viewer, direct eye contact, front-facing portrait, mugshot, ID photo';

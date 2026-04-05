@@ -47,7 +47,8 @@ const VIDEO_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
   '4. Visual Subtext & Micro-Physics (视觉潜台词与微观物理): 禁止直接写抽象情感，必须通过微观动作、表情、物理干涉、环境反馈来外化表现。',
   '5. Audio-Visual Sync (音画同步): 对话严格采用 [Character Name] ([Vocal/Physical cue]): "中文台词" 格式。',
   '6. Motivated Gaze Direction (动机化视线): 人物视线必须服务于当前互动对象、动作目标、道具位置、画外空间或运动方向；除非用户明确要求 POV / first-person shot / direct-to-camera monologue / confrontational stare into lens，否则不要默认写成 looking into camera / facing camera / staring at viewer，也不要让所有人物同时正对屏幕。若输入没有明确注视对象，你必须主动设计 off-axis gaze，例如 looking toward the opponent off-camera left/right、down at the object in hand、toward the doorway/deep corridor、or toward the direction of travel，并避免 direct eye contact with the lens。',
-  '7. Style & Character Lock (风格与角色锁定): 如果用户输入包含 [结构化摄影风格] 和 [角色硬约束]，必须把它们当作不可改写的视觉锁定条件，只允许翻译、融合和具体化，不允许替换角色脸型五官、发型发色、体型、服装主色、关键配饰、年龄感、气质、说话者身份或项目级镜头光学/布光/色彩/质感方向。',
+  '7. Single Character Instance Rule (角色单实例法则): 除非用户明确要求镜像、监控画面、照片、投影或分身叙事，同一个已命名角色在同一帧/同一镜头里只能出现一次。不要生成 same character twice、character clone、duplicate body、same-face background extra、twin duplicate 或独立存在的第二个同角色实体。',
+  '8. Style & Character Lock (风格与角色锁定): 如果用户输入包含 [结构化摄影风格] 和 [角色硬约束]，必须把它们当作不可改写的视觉锁定条件，只允许翻译、融合和具体化，不允许替换角色脸型五官、发型发色、体型、服装主色、关键配饰、年龄感、气质、说话者身份或项目级镜头光学/布光/色彩/质感方向。',
   '',
   '# Input/Output Constraints',
   '- English Only: 所有视觉、动作、环境描述必须使用高水准的好莱坞剧本级英语。',
@@ -899,6 +900,7 @@ function buildImageToVideoPromptOptimizationInput(
     '[动作与台词]：',
     motionAndSpeechDetails || '保持当前镜头内部的连续动作演进。',
     '视线硬约束：如果上方没有明确写“主观镜头 / POV / 对镜独白 / 直视镜头”，则必须把人物眼神改写为看向画外左/右侧对象、手中道具、行进方向或远处环境锚点，并在英文里明确写出 off-camera / toward the object / toward the doorway / in the direction of travel 等离轴注视目标；不要写 looking into camera、staring at viewer、facing camera，也不要只写 looks ahead。',
+    '人物单实例硬约束：如果上方没有明确要求镜子、监控屏、照片、投影或分身叙事，则同一个已命名角色在同一帧/同一镜头里只能出现一次；不要写 same character twice、character clone、duplicate body、same-face extra、twin duplicate，也不要把同一角色复制到背景中。',
     '如果上方没有明确提供对白或旁白文本，不要臆造新的中文台词或旁白。',
     '请直接输出最终英文段落，不要标题，不要解释，不要确认规则。'
   ].join('\n');
@@ -1040,9 +1042,11 @@ export async function extractReferenceLibraryFromScript(
 10. 场景 prompt 必须和剧情解耦，只生成“空间设定图 / 空镜环境”，不要包含人物、角色名字、剧情动作、冲突、事件瞬间、对白、具体剧情信息
 11. 场景 prompt 要强调空间结构、前中后景层次、入口/动线/遮挡关系、时间、光线、氛围、材质、陈设密度和可复用性，把剧情场面抽象成稳定的环境母版；每个 scene 资产只对应一个清晰机位或空间分区，但同一地点可以输出多个互补母版
 12. scenes 的 summary 也必须描述空间用途、空间分区和氛围，不要写剧情作用、事件经过或角色行为
-13. objects 不能只保留“推动剧情的大道具”，也要尽量提取反复出现、画面辨识度高、会影响布景质感或角色动作的小道具/陈设/载具/屏幕设备/文件纸张/标志物/随身配饰；如果同一物品有明显状态变化，例如完好/破损、干燥/沾血、关闭/亮屏、收纳/展开，也要拆成独立资产并在 name 标注状态
-14. 物品 prompt 要强调完整外形轮廓、核心材质、磨损/污渍/反光状态、摆放方式、可读的主视角或 3/4 角度、尺寸感和特写可辨识度；不要把道具写成被角色手持中的剧情动作瞬间
-15. 只输出 JSON，结构如下：
+13. scenes 数量不要太少。默认至少不应少于剧本场次数；如果某场明显需要多个主机位/空间分区/时间光线状态，应该在这个基础上继续增加 1 到 3 个 scene 变体，不要因为怕多而合并
+14. 对较长或较复杂的场景，优先补足建立空间的广角母版、人物活动主轴母版、入口/走廊/窗边等纵深或侧向分区母版，以及不同时间/天气/灯光状态母版；宁可多准备互补 scene 资产，也不要只给一个“万能场景”
+15. objects 不能只保留“推动剧情的大道具”，也要尽量提取反复出现、画面辨识度高、会影响布景质感或角色动作的小道具/陈设/载具/屏幕设备/文件纸张/标志物/随身配饰；如果同一物品有明显状态变化，例如完好/破损、干燥/沾血、关闭/亮屏、收纳/展开，也要拆成独立资产并在 name 标注状态
+16. 物品 prompt 要强调完整外形轮廓、核心材质、磨损/污渍/反光状态、摆放方式、可读的主视角或 3/4 角度、尺寸感和特写可辨识度；不要把道具写成被角色手持中的剧情动作瞬间
+17. 只输出 JSON，结构如下：
 {
   "characters": [
     {
@@ -3123,9 +3127,10 @@ function buildScriptPromptContext(settings: ProjectSettings): string {
 14. referenceAssets.characters 不要只保留主角，要尽量覆盖主角、重要配角、反复出现群演/职业身份型背景人物、以及同一人物的年龄/服装/伤妆/状态变体；如果同一人物在剧本里以明显不同年龄段或显著不同造型状态出场，必须拆成多个独立资产，name 要直接带上变体标记
 15. referenceAssets.characters 的 generationPrompt 只写稳定的人物外观与身份特征，重点描述年龄感、脸型五官、发型、体型、服装层次、面料材质、标志性配饰、轮廓差异、气质、常态表情，不要写三视图、镜头运动或具体剧情动作
 16. referenceAssets.scenes 提取可复用的场景母版集合，不要限制成“每个地点只有一个角度”；同一地点如有多个明确可拍区域、主机位、纵深关系、或不同时间/天气/光线状态，应拆成多个独立 scene 资产，name 带上分区/视角/时间标记；每个 scene 资产本身必须是单一空镜机位、无人物、无剧情动作，强调空间结构、前中后景、入口动线、光线、材质、陈设和氛围
-17. referenceAssets.objects 不要只保留推动剧情的大道具，也要尽量覆盖反复出现、画面辨识度高、能增加布景质感或角色动作可信度的陈设、小道具、载具、屏幕设备、文件纸张、标志物、服饰配件；如果同一物品有明显状态变化要拆分资产，prompt 强调完整轮廓、材质、状态、摆放方式、尺寸感和可读角度
-18. 如果输入素材很多，优先保住主线清晰度，但不要把关键对抗、调查过程、关系裂变和场尾反转过度压扁；如果输入素材有限，可以围绕角色动机、行动阻碍、线索推进、追逼反应、道具使用和情绪余波扩写有效场次，但不要靠重复桥段、解释性对白或无效过场凑体量
-19. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
+17. referenceAssets.scenes 默认按“每场至少有对应母版，复杂场景再额外补 1 到 3 个 scene 变体”的密度来输出；不要少于剧本场次数，较长或复杂场景宁多勿少
+18. referenceAssets.objects 不要只保留推动剧情的大道具，也要尽量覆盖反复出现、画面辨识度高、能增加布景质感或角色动作可信度的陈设、小道具、载具、屏幕设备、文件纸张、标志物、服饰配件；如果同一物品有明显状态变化要拆分资产，prompt 强调完整轮廓、材质、状态、摆放方式、尺寸感和可读角度
+19. 如果输入素材很多，优先保住主线清晰度，但不要把关键对抗、调查过程、关系裂变和场尾反转过度压扁；如果输入素材有限，可以围绕角色动机、行动阻碍、线索推进、追逼反应、道具使用和情绪余波扩写有效场次，但不要靠重复桥段、解释性对白或无效过场凑体量
+20. 只输出 JSON，不要输出解释、标题外文本或 Markdown 代码块`;
 }
 
 function buildUploadedScriptPromptContext(settings: ProjectSettings): string {
@@ -3268,6 +3273,7 @@ function validateGeneratedScriptStructure(
   const issues: string[] = [];
   const target = getStoryLengthScriptGenerationTarget(settings);
   const totalDurationSeconds = script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0);
+  const minimumSceneReferenceAssetCount = getMinimumSceneReferenceAssetCountForScript(script);
 
   if (!script.scenes.length) {
     issues.push('必须至少生成 1 场戏。');
@@ -3291,6 +3297,13 @@ function validateGeneratedScriptStructure(
 
   if (!script.referenceAssets?.scenes.length) {
     issues.push('referenceAssets.scenes 不能为空，至少要有核心场景资产。');
+  } else if (
+    settings.scriptMode !== 'upload' &&
+    script.referenceAssets.scenes.length < minimumSceneReferenceAssetCount
+  ) {
+    issues.push(
+      `referenceAssets.scenes 当前只有 ${script.referenceAssets.scenes.length} 个，低于建议下限 ${minimumSceneReferenceAssetCount} 个；请为各场和复杂地点补足更多 scene 机位/分区/时间光线变体，不要只给少数万能场景。`
+    );
   }
 
   for (const scene of script.scenes) {
@@ -3633,8 +3646,107 @@ function normalizeReferenceAssetReviewIdentityText(value: string): string {
     .trim();
 }
 
+interface StoryboardSceneAssetVariantRequirement {
+  scene: ScriptScene;
+  shotCount: number;
+  minimumSceneAssetCount: number;
+}
+
+interface StoryboardSceneAssetCoverageIssue extends StoryboardSceneAssetVariantRequirement {
+  actualSceneAssetCount: number;
+}
+
 function getStoryboardReferenceAssetReviewMaxTokens(storyboard: StoryboardShot[]): number {
   return Math.min(32_000, Math.max(8_000, storyboard.length * 220 + 4_000));
+}
+
+function getMinimumSceneAssetVariantCountForScene(scene: ScriptScene, shotCount: number): number {
+  const effectiveShotCount = Math.max(shotCount, Math.ceil(scene.durationSeconds / 15));
+  let minimumSceneAssetCount = 1;
+
+  if (effectiveShotCount >= 3 || scene.durationSeconds >= 20) {
+    minimumSceneAssetCount = 2;
+  }
+
+  if (effectiveShotCount >= 6 || scene.durationSeconds >= 45) {
+    minimumSceneAssetCount = 3;
+  }
+
+  if (effectiveShotCount >= 10 || scene.durationSeconds >= 90) {
+    minimumSceneAssetCount = 4;
+  }
+
+  return minimumSceneAssetCount;
+}
+
+function getStoryboardSceneAssetVariantRequirements(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[]
+): StoryboardSceneAssetVariantRequirement[] {
+  return script.scenes.map((scene) => {
+    const shotCount = storyboard.filter((shot) => shot.sceneNumber === scene.sceneNumber).length;
+
+    return {
+      scene,
+      shotCount,
+      minimumSceneAssetCount: getMinimumSceneAssetVariantCountForScene(scene, shotCount)
+    };
+  });
+}
+
+function buildStoryboardSceneAssetVariantRequirementPrompt(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[]
+): string {
+  return getStoryboardSceneAssetVariantRequirements(script, storyboard)
+    .map(
+      ({ scene, shotCount, minimumSceneAssetCount }) =>
+        `- 场景 ${scene.sceneNumber}（${shotCount} 个镜头，${scene.durationSeconds}s，${scene.sceneHeading || buildFallbackSceneHeading(scene.location, scene.timeOfDay)}）：至少准备 ${minimumSceneAssetCount} 个 scene 资产，覆盖主机位/空间分区/纵深方向/时间光线中的明显差异`
+    )
+    .join('\n');
+}
+
+function getStoryboardSceneAssetCoverageIssues(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[]
+): StoryboardSceneAssetCoverageIssue[] {
+  return getStoryboardSceneAssetVariantRequirements(script, storyboard)
+    .map((requirement) => {
+      const actualSceneAssetCount = new Set(
+        storyboard
+          .filter((shot) => shot.sceneNumber === requirement.scene.sceneNumber)
+          .flatMap((shot) => shot.referenceAssetIds.filter((item) => item.startsWith('scene:')))
+      ).size;
+
+      return {
+        ...requirement,
+        actualSceneAssetCount
+      };
+    })
+    .filter((issue) => issue.actualSceneAssetCount < issue.minimumSceneAssetCount);
+}
+
+function getMinimumSceneReferenceAssetCountForScript(script: Pick<ScriptPackage, 'scenes'>): number {
+  const mediumOrLongScenes = script.scenes.filter((scene) => scene.durationSeconds >= 30).length;
+  return Math.max(2, script.scenes.length + Math.ceil(mediumOrLongScenes / 2));
+}
+
+function buildStoryboardSceneAssetCoverageFeedback(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[]
+): string {
+  const issues = getStoryboardSceneAssetCoverageIssues(script, storyboard);
+
+  if (!issues.length) {
+    return '';
+  }
+
+  return issues
+    .map(
+      (issue) =>
+        `场景 ${issue.scene.sceneNumber} 当前只覆盖了 ${issue.actualSceneAssetCount} 个 scene 资产，但按该场 ${issue.shotCount} 个镜头 / ${issue.scene.durationSeconds}s 的信息量，至少需要 ${issue.minimumSceneAssetCount} 个；请补出不同主机位、空间分区、纵深方向或时间光线的空镜 scene 变体，并重新分配到相关镜头。`
+    )
+    .join('；');
 }
 
 function buildStoryboardReferenceAssetReviewShotContext(
@@ -3677,23 +3789,27 @@ function buildStoryboardReferenceAssetReviewPrompt(
   const retryNotice = retryFeedback
     ? `\n上一次输出存在以下问题，这次必须修正后再返回完整 JSON：\n${retryFeedback}\n`
     : '';
+  const sceneAssetVariantRules = buildStoryboardSceneAssetVariantRequirementPrompt(script, storyboard);
 
   return `请对“已生成全量分镜 + 当前资产库”做一次全局资产复盘，逐镜头决定应该复用哪些旧资产、应该新增哪些资产，并输出每个镜头最终要绑定的 referenceAssetIds。${retryNotice}
 
 复盘目标：
 1. 提高资产数量和视觉多样性，不要把大量不同机位/不同空间分区/不同时间光线/不同状态镜头都硬复用同一两个 scene/object 资产
-2. 对同一地点，如果镜头在主机位、空间分区、拍摄方向、纵深关系、时间段、天气、光线氛围、陈设状态上明显不同，而当前资产库没有对应母版，就新增 scene 变体资产；name 必须直接带视角/分区/时间/光线标记
-3. 对同一人物，如果镜头中存在明显服装造型、年龄阶段、伤妆、湿身、伪装、制服/礼服切换等外观状态变化，而当前资产库没有对应角色变体，就新增 character 变体资产；name 必须带年龄/造型/状态后缀
-4. 对关键道具、载具、屏幕设备、文件、标志物、配饰和高辨识度陈设，如果镜头里有重要构图/动作/状态变化且当前资产库没有对应道具资产，就新增 object 资产；完好/破损、亮屏/熄屏、展开/收纳、干净/沾血等状态不同要拆成独立资产
-5. 如果现有资产已经能准确覆盖某个镜头，就优先复用现有 id，不要为了“显得新增很多”而重复造同义资产；但如果现有 scene 资产只有单一宽泛母版，面对明显不同机位/分区/光线的镜头时必须主动补 scene 变体
-6. scene 资产必须是空镜环境设定图：无人物、无角色名字、无剧情动作、无事件瞬间，只描述可复用空间结构、材质、入口/动线/遮挡、前中后景层次、时间光线和氛围
-7. character 资产 prompt 只写稳定人物外观和身份特征，重点写年龄感、脸型五官、发型、体型、服装层次、材质、标志性配饰、轮廓差异、气质和常态表情，不要写镜头运动或具体剧情动作
-8. object 资产 prompt 重点写完整轮廓、材质、磨损/污渍/反光状态、摆放方式、尺寸感和可读角度，不要写成被角色手持动作中的剧情瞬间
-9. 每个镜头的 referenceAssetIds 可以混合使用“现有资产 id”和“本轮新增资产 tempId”；如果某个纯人物/纯道具特写不需要 scene 参考图，允许只绑定 character/object 资产，避免 scene 参考图过度锁死构图和光线；但只要镜头里确实有需要统一的角色、空间或关键道具，就不要漏配
-10. 新增资产 tempId 必须使用稳定短 id，建议 new-character-1 / new-scene-1 / new-object-1 这类格式；不要和现有资产 id 重名；如果新增资产与现有资产同名但视觉状态不同，必须在 name 和 tempId 里直接加变体后缀，不要复用旧名字伪装新资产
-11. 必须覆盖下方列出的每一个镜头，为每个镜头都输出一条 shotAssignments 记录；sceneNumber、shotNumber 必须和原分镜一致
-12. generationPrompt 必须适合直接用于 AI 生图，并统一符合项目视觉风格：${settings.visualStyle}
-13. 只输出 JSON，结构如下：
+2. scene 资产数量宁多勿少；同一剧本场景内如果镜头数已经较多，就必须主动拆出多个场景母版，而不是把所有镜头都绑到同一个宽泛场景 id
+3. 对同一地点，如果镜头在主机位、空间分区、拍摄方向、纵深关系、时间段、天气、光线氛围、陈设状态上明显不同，而当前资产库没有对应母版，就新增 scene 变体资产；name 必须直接带视角/分区/时间/光线标记
+4. 对同一人物，如果镜头中存在明显服装造型、年龄阶段、伤妆、湿身、伪装、制服/礼服切换等外观状态变化，而当前资产库没有对应角色变体，就新增 character 变体资产；name 必须带年龄/造型/状态后缀
+5. 对关键道具、载具、屏幕设备、文件、标志物、配饰和高辨识度陈设，如果镜头里有重要构图/动作/状态变化且当前资产库没有对应道具资产，就新增 object 资产；完好/破损、亮屏/熄屏、展开/收纳、干净/沾血等状态不同要拆成独立资产
+6. 如果现有资产已经能准确覆盖某个镜头，就优先复用现有 id，不要为了“显得新增很多”而重复造同义资产；但如果现有 scene 资产只有单一宽泛母版，面对明显不同机位/分区/光线的镜头时必须主动补 scene 变体
+7. scene 资产必须是空镜环境设定图：无人物、无角色名字、无剧情动作、无事件瞬间，只描述可复用空间结构、材质、入口/动线/遮挡、前中后景层次、时间光线和氛围
+8. 下面这组“每场最低 scene 资产目标”是硬约束；输出结果必须至少满足：
+${sceneAssetVariantRules}
+9. character 资产 prompt 只写稳定人物外观和身份特征，重点写年龄感、脸型五官、发型、体型、服装层次、材质、标志性配饰、轮廓差异、气质和常态表情，不要写镜头运动或具体剧情动作
+10. object 资产 prompt 重点写完整轮廓、材质、磨损/污渍/反光状态、摆放方式、尺寸感和可读角度，不要写成被角色手持动作中的剧情瞬间
+11. 每个镜头的 referenceAssetIds 可以混合使用“现有资产 id”和“本轮新增资产 tempId”；如果某个纯人物/纯道具特写不需要 scene 参考图，允许只绑定 character/object 资产，避免 scene 参考图过度锁死构图和光线；但不要通过大量省略 scene 资产来规避上面的每场最低 scene 资产目标
+12. 新增资产 tempId 必须使用稳定短 id，建议 new-character-1 / new-scene-1 / new-object-1 这类格式；不要和现有资产 id 重名；如果新增资产与现有资产同名但视觉状态不同，必须在 name 和 tempId 里直接加变体后缀，不要复用旧名字伪装新资产
+13. 必须覆盖下方列出的每一个镜头，为每个镜头都输出一条 shotAssignments 记录；sceneNumber、shotNumber 必须和原分镜一致
+14. generationPrompt 必须适合直接用于 AI 生图，并统一符合项目视觉风格：${settings.visualStyle}
+15. 只输出 JSON，结构如下：
 {
   "newAssets": {
     "characters": [
@@ -4126,41 +4242,67 @@ export async function reviewStoryboardReferenceAssets(
     };
   }
 
-  const payload = await requestJson<StoryboardReferenceAssetReviewPayload>(
-    [
+  let retryFeedback = '';
+  let fallbackResult: StoryboardReferenceAssetReviewResult | null = null;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const payload = await requestJson<StoryboardReferenceAssetReviewPayload>(
+      [
+        {
+          role: 'system',
+          content:
+            '你是一名影视资产统筹、美术设定导演和分镜连续性审核员。请通看全量分镜和现有资产库，决定每个镜头该复用哪些资产、该补哪些新资产，让资产库更丰富、更分层、更能支撑镜头变化，同时避免同义重复资产。只输出 JSON，不要输出任何额外说明。'
+        },
+        {
+          role: 'user',
+          content: buildStoryboardReferenceAssetReviewPrompt(script, settings, storyboard, referenceLibrary, retryFeedback)
+        }
+      ],
       {
-        role: 'system',
-        content:
-          '你是一名影视资产统筹、美术设定导演和分镜连续性审核员。请通看全量分镜和现有资产库，决定每个镜头该复用哪些资产、该补哪些新资产，让资产库更丰富、更分层、更能支撑镜头变化，同时避免同义重复资产。只输出 JSON，不要输出任何额外说明。'
-      },
-      {
-        role: 'user',
-        content: buildStoryboardReferenceAssetReviewPrompt(script, settings, storyboard, referenceLibrary)
+        temperature: attempt === 0 ? 0.35 : 0.25,
+        maxTokens: getStoryboardReferenceAssetReviewMaxTokens(storyboard),
+        signal: options?.signal
       }
-    ],
-    {
-      temperature: 0.35,
-      maxTokens: getStoryboardReferenceAssetReviewMaxTokens(storyboard),
-      signal: options?.signal
+    );
+    const mergeResult = mergeStoryboardReferenceAssetReviewItems(payload, referenceLibrary, settings);
+    const assignmentResult = applyStoryboardReferenceAssetReviewAssignments(
+      script,
+      storyboard,
+      mergeResult.referenceLibrary,
+      payload,
+      mergeResult.tempSelectionIdMap
+    );
+    const result = {
+      storyboard: assignmentResult.storyboard,
+      referenceLibrary: mergeResult.referenceLibrary,
+      addedReferenceAssetCount:
+        mergeResult.addedCharacterCount + mergeResult.addedSceneCount + mergeResult.addedObjectCount,
+      addedCharacterCount: mergeResult.addedCharacterCount,
+      addedSceneCount: mergeResult.addedSceneCount,
+      addedObjectCount: mergeResult.addedObjectCount,
+      reassignedShotCount: assignmentResult.reassignedShotCount
+    } satisfies StoryboardReferenceAssetReviewResult;
+    const sceneCoverageFeedback = buildStoryboardSceneAssetCoverageFeedback(script, result.storyboard);
+
+    fallbackResult = result;
+    if (!sceneCoverageFeedback) {
+      return result;
     }
-  );
-  const mergeResult = mergeStoryboardReferenceAssetReviewItems(payload, referenceLibrary, settings);
-  const assignmentResult = applyStoryboardReferenceAssetReviewAssignments(
-    script,
-    storyboard,
-    mergeResult.referenceLibrary,
-    payload,
-    mergeResult.tempSelectionIdMap
-  );
+
+    retryFeedback = sceneCoverageFeedback;
+  }
+
+  if (fallbackResult) {
+    return fallbackResult;
+  }
 
   return {
-    storyboard: assignmentResult.storyboard,
-    referenceLibrary: mergeResult.referenceLibrary,
-    addedReferenceAssetCount:
-      mergeResult.addedCharacterCount + mergeResult.addedSceneCount + mergeResult.addedObjectCount,
-    addedCharacterCount: mergeResult.addedCharacterCount,
-    addedSceneCount: mergeResult.addedSceneCount,
-    addedObjectCount: mergeResult.addedObjectCount,
-    reassignedShotCount: assignmentResult.reassignedShotCount
+    storyboard,
+    referenceLibrary,
+    addedReferenceAssetCount: 0,
+    addedCharacterCount: 0,
+    addedSceneCount: 0,
+    addedObjectCount: 0,
+    reassignedShotCount: 0
   };
 }
