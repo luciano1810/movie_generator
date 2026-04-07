@@ -1764,6 +1764,12 @@ interface StoryboardPlanPayload {
   shots?: StoryboardPlanShotPayload[];
 }
 
+interface StoryboardPlanReviewResult {
+  ok: boolean;
+  planShots: StoryboardPlanShot[];
+  feedback: string;
+}
+
 interface StoryboardSingleShotPayload {
   shot?: StoryboardShotPayload;
   shots?: StoryboardShotPayload[];
@@ -2423,7 +2429,40 @@ ${sceneRules}
       "overview": "这个镜头的画面焦点、动作/对白推进和情绪/转场概况"
     }
   ]
-}`;
+}
+
+注意：上方 JSON 里的 totalShots 数字只是字段格式示意，不能照抄；你最终输出时必须先数清 shots 实际条数，再把 totalShots 改成与 shots.length 完全一致的最终整数。`;
+}
+
+function buildStoryboardPlanReviewPrompt(
+  script: ScriptPackage,
+  settings: ProjectSettings,
+  normalizedPlanShots: StoryboardPlanShot[],
+  validationFeedback: string
+): string {
+  const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
+  const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
+  const normalizedPlanJson = buildStoryboardPlanAssistantMessage(normalizedPlanShots);
+
+  return `请复核你上一条分镜规划 JSON，并直接输出一份“修正后的完整分镜规划 JSON”。不要解释，不要输出差异说明，不要输出完整镜头字段。
+
+必须修正的问题：
+${validationFeedback}
+
+修正规则：
+1. 只能输出整部影片的分镜规划 JSON，结构仍然是 { "totalShots": number, "shots": [...] }
+2. 你必须尽量保留上一版已经合格的镜头；只有在修正反馈所需时，才允许补镜头、删镜头、重排镜头或改 totalShots
+3. 如果现有 shots 已经完整覆盖全部场景，且每个镜头概况足够支撑后续展开，只是 totalShots 计数错了，那么只修正 totalShots，不要随意改动 shots 内容
+4. 如果现有镜头确实不足以满足反馈，例如漏场、镜头颗粒度过粗、需要补足关键节拍、scene 覆盖不完整或编号不连续，允许增加或重排镜头；但修完后必须同步修正 totalShots
+5. totalShots 必须严格等于 shots.length
+6. shotNumber 必须在每个 scene 内从 1 开始连续递增
+7. totalShots、sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字
+8. 任何一个镜头的 durationSeconds 都不能超过 ${maxVideoSegmentDurationSeconds} 秒；${spokenLanguageRequirement}
+9. 仍然只输出规划字段：sceneNumber、shotNumber、title、purpose、durationSeconds、dialogueIdentifier、longTakeIdentifier、overview
+10. 输出前先自行复核一次：全部 scene 都覆盖、没有跳号、没有额外字段、totalShots 与 shots.length 完全一致
+
+当前系统归一化后的规划 JSON（用于帮助你核对实际镜头数量、编号和场景覆盖）：
+${normalizedPlanJson}`;
 }
 
 function truncateStoryboardPromptText(value: string, maxLength: number): string {
@@ -2892,6 +2931,75 @@ function buildStoryboardPlanAssistantMessage(planShots: StoryboardPlanShot[]): s
   );
 }
 
+function buildStoryboardPlanPayloadAssistantMessage(payload: StoryboardPlanPayload): string {
+  return JSON.stringify(
+    {
+      totalShots: typeof payload.totalShots === 'number' ? payload.totalShots : null,
+      shots: payload.shots ?? []
+    },
+    null,
+    2
+  );
+}
+
+async function reviewStoryboardPlan(
+  conversation: ChatCompletionMessageParam[],
+  script: ScriptPackage,
+  settings: ProjectSettings,
+  requestPrompt: string,
+  initialPayload: StoryboardPlanPayload,
+  initialPlanShots: StoryboardPlanShot[],
+  initialFeedback: string,
+  options?: StoryboardGenerationOptions
+): Promise<StoryboardPlanReviewResult> {
+  const expectedSceneNumbers = script.scenes.map((scene) => scene.sceneNumber);
+  const minimumShots = getMinimumStoryboardShotCount(script, settings);
+  let retryFeedback = initialFeedback;
+  let currentPayload = initialPayload;
+  let currentPlanShots = initialPlanShots;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const reviewPrompt = buildStoryboardPlanReviewPrompt(script, settings, currentPlanShots, retryFeedback);
+    const reviewedPayload = await requestJson<StoryboardPlanPayload>(
+      [
+        ...conversation,
+        { role: 'user', content: requestPrompt },
+        { role: 'assistant', content: buildStoryboardPlanPayloadAssistantMessage(currentPayload) },
+        { role: 'user', content: reviewPrompt }
+      ],
+      {
+        temperature: attempt === 0 ? 0.25 : 0.2,
+        maxTokens: getStoryboardPlanGenerationMaxTokens(minimumShots),
+        signal: options?.signal
+      }
+    );
+    const reviewedPlanShots = normalizeAndFinalizeStoryboardPlanShots(
+      reviewedPayload.shots ?? [],
+      settings,
+      expectedSceneNumbers
+    );
+    const validation = validateStoryboardPlanAgainstScript(script, reviewedPlanShots, settings, reviewedPayload.totalShots);
+
+    if (validation.ok) {
+      return {
+        ok: true,
+        planShots: reviewedPlanShots,
+        feedback: ''
+      };
+    }
+
+    currentPayload = reviewedPayload;
+    currentPlanShots = reviewedPlanShots;
+    retryFeedback = validation.feedback;
+  }
+
+  return {
+    ok: false,
+    planShots: currentPlanShots,
+    feedback: retryFeedback
+  };
+}
+
 async function generateStoryboardPlan(
   conversation: ChatCompletionMessageParam[],
   script: ScriptPackage,
@@ -2920,7 +3028,25 @@ async function generateStoryboardPlan(
       };
     }
 
-    retryFeedback = validation.feedback;
+    const reviewed = await reviewStoryboardPlan(
+      conversation,
+      script,
+      settings,
+      requestPrompt,
+      payload,
+      planShots,
+      validation.feedback,
+      options
+    );
+
+    if (reviewed.ok) {
+      return {
+        requestPrompt,
+        planShots: reviewed.planShots
+      };
+    }
+
+    retryFeedback = reviewed.feedback;
   }
 
   throw new Error(`分镜规划生成失败：连续多次输出仍不完整。${retryFeedback}`);

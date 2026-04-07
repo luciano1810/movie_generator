@@ -1378,7 +1378,7 @@ function buildReferenceFrameReferencePrompt(
     .slice(0, 6);
   const parts = [...characters, ...scenes, ...objects];
 
-  return parts.join('\n');
+  return parts.join('；');
 }
 
 function buildReferenceFrameCinematicProfilePrompt(project: Project): string {
@@ -1432,78 +1432,69 @@ function buildMergedVideoPrompt(
     baseVideoPrompt?: string;
   }
 ): string {
+  const durationSeconds = options.durationSeconds ?? shot.durationSeconds;
   const hasDialogueContent = Boolean(shot.dialogue.trim());
   const hasVoiceoverContent = Boolean(shot.voiceover.trim());
   const hasSpeechContent = hasDialogueContent || hasVoiceoverContent;
-  const videoPrompt = sanitizeVideoPromptText(options.baseVideoPrompt ?? shot.videoPrompt);
-  const characterPrompt = buildVideoCharacterReferencePrompt(project, shot);
-  const backgroundSoundPrompt = sanitizeVideoPromptText(shot.backgroundSoundPrompt);
-  const speechPrompt = sanitizeVideoPromptText(shot.speechPrompt);
+  const videoPrompt = normalizePromptClause(options.baseVideoPrompt ?? shot.videoPrompt);
+  const camera = normalizePromptClause(shot.camera);
+  const composition = normalizePromptClause(shot.composition);
+  const backgroundSoundPrompt = normalizePromptClause(shot.backgroundSoundPrompt);
+  const speechPrompt = normalizePromptClause(shot.speechPrompt);
   const inlineDialogueInstruction = buildInlineDialogueInstruction(project, shot);
   const inlineVoiceoverInstruction = buildInlineVoiceoverInstruction(shot);
-  const parts = [
-    buildVideoShotDirectivePromptWithDuration(shot, options.durationSeconds ?? shot.durationSeconds),
-    videoPrompt,
-    buildVideoSingleTakeGuardPrompt(),
-    buildVideoContinuityPrompt(shot),
-    buildVideoQualityGuardPrompt(hasDialogueContent)
-  ];
+  const transitionHint = normalizePromptClause(shot.transitionHint);
+  const languageLabel = describeProjectLanguage(project.settings.language);
+  const continuityPrompt = [
+    `${durationSeconds}秒连续镜头`,
+    camera,
+    composition,
+    '同一连续镜头内完成，不切镜，不换机位，不插入反打、补切或蒙太奇',
+    allowsDirectCameraGaze(shot)
+      ? '人物视线关系清楚，按镜头需要表现对镜视线或明确视线落点，其余人物继续看向对手、道具或画外空间'
+      : '人物视线关系清楚，视线落在对话对象、道具、动作目标、行进方向或画外空间，不直视镜头'
+  ]
+    .filter(Boolean)
+    .join('，');
+  const referencePrompt = buildReferenceFrameReferencePrompt(project, shot, 'start');
+  const soundParts: string[] = [];
 
-  if (characterPrompt) {
-    parts.push(characterPrompt);
+  if (backgroundSoundPrompt) {
+    soundParts.push(`背景环境音包括${backgroundSoundPrompt}`);
+  } else if (!hasSpeechContent) {
+    soundParts.push('只有自然环境音、动作音和空间氛围声，没有人声');
   }
 
   if (hasSpeechContent) {
-    parts.push(buildSpeechLanguageInstruction(project.settings.language, options.includeSpeechPrompt));
+    if (options.includeSpeechPrompt) {
+      if (inlineDialogueInstruction) {
+        soundParts.push(`对白使用${languageLabel}，${normalizePromptClause(inlineDialogueInstruction)}`);
+      }
 
-    if (backgroundSoundPrompt) {
-      parts.push(
-        options.includeSpeechPrompt
-          ? `背景声音要求：${backgroundSoundPrompt}`
-          : `背景声音要求：${backgroundSoundPrompt}。仅保留自然环境音、动作音和空间氛围声，不要额外生成独立对白人声。`
-      );
-    } else if (!options.includeSpeechPrompt) {
-      parts.push('背景声音要求：保留自然环境音、动作音和空间氛围声，不要额外生成独立对白人声。');
-    }
+      if (inlineVoiceoverInstruction) {
+        soundParts.push(`旁白使用${languageLabel}，${normalizePromptClause(inlineVoiceoverInstruction)}`);
+      }
 
-    if (hasDialogueContent) {
-      parts.push(
-        options.includeSpeechPrompt
-          ? '说话者要求：如镜头中有人说话，必须通过人物外观、身份和气质特征明确发声主体，并让口型、表情、动作与台词同步。'
-          : '口型表演要求：如镜头中有人说话，只表现正确说话主体的口型、呼吸、表情和身体伴随动作，不要额外生成独立对白人声；对白音轨会在后续单独处理。'
-      );
+      if (speechPrompt && !isSpeechPromptDisabled(shot.speechPrompt)) {
+        soundParts.push(speechPrompt);
+      }
+    } else if (hasDialogueContent) {
+      soundParts.push('画面只表现正确说话者的口型、呼吸和表情节奏，不额外生成对白人声');
     } else if (hasVoiceoverContent) {
-      parts.push(
-        options.includeSpeechPrompt
-          ? '旁白表演要求：这是画外音/旁白，不要让镜头内人物强行对口型；画面情绪、节奏和反应要与旁白信息同步。'
-          : '旁白表演要求：画面只需要承接画外音带来的情绪和节奏，不要额外生成独立对白人声，也不要让镜头内人物误开口。'
-      );
-    }
-  } else {
-    parts.push(
-      backgroundSoundPrompt
-        ? `声音要求：本镜头没有对白或旁白，不要出现人声或说话声；请生成自然、真实、连贯的背景环境音、动作音和空间氛围声。重点：${backgroundSoundPrompt}`
-        : '声音要求：本镜头没有对白或旁白，不要出现人声或说话声；请生成自然、真实、连贯的背景环境音、动作音和空间氛围声。'
-    );
-  }
-
-  if (options.includeSpeechPrompt) {
-    if (inlineDialogueInstruction) {
-      parts.push(
-        `对白内容要求：严格按以下“人物描述：对白”关系执行，不要改写台词文字，也不要输出字幕：${inlineDialogueInstruction}`
-      );
-    }
-
-    if (inlineVoiceoverInstruction) {
-      parts.push(`旁白内容要求：${inlineVoiceoverInstruction}。这是画外音，不要强行让镜头内人物都对口型。`);
-    }
-
-    if (speechPrompt) {
-      parts.push(`发声表演要求：${speechPrompt}`);
+      soundParts.push('画面情绪和节奏承接旁白，不让镜头内人物强行对口型，也不额外生成人声');
     }
   }
 
-  return parts.filter(Boolean).join('\n\n');
+  const parts = [
+    continuityPrompt,
+    videoPrompt,
+    referencePrompt,
+    soundParts.join('；'),
+    buildReferenceFrameCinematicProfilePrompt(project),
+    transitionHint && !isGenericCutTransitionHint(transitionHint) ? `镜头结尾为下一镜预留${transitionHint}` : ''
+  ];
+
+  return parts.filter(Boolean).join('；');
 }
 
 function getOptimizedVideoPromptOnly(
@@ -1543,23 +1534,20 @@ function getVideoWorkflowPrompt(
   const optimizedVideoPromptOnly = getOptimizedVideoPromptOnly(project, options.baseVideoPrompt);
 
   if (optimizedVideoPromptOnly) {
-    return sanitizeVideoPromptText(
-      appendTransitionHint(
-        [optimizedVideoPromptOnly, buildOffAxisGazeConstraintPrompt(shot)].filter(Boolean).join('\n\n'),
-        shot
-      )
-    );
+  return sanitizeVideoPromptText(
+    appendTransitionHint(
+      [optimizedVideoPromptOnly, buildOffAxisGazeConstraintPrompt(shot)].filter(Boolean).join('\n\n'),
+      shot
+    )
+  );
   }
 
   return sanitizeVideoPromptText(
-    appendTransitionHint(
-      buildMergedVideoPrompt(project, shot, {
-        includeSpeechPrompt: !shouldUseTtsWorkflow(project, appSettings),
-        durationSeconds: options.durationSeconds,
-        baseVideoPrompt: options.baseVideoPrompt
-      }),
-      shot
-    )
+    buildMergedVideoPrompt(project, shot, {
+      includeSpeechPrompt: !shouldUseTtsWorkflow(project, appSettings),
+      durationSeconds: options.durationSeconds,
+      baseVideoPrompt: options.baseVideoPrompt
+    })
   );
 }
 
@@ -2539,16 +2527,14 @@ function buildSegmentVideoPrompt(
   }
 
   if (segmentCount <= 1) {
-    return lastFramePrompt
-      ? `${basePrompt}\n\n镜头收束要求：镜头结尾必须自然落到以下尾帧状态，不要突然停帧、突然黑场或卡住动作：${lastFramePrompt}`
-      : basePrompt;
+    return lastFramePrompt ? `${basePrompt}；镜头结尾自然收束到${lastFramePrompt}` : basePrompt;
   }
 
   if (segmentIndex === segmentCount - 1) {
-    return `${basePrompt}\n\n本段是长镜头的收尾段，动作、表演和运镜必须自然减速并收束到以下尾帧描述，不要突然停帧或骤然切换：${lastFramePrompt}`;
+    return `${basePrompt}；本段是长镜头的收尾段，动作、表演和运镜自然减速并收束到${lastFramePrompt}`;
   }
 
-  return `${basePrompt}\n\n本段是长镜头的第 ${segmentIndex + 1}/${segmentCount} 段，整段最终尾帧已单独锁定；当前只需要保持人物、机位、动作、表演与光线连续，让动作自然延续并留出下一段承接空间，暂时不要提前收束到最终尾帧，也不要突然切断当前动作。`;
+  return `${basePrompt}；本段是长镜头第 ${segmentIndex + 1}/${segmentCount} 段，人物、机位、动作、表演与光线持续连贯，动作自然延续并为下一段留出承接空间，不提前收束到最终尾帧`;
 }
 
 async function resolveVideoPromptForWorkflow(
