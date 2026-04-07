@@ -1093,35 +1093,6 @@ function buildVideoCharacterReferencePrompt(
   ].join('\n');
 }
 
-function buildFirstFrameCharacterReferencePrompt(
-  project: Project,
-  shot: Project['storyboard'][number]
-): string {
-  const referenceLibrary = getGenerationReferenceLibraryForShot(project.referenceLibrary, shot, project.script);
-  const characters = referenceLibrary.characters
-    .map((item) => ({
-      name: item.name.trim(),
-      detail: buildCharacterReferenceDetail(item)
-    }))
-    .filter((item) => item.name && item.detail)
-    .slice(0, 6);
-  const characterNames = [...new Set(characters.map((item) => item.name.trim()).filter(Boolean))];
-
-  if (!characters.length) {
-    return '';
-  }
-
-  return [
-    '人物一致性约束：',
-    ...characters.map((item) => `- ${item.name}：${item.detail}`),
-    '- 上述人物参考只用于锁定可能出镜的命名角色，不代表所有人都必须同时进入当前画面。',
-    characterNames.length
-      ? `- 人物单实例硬约束：当前参考帧中 ${characterNames.join('、')} 如需出镜，各自都只能出现 1 次；不要出现同脸分身、克隆副本、双胞胎式重复、不同位置的第二个同角色，也不要把同一角色重复塞进背景。只有镜头文本明确要求镜子、玻璃、监控屏、照片或投影时，才允许出现该角色的真实反射或影像，而且不能多出第二个独立人物实体。`
-      : '',
-    '- 上述人物设定属于硬约束：脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质保持稳定；当前首帧里实际出镜的人物必须与这些设定一致，不要换脸、换装、换年龄感，也不要混入额外主角。'
-  ].join('\n');
-}
-
 function sanitizeVideoPromptText(text: string): string {
   return text
     .trim()
@@ -1129,6 +1100,10 @@ function sanitizeVideoPromptText(text: string): string {
     .replace(/\r\n?/g, '\n')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n');
+}
+
+function normalizePromptClause(text: string): string {
+  return sanitizeVideoPromptText(text).replace(/^[，。；、\s]+|[，。；、\s]+$/g, '');
 }
 
 function buildVideoShotDirectivePrompt(shot: Project['storyboard'][number]): string {
@@ -1345,66 +1320,63 @@ function appendReferenceContext(prompt: string, referenceContext: string): strin
 
 type ReferenceFrameKind = ShotReferenceFrameKind;
 
+function buildReferenceFrameVisualShotPrompt(
+  shot: Project['storyboard'][number],
+  frameKind: ReferenceFrameKind
+): string {
+  const camera = normalizePromptClause(shot.camera);
+  const composition = normalizePromptClause(shot.composition);
+  const visualParts = [camera, composition].filter(Boolean);
+
+  if (!visualParts.length) {
+    return '';
+  }
+
+  return `${frameKind === 'start' ? '镜头开始瞬间' : '镜头结束瞬间'}，${visualParts.join('，')}`;
+}
+
 function buildReferenceFrameGazePrompt(
   shot: Project['storyboard'][number],
   frameKind: ReferenceFrameKind
 ): string {
-  const gazeTargetRule =
-    '视线必须根据当前人物关系、说话对象、动作目标、道具方位、画外空间和运动方向来设计；除非镜头明确要求主观视角、对镜独白或正面压迫感，否则不要默认所有角色都面朝镜头、直视屏幕或统一看向画面正中央。';
-  const offAxisRule = buildOffAxisGazeConstraintPrompt(shot);
-
-  return frameKind === 'start'
-    ? `人物眼神要求：如画面中出现人物，必须明确主要人物在镜头开始瞬间的眼神方向、注视对象和眼神状态，写清是在看谁、看向哪里，以及这种眼神传达出的情绪与心理张力；不要只写“看向前方”或只写表情。${gazeTargetRule}\n${offAxisRule}`
-    : `人物眼神要求：如画面中出现人物，必须明确主要人物在镜头结束瞬间的眼神方向、注视对象和眼神状态，写清是在看谁、看向哪里，以及这种眼神传达出的情绪与心理张力；不要只写“看向前方”或只写表情。${gazeTargetRule}\n${offAxisRule}`;
+  return allowsDirectCameraGaze(shot)
+    ? `主要人物在${frameKind === 'start' ? '这一瞬间' : '收束时'}眼神清楚，按镜头需要表现对镜视线或明确的视线落点，其余人物继续看向对手、道具或画外空间`
+    : `主要人物在${frameKind === 'start' ? '这一瞬间' : '收束时'}眼神清楚，视线落在对手、道具、动作目标、行进方向或画外空间，不直视镜头`;
 }
 
-function buildReferenceFrameShotDirectivePrompt(
+function buildReferenceFrameReferencePrompt(
+  project: Project,
   shot: Project['storyboard'][number],
   frameKind: ReferenceFrameKind
 ): string {
-  const frameLabel = frameKind === 'start' ? '起始参考帧' : '结束参考帧';
-  const detailLines = [
-    `- 镜头标题与作用：${shot.title.trim()}，${shot.purpose.trim()}`,
-    `- 景别与机位：${shot.camera.trim()}`,
-    `- 构图与主体：${shot.composition.trim()}`,
-    frameKind === 'start'
-      ? '- 定格要求：这是镜头开始瞬间的静态画面，要明确主体位置、朝向、视线方向、眼神焦点、眼神状态、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次；人物朝向和视线要符合互动对象、动作目标和空间调度，不要默认正对镜头。'
-      : '- 定格要求：这是镜头结束瞬间的静态画面，要明确主体最终位置、朝向、视线方向、眼神焦点、眼神状态、表情、姿态、手部动作、关键道具状态，以及前景、中景、背景的空间层次；人物朝向和视线要符合互动对象、动作落点和空间调度，不要默认正对镜头。',
-    frameKind === 'start'
-      ? '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物起始动作，不要只写剧情概述，不要只写某人正在做某事这种过于简略的提示。'
-      : '- 画面要求：优先补足环境细节、时间光线、材质、氛围和人物收束后的最终状态，不要只写剧情概述，不要只写某人做完某事这种过于简略的提示。',
-    '- 人物唯一性：如有多人同框，同一个命名角色在当前画面里只能出现一次；不要生成同脸重复人物、分身、克隆或背景里的第二个同角色。'
-  ];
-
-  if (shot.dialogue.trim()) {
-    detailLines.push(`- 对白语境：镜头相关台词为${shot.dialogue.trim()}。这句台词只用于帮助理解人物状态与冲突，不要直接生成字幕文字。`);
-  }
-
-  if (shot.voiceover.trim()) {
-    detailLines.push(`- 旁白语境：镜头相关画外音为${shot.voiceover.trim()}。仅用于帮助理解情绪和信息，不要直接生成字幕文字。`);
-  }
-
-  return [`${frameLabel}画面要求：`, ...detailLines].join('\n');
-}
-
-function buildReferenceFrameQualityPrompt(
-  workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video',
-  frameKind: ReferenceFrameKind
-): string {
-  const frameLabel = frameKind === 'start' ? '起始参考帧' : '结束参考帧';
-  const parts = [
-    `${frameLabel}质量要求：`,
-    '- 输出必须是一张电影级写实静帧，不是概念草图、分镜示意图、海报、拼贴图、多联画、人物设定板或 UI 截图。',
-    '- 主体边缘清晰，人物五官稳定，双眼对称，手部结构正确，道具形体完整；避免糊脸、崩手、重复人物、同脸克隆、同角色二次出现、额外肢体、奇怪透视和背景漂移。',
-    '- 画面要同时具备明确主体、可读动作定格、前中后景层次、可信光线方向、材质细节和空间深度，优先选择最能代表镜头开场信息的决定性瞬间。',
-    '- 不要生成字幕、水印、logo、边框、贴纸、说明文字、时间戳，也不要做成二次元线稿感或低完成度草模感。'
-  ];
-
-  if (workflow === 'storyboard_image' || workflow === 'image_edit') {
-    parts.push(
-      '- 参考图只用于锁定人物身份、服装、场景和物品，不要照抄参考图构图，也不要把多张参考图机械拼接到同一张画面里。'
-    );
-  }
+  const referenceLibrary = getGenerationReferenceLibraryForShot(
+    project.referenceLibrary,
+    shot,
+    project.script,
+    frameKind
+  );
+  const characters = referenceLibrary.characters
+    .map((item) => {
+      const detail = normalizePromptClause(item.summary.trim() || item.generationPrompt.trim());
+      return detail ? `${item.name}，${detail}` : item.name.trim();
+    })
+    .filter(Boolean)
+    .slice(0, 6);
+  const scenes = referenceLibrary.scenes
+    .map((item) => {
+      const detail = normalizePromptClause(item.summary.trim() || item.generationPrompt.trim());
+      return detail ? `${item.name}，${detail}` : item.name.trim();
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+  const objects = referenceLibrary.objects
+    .map((item) => {
+      const detail = normalizePromptClause(item.summary.trim() || item.generationPrompt.trim());
+      return detail ? `${item.name}，${detail}` : item.name.trim();
+    })
+    .filter(Boolean)
+    .slice(0, 6);
+  const parts = [...characters, ...scenes, ...objects];
 
   return parts.join('\n');
 }
@@ -1412,17 +1384,17 @@ function buildReferenceFrameQualityPrompt(
 function buildReferenceFrameCinematicProfilePrompt(project: Project): string {
   const profile = project.settings.cinematicProfile;
   const styleLines = [
-    sanitizeVideoPromptText(profile.lensAndDepth)
-      ? `- 镜头与景深：${sanitizeVideoPromptText(profile.lensAndDepth)}`
+    normalizePromptClause(profile.lensAndDepth)
+      ? normalizePromptClause(profile.lensAndDepth)
       : '',
-    sanitizeVideoPromptText(profile.lightingAndContrast)
-      ? `- 布光与反差：${sanitizeVideoPromptText(profile.lightingAndContrast)}`
+    normalizePromptClause(profile.lightingAndContrast)
+      ? normalizePromptClause(profile.lightingAndContrast)
       : '',
-    sanitizeVideoPromptText(profile.colorPalette)
-      ? `- 色彩与调色：${sanitizeVideoPromptText(profile.colorPalette)}`
+    normalizePromptClause(profile.colorPalette)
+      ? normalizePromptClause(profile.colorPalette)
       : '',
-    sanitizeVideoPromptText(profile.textureAndAtmosphere)
-      ? `- 质感与氛围：${sanitizeVideoPromptText(profile.textureAndAtmosphere)}`
+    normalizePromptClause(profile.textureAndAtmosphere)
+      ? normalizePromptClause(profile.textureAndAtmosphere)
       : ''
   ].filter(Boolean);
 
@@ -1430,51 +1402,25 @@ function buildReferenceFrameCinematicProfilePrompt(project: Project): string {
     return '';
   }
 
-  return [
-    '参考帧摄影风格约束：',
-    ...styleLines,
-    '- 以上约束只用于当前参考帧静态生图，请把它落到真实可见的镜头光学、布光、调色、空气感和材质质感上，不要写成抽象风格口号。'
-  ].join('\n');
+  return styleLines.join('；');
 }
 
 function buildReferenceFrameWorkflowPrompt(
   project: Project,
   shot: Project['storyboard'][number],
-  workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video',
-  frameKind: ReferenceFrameKind
+  _workflow: 'storyboard_image' | 'text_to_image' | 'reference_image_to_image' | 'image_edit' | 'image_to_video',
+  frameKind: ReferenceFrameKind,
+  promptOverride?: string
 ): string {
-  const basePrompt = (frameKind === 'start' ? shot.firstFramePrompt : shot.lastFramePrompt).trim();
+  const basePrompt = (promptOverride ?? (frameKind === 'start' ? shot.firstFramePrompt : shot.lastFramePrompt)).trim();
+  const visualShotPrompt = buildReferenceFrameVisualShotPrompt(shot, frameKind);
+  const gazePrompt = buildReferenceFrameGazePrompt(shot, frameKind);
+  const referencePrompt = buildReferenceFrameReferencePrompt(project, shot, frameKind);
   const cinematicProfilePrompt = buildReferenceFrameCinematicProfilePrompt(project);
-  const characterPrompt = buildFirstFrameCharacterReferencePrompt(project, shot);
-  const qualityPrompt = buildReferenceFrameQualityPrompt(workflow, frameKind);
 
-  if (workflow === 'text_to_image') {
-    return [basePrompt, cinematicProfilePrompt, buildReferenceFrameGazePrompt(shot, frameKind), characterPrompt, qualityPrompt]
-      .filter(Boolean)
-      .join('\n\n');
-  }
-
-  const parts = [
-    buildReferenceFrameShotDirectivePrompt(shot, frameKind),
-    basePrompt,
-    cinematicProfilePrompt,
-    buildReferenceFrameGazePrompt(shot, frameKind),
-    characterPrompt,
-    qualityPrompt,
-    frameKind === 'start'
-      ? '补充要求：把镜头开场一瞬间写实地冻结成一张完整画面，优先具体化角色状态、空间关系和环境信息。'
-      : '补充要求：把镜头结束一瞬间写实地冻结成一张完整画面，优先具体化角色收束状态、空间关系和环境信息。'
-  ];
-
-  if (workflow === 'storyboard_image' || workflow === 'image_edit') {
-    parts.push(
-      `生成要求：基于参考输入重新生成一张全新的镜头${frameKind === 'start' ? '起始' : '结束'}参考帧。`,
-      '参考输入只用于提取人物身份、造型、服装、场景、物品和整体风格约束，不要把它当作待修补、待微调或待局部重绘的底图。',
-      '最终结果必须是一张新的完整画面，可以重新组织机位、景别、构图、动作、光线和背景，但要保持参考信息中的关键设定一致。'
-    );
-  }
-
-  return parts.filter(Boolean).join('\n\n');
+  return [visualShotPrompt, normalizePromptClause(basePrompt), gazePrompt, referencePrompt, cinematicProfilePrompt]
+    .filter(Boolean)
+    .join('；');
 }
 
 function buildMergedVideoPrompt(
@@ -2333,15 +2279,21 @@ function buildComfyVariables(
 
   return {
     prompt:
-      appendReferenceContext(
-        options.promptOverride ??
-          (workflow === 'image_to_video'
-            ? getVideoWorkflowPrompt(project, shot, appSettings, {
+      workflow === 'image_to_video'
+        ? appendReferenceContext(
+            options.promptOverride ??
+              getVideoWorkflowPrompt(project, shot, appSettings, {
                 durationSeconds
-              })
-            : buildReferenceFrameWorkflowPrompt(project, shot, workflow, options.frameKind ?? 'start')),
-        options.referenceContext ?? ''
-      ),
+              }),
+            options.referenceContext ?? ''
+          )
+        : buildReferenceFrameWorkflowPrompt(
+            project,
+            shot,
+            workflow,
+            options.frameKind ?? 'start',
+            options.promptOverride
+          ),
     negative_prompt: negativePrompt,
     output_prefix: options.outputPrefix ?? `${project.id}_${shot.id}_${workflow}`,
     image_width: resolvedImageDimensions.imageWidth,
@@ -4037,10 +3989,7 @@ async function generateReferenceFrameAssetForShot(
         ? 'image_edit'
         : 'text_to_image'
       : selectedWorkflow?.type ?? 'text_to_image';
-  const generationPrompt = appendReferenceContext(
-    buildReferenceFrameWorkflowPrompt(project, effectiveShot, promptWorkflow, frameKind),
-    generationReferenceInputs.referenceContext
-  );
+  const generationPrompt = buildReferenceFrameWorkflowPrompt(project, effectiveShot, promptWorkflow, frameKind);
   let buffer: Buffer;
   let extension: string;
 
