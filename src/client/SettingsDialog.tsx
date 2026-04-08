@@ -1,10 +1,19 @@
 import { DEFAULT_COMFY_WORKFLOW_TEMPLATE_PATHS, WORKFLOW_TEMPLATE_OPTIONS } from '../shared/workflow-templates';
-import type { AppMeta, AppSettings, ComfyWorkflowType } from '../shared/types';
+import type {
+  AppMeta,
+  AppSettings,
+  ComfyuiEnvironmentDiscovery,
+  ComfyuiRuntimeInfo,
+  ComfyWorkflowType
+} from '../shared/types';
 
 interface SettingsDialogProps {
   open: boolean;
   draft: AppSettings | null;
   status: AppMeta['envStatus'] | null;
+  comfyuiRuntime: ComfyuiRuntimeInfo | null;
+  comfyuiDiscovery: ComfyuiEnvironmentDiscovery | null;
+  comfyuiDiscoveryPending: boolean;
   dirty: boolean;
   pending: boolean;
   llmModels: string[];
@@ -13,7 +22,86 @@ interface SettingsDialogProps {
   onClose: () => void;
   onSave: () => void;
   onRefreshModels: () => void;
+  onRefreshComfyuiDiscovery: () => void;
   onChange: (next: AppSettings) => void;
+}
+
+function buildComfyuiEnvironmentSelectValue(type: AppSettings['comfyui']['environmentType'], id: string): string {
+  return type && id ? `${type}:${id}` : '';
+}
+
+function parseComfyuiEnvironmentSelectValue(value: string): {
+  environmentType: AppSettings['comfyui']['environmentType'];
+  environmentId: string;
+} {
+  const separatorIndex = value.indexOf(':');
+
+  if (separatorIndex <= 0) {
+    return {
+      environmentType: '',
+      environmentId: ''
+    };
+  }
+
+  const environmentType = value.slice(0, separatorIndex);
+  const environmentId = value.slice(separatorIndex + 1);
+
+  return {
+    environmentType: environmentType === 'venv' || environmentType === 'conda' ? environmentType : '',
+    environmentId
+  };
+}
+
+function formatComfyuiRuntimeStatus(runtime: ComfyuiRuntimeInfo | null): string {
+  if (!runtime) {
+    return '未检测';
+  }
+
+  if (!runtime.supported) {
+    return '当前仅支持 Linux';
+  }
+
+  if (!runtime.autoStartEnabled) {
+    return '已关闭自动启动';
+  }
+
+  if (!runtime.launchConfigured) {
+    return '待补全启动配置';
+  }
+
+  if (runtime.status === 'running') {
+    return runtime.pid ? `运行中 · PID ${runtime.pid}` : '运行中';
+  }
+
+  if (runtime.status === 'starting') {
+    return '启动中';
+  }
+
+  if (runtime.status === 'error') {
+    return '启动失败';
+  }
+
+  return '未启动';
+}
+
+function runtimePillClassName(runtime: ComfyuiRuntimeInfo | null): string {
+  if (!runtime) {
+    return 'pill';
+  }
+
+  if (runtime.status === 'running') {
+    return 'pill success';
+  }
+
+  if (runtime.status === 'starting') {
+    return 'pill running';
+  }
+
+  if (runtime.status === 'error') {
+    return 'pill error';
+  }
+
+  return 'pill';
 }
 
 export function SettingsDialog(props: SettingsDialogProps) {
@@ -21,6 +109,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
     open,
     draft,
     status,
+    comfyuiRuntime,
+    comfyuiDiscovery,
+    comfyuiDiscoveryPending,
     dirty,
     pending,
     llmModels,
@@ -29,6 +120,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
     onClose,
     onSave,
     onRefreshModels,
+    onRefreshComfyuiDiscovery,
     onChange
   } = props;
 
@@ -177,6 +269,22 @@ export function SettingsDialog(props: SettingsDialogProps) {
       ]
     }
   ];
+
+  const selectedEnvironmentValue = buildComfyuiEnvironmentSelectValue(
+    draft.comfyui.environmentType,
+    draft.comfyui.environmentId
+  );
+  const selectedEnvironmentMissing = Boolean(
+    selectedEnvironmentValue &&
+      comfyuiDiscovery &&
+      !comfyuiDiscovery.environments.some(
+        (environment) => buildComfyuiEnvironmentSelectValue(environment.type, environment.id) === selectedEnvironmentValue
+      )
+  );
+  const installPathEnvironmentCount =
+    comfyuiDiscovery?.environments.filter((environment) => environment.source === 'install_path').length ?? 0;
+  const condaEnvironmentCount =
+    comfyuiDiscovery?.environments.filter((environment) => environment.source === 'conda').length ?? 0;
 
   const renderWorkflowCard = (workflowKey: ComfyWorkflowType) => {
     const workflow = workflowConfigs[workflowKey];
@@ -434,8 +542,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
         <section className="settings-section">
           <div className="section-head">
-            <h3>ComfyUI API</h3>
-            <span>统一地址，按主分类和子设定项分别绑定工作流；工作流内自行固定 checkpoint</span>
+            <h3>ComfyUI</h3>
+            <div className="section-side">
+              <span>Linux 下可自动进入所选环境并运行 ComfyUI 根目录中的 `main.py`</span>
+              <span className={runtimePillClassName(comfyuiRuntime)}>{formatComfyuiRuntimeStatus(comfyuiRuntime)}</span>
+            </div>
           </div>
           <div className="form-grid">
             <label className="field span-2">
@@ -453,7 +564,96 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 }
                 placeholder="http://127.0.0.1:8188"
               />
+              <div className="inline-note">自动启动时会按这里的地址解析端口，并用它来探测服务是否已就绪。</div>
             </label>
+            <label className="field span-2">
+              <span>ComfyUI 根路径</span>
+              <input
+                value={draft.comfyui.installPath}
+                onChange={(event) =>
+                  onChange({
+                    ...draft,
+                    comfyui: {
+                      ...draft.comfyui,
+                      installPath: event.target.value
+                    }
+                  })
+                }
+                placeholder="/absolute/path/to/ComfyUI"
+              />
+              <div className="inline-note">
+                {comfyuiDiscoveryPending
+                  ? '正在探测路径内虚拟环境和系统 Conda 环境...'
+                  : draft.comfyui.installPath.trim()
+                    ? [
+                        comfyuiDiscovery?.installPathExists ? '路径可访问' : '路径不可访问',
+                        comfyuiDiscovery?.mainPyExists ? '已找到 main.py' : '未找到 main.py',
+                        installPathEnvironmentCount ? `路径内环境 ${installPathEnvironmentCount} 个` : '路径内未发现虚拟环境',
+                        condaEnvironmentCount ? `Conda 环境 ${condaEnvironmentCount} 个` : '未发现 Conda 环境'
+                      ].join(' · ')
+                    : '填写 ComfyUI 根路径后会自动探测可用环境。'}
+              </div>
+            </label>
+            <label className="field span-2">
+              <span>启动环境</span>
+              <div className="section-side">
+                <select
+                  value={selectedEnvironmentValue}
+                  onChange={(event) => {
+                    const nextEnvironment = parseComfyuiEnvironmentSelectValue(event.target.value);
+                    onChange({
+                      ...draft,
+                      comfyui: {
+                        ...draft.comfyui,
+                        environmentType: nextEnvironment.environmentType,
+                        environmentId: nextEnvironment.environmentId
+                      }
+                    });
+                  }}
+                >
+                  <option value="">请选择自动探测到的环境</option>
+                  {comfyuiDiscovery?.environments.map((environment) => (
+                    <option
+                      key={buildComfyuiEnvironmentSelectValue(environment.type, environment.id)}
+                      value={buildComfyuiEnvironmentSelectValue(environment.type, environment.id)}
+                    >
+                      [{environment.type === 'venv' ? '路径内环境' : 'Conda'}] {environment.label}
+                    </option>
+                  ))}
+                </select>
+                <button className="button ghost mini-button" onClick={onRefreshComfyuiDiscovery} type="button">
+                  重新探测
+                </button>
+              </div>
+              <div className="inline-note">
+                {selectedEnvironmentMissing
+                  ? '当前已保存的环境不在最新探测结果中，请重新选择。'
+                  : draft.comfyui.environmentType && draft.comfyui.environmentId
+                    ? '已选择启动环境，保存后会用该环境运行 main.py。'
+                    : '可从 ComfyUI 路径内虚拟环境或系统 Conda 环境中选择。'}
+              </div>
+            </label>
+            <div className="span-2">
+              <label className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={draft.comfyui.autoStart}
+                  onChange={(event) =>
+                    onChange({
+                      ...draft,
+                      comfyui: {
+                        ...draft.comfyui,
+                        autoStart: event.target.checked
+                      }
+                    })
+                  }
+                />
+                <span>保存后自动启动并托管本地 ComfyUI（仅 Linux 生效）</span>
+              </label>
+              <div className="inline-note">
+                关闭后系统只会调用你填写的 ComfyUI 地址，不会尝试启动本地进程。
+              </div>
+            </div>
             <label className="field">
               <span>轮询间隔 ms</span>
               <input
@@ -504,6 +704,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
               />
             </label>
           </div>
+          {comfyuiDiscovery?.errors.length ? (
+            <p className="settings-hint">{comfyuiDiscovery.errors.join(' ')}</p>
+          ) : null}
+          {comfyuiRuntime?.lastError ? <p className="settings-hint">{comfyuiRuntime.lastError}</p> : null}
+          <p className="settings-hint">统一地址，按主分类和子设定项分别绑定工作流；工作流内自行固定 checkpoint。</p>
           <div className="workflow-group-list">
             {workflowGroups.map((group) => (
               <section key={group.title} className="workflow-group">

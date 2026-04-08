@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { getAppSettings } from './app-settings.js';
+import { ensureComfyuiReady } from './comfyui-runtime.js';
 
 export interface ComfyOutputFile {
   filename: string;
@@ -172,6 +173,7 @@ export async function runComfyWorkflow(
   const signal = options.signal;
 
   throwIfAborted(signal);
+  await ensureComfyuiReady();
 
   const response = await fetch(`${settings.comfyui.baseUrl}/prompt`, {
     method: 'POST',
@@ -215,6 +217,7 @@ export async function fetchComfyOutputFile(file: ComfyOutputFile, options: Comfy
   });
 
   throwIfAborted(options.signal);
+  await ensureComfyuiReady();
 
   const response = await fetch(`${settings.comfyui.baseUrl}/view?${params.toString()}`, {
     signal: options.signal
@@ -247,6 +250,7 @@ async function uploadInputBufferToComfy(
   form.set('overwrite', 'true');
 
   throwIfAborted(options.signal);
+  await ensureComfyuiReady();
 
   const response = await fetch(`${settings.comfyui.baseUrl}/upload/image`, {
     method: 'POST',

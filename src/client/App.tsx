@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type {
   AppMeta,
   AppSettings,
+  ComfyuiEnvironmentDiscovery,
   GeneratedAsset,
   LlmModelDiscoveryResponse,
   Project,
@@ -103,6 +104,18 @@ interface ShotBrowserGroup {
   id: string;
   shots: Array<Project['storyboard'][number]>;
   longTakeIdentifier: string | null;
+}
+
+function createEmptyComfyuiDiscovery(installPath = '', error = ''): ComfyuiEnvironmentDiscovery {
+  return {
+    installPath,
+    installPathExists: false,
+    mainPyPath: installPath ? `${installPath}/main.py` : '',
+    mainPyExists: false,
+    condaExecutable: '',
+    environments: [],
+    errors: error ? [error] : []
+  };
 }
 
 const ASPECT_RATIO_LABELS: Record<ProjectSettings['aspectRatio'], string> = {
@@ -1327,6 +1340,9 @@ export function App() {
   const [llmModelsPending, setLlmModelsPending] = useState(false);
   const [llmModelsError, setLlmModelsError] = useState('');
   const [llmModelsReloadKey, setLlmModelsReloadKey] = useState(0);
+  const [comfyuiDiscovery, setComfyuiDiscovery] = useState<ComfyuiEnvironmentDiscovery | null>(null);
+  const [comfyuiDiscoveryPending, setComfyuiDiscoveryPending] = useState(false);
+  const [comfyuiDiscoveryReloadKey, setComfyuiDiscoveryReloadKey] = useState(0);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [project, setProject] = useState<Project | null>(null);
@@ -1411,7 +1427,9 @@ export function App() {
   }
 
   async function loadMeta() {
-    setMeta(await requestJson<AppMeta>('/api/meta'));
+    const nextMeta = await requestJson<AppMeta>('/api/meta');
+    setMeta(nextMeta);
+    return nextMeta;
   }
 
   async function loadAppSettings() {
@@ -1658,6 +1676,62 @@ export function App() {
     settingsDraft?.llm.baseUrl,
     settingsOpen
   ]);
+
+  useEffect(() => {
+    if (!settingsOpen || !settingsDraft) {
+      return;
+    }
+
+    const installPath = settingsDraft.comfyui.installPath.trim();
+
+    if (!installPath) {
+      setComfyuiDiscovery(createEmptyComfyuiDiscovery());
+      setComfyuiDiscoveryPending(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setComfyuiDiscoveryPending(true);
+
+      const query = new URLSearchParams({
+        installPath
+      });
+
+      void requestJson<ComfyuiEnvironmentDiscovery>(`/api/comfyui/discovery?${query.toString()}`, {
+        signal: controller.signal
+      })
+        .then((response) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+
+          setComfyuiDiscovery(response);
+        })
+        .catch((error) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+
+          setComfyuiDiscovery(
+            createEmptyComfyuiDiscovery(
+              installPath,
+              error instanceof Error ? error.message : 'ComfyUI 环境探测失败'
+            )
+          );
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setComfyuiDiscoveryPending(false);
+          }
+        });
+    }, 500);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [comfyuiDiscoveryReloadKey, settingsDraft?.comfyui.installPath, settingsOpen]);
 
   async function handleCreateProject() {
     const createSettings = buildCreateProjectSettings(
@@ -1909,8 +1983,13 @@ export function App() {
       setSettingsDraft(nextSettings);
       setSettingsDirty(false);
       setLlmModelsError('');
+      const nextMeta = await loadMeta();
+      if (nextMeta.comfyuiRuntime.status === 'error' && nextMeta.comfyuiRuntime.lastError) {
+        setNotice(`系统设置已保存，但 ComfyUI 自动启动失败：${nextMeta.comfyuiRuntime.lastError}`);
+        return;
+      }
+
       setNotice('系统设置已保存');
-      await loadMeta();
       setSettingsOpen(false);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '系统设置保存失败');
@@ -5088,6 +5167,9 @@ export function App() {
         open={settingsOpen}
         draft={settingsDraft}
         status={meta?.envStatus ?? null}
+        comfyuiRuntime={meta?.comfyuiRuntime ?? null}
+        comfyuiDiscovery={comfyuiDiscovery}
+        comfyuiDiscoveryPending={comfyuiDiscoveryPending}
         dirty={settingsDirty}
         pending={settingsPending}
         llmModels={llmModels}
@@ -5098,9 +5180,12 @@ export function App() {
           setSettingsDraft(appSettings);
           setSettingsDirty(false);
           setLlmModelsError('');
+          setComfyuiDiscovery(null);
+          setComfyuiDiscoveryPending(false);
         }}
         onSave={() => void handleSaveAppSettings()}
         onRefreshModels={() => setLlmModelsReloadKey((current) => current + 1)}
+        onRefreshComfyuiDiscovery={() => setComfyuiDiscoveryReloadKey((current) => current + 1)}
         onChange={(next) => {
           setSettingsDraft(next);
           setSettingsDirty(true);

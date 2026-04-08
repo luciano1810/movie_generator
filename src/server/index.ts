@@ -16,11 +16,15 @@ import {
   STAGE_LABELS
 } from '../shared/types.js';
 import { appConfig, fromStorageRelative } from './config.js';
-import { getAppSettings, getRuntimeStatus, initializeAppSettings, updateAppSettings } from './app-settings.js';
+import { getAppSettings, getRuntimeStatus, updateAppSettings } from './app-settings.js';
+import {
+  discoverComfyuiEnvironments,
+  getComfyuiRuntimeInfo,
+  syncManagedComfyuiRuntime
+} from './comfyui-runtime.js';
+import { bootstrapRuntime } from './bootstrap.js';
 import { discoverAvailableModels } from './openai-client.js';
 import {
-  ensureStorage,
-  clearInterruptedRunStates,
   createProject,
   deleteProject,
   listProjects,
@@ -198,9 +202,7 @@ function buildFinalVideoDownloadName(project: Project): string {
 }
 
 async function main(): Promise<void> {
-  await ensureStorage();
-  await initializeAppSettings();
-  const repairedRunStates = await clearInterruptedRunStates();
+  const { repairedRunStates } = await bootstrapRuntime();
 
   if (repairedRunStates > 0) {
     console.warn(`Recovered ${repairedRunStates} interrupted project run state(s).`);
@@ -227,6 +229,7 @@ async function main(): Promise<void> {
         label: STAGE_LABELS[stage]
       })),
       envStatus: getRuntimeStatus(appSettings),
+      comfyuiRuntime: getComfyuiRuntimeInfo(appSettings),
       workflowPaths: {
         character_asset: appSettings.comfyui.workflows.character_asset.workflowPath,
         storyboard_image: appSettings.comfyui.workflows.storyboard_image.workflowPath,
@@ -249,7 +252,17 @@ async function main(): Promise<void> {
 
   app.put('/api/app-settings', async (request, response, next) => {
     try {
-      response.json(await updateAppSettings((request.body ?? {}) as Partial<AppSettings>));
+      const nextSettings = await updateAppSettings((request.body ?? {}) as Partial<AppSettings>);
+      await syncManagedComfyuiRuntime(nextSettings);
+      response.json(nextSettings);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/comfyui/discovery', async (request, response, next) => {
+    try {
+      response.json(await discoverComfyuiEnvironments(String(request.query.installPath ?? '')));
     } catch (error) {
       next(error);
     }

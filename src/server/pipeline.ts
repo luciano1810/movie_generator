@@ -7,6 +7,7 @@ import {
   type GeneratedAsset,
   type LogLevel,
   type Project,
+  type ProjectLog,
   type ProjectRunState,
   type ReferenceAssetItem,
   type ReferenceAssetKind,
@@ -164,6 +165,19 @@ const NO_REFERENCE_TTS_VOICE_PRESETS = [
 ] as const;
 const DIRECT_CAMERA_GAZE_PATTERN =
   /主观镜头|主观视角|第一人称视角|对镜独白|直视镜头|正视镜头|看向镜头|盯着镜头|凝视镜头|看向观众|凝视观众|正面压迫感|压迫性直视|POV shot|first-person POV|direct-to-camera|look(?:ing)? (?:into|at) (?:the )?camera|stare(?:s|ing)? at (?:the )?(?:viewer|camera)|face(?:s|ing)? (?:the )?camera|direct eye contact with (?:the )?(?:viewer|camera|lens)/i;
+
+export interface PipelineProjectUpdateEvent {
+  projectId: string;
+  projectTitle: string;
+  updatedAt: string;
+  runState: ProjectRunState;
+  stages: Project['stages'];
+  lastLog: ProjectLog | null;
+}
+
+type PipelineProjectUpdateListener = (event: PipelineProjectUpdateEvent) => void;
+
+const pipelineProjectUpdateListeners = new Set<PipelineProjectUpdateListener>();
 
 function inferCharacterGenderHint(
   item: Pick<ReferenceAssetItem, 'genderHint' | 'summary' | 'generationPrompt'>
@@ -388,10 +402,54 @@ function syncProjectRunState(project: Project): void {
   }
 }
 
+function cloneStages(project: Project): Project['stages'] {
+  return Object.fromEntries(
+    STAGES.map((stage) => [
+      stage,
+      {
+        ...project.stages[stage],
+        progress: project.stages[stage].progress ? { ...project.stages[stage].progress } : null
+      }
+    ])
+  ) as Project['stages'];
+}
+
+function emitPipelineProjectUpdate(project: Project): void {
+  if (!pipelineProjectUpdateListeners.size) {
+    return;
+  }
+
+  const lastLog = project.logs.at(-1) ?? null;
+  const event: PipelineProjectUpdateEvent = {
+    projectId: project.id,
+    projectTitle: project.title,
+    updatedAt: project.updatedAt,
+    runState: { ...project.runState },
+    stages: cloneStages(project),
+    lastLog: lastLog ? { ...lastLog } : null
+  };
+
+  for (const listener of pipelineProjectUpdateListeners) {
+    try {
+      listener(event);
+    } catch (error) {
+      console.warn('Pipeline project update listener failed:', error);
+    }
+  }
+}
+
+export function subscribePipelineProjectUpdates(listener: PipelineProjectUpdateListener): () => void {
+  pipelineProjectUpdateListeners.add(listener);
+  return () => {
+    pipelineProjectUpdateListeners.delete(listener);
+  };
+}
+
 async function saveProject(project: Project): Promise<void> {
   syncProjectRunState(project);
   project.updatedAt = now();
   await writeProject(project);
+  emitPipelineProjectUpdate(project);
 }
 
 async function persistProjectRunState(projectId: string, runState: ProjectRunState): Promise<void> {
@@ -401,6 +459,7 @@ async function persistProjectRunState(projectId: string, runState: ProjectRunSta
   project.runState = nextRunState;
   project.updatedAt = now();
   await writeProject(project);
+  emitPipelineProjectUpdate(project);
 }
 
 function isPauseRequested(projectId: string): boolean {
@@ -4811,6 +4870,21 @@ export function isProjectRunning(projectId: string): boolean {
 
 export function isReferenceGenerationRunning(projectId: string): boolean {
   return runningReferenceGenerations.has(projectId);
+}
+
+export async function runProjectDirect(projectId: string, stage: RunStage): Promise<void> {
+  if (runningProjects.has(projectId)) {
+    throw new Error('当前项目已有任务在运行。');
+  }
+
+  const runner = stage === 'all' ? runAll(projectId) : runSingle(projectId, stage);
+  runningProjects.set(projectId, runner);
+
+  try {
+    await runner;
+  } finally {
+    runningProjects.delete(projectId);
+  }
 }
 
 export async function enqueueProjectRun(projectId: string, stage: RunStage): Promise<void> {

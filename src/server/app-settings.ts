@@ -19,6 +19,14 @@ function normalizeWorkflowPath(value: string): string {
   return resolveMaybeRelative(value, value);
 }
 
+function normalizeFilesystemPath(value: string): string {
+  if (!value) {
+    return '';
+  }
+
+  return resolveMaybeRelative(value, value);
+}
+
 function normalizeRuntimePaths(settings: AppSettings): AppSettings {
   const workflows = Object.fromEntries(
     COMFYUI_WORKFLOW_TYPES.map((workflowType) => [
@@ -34,6 +42,11 @@ function normalizeRuntimePaths(settings: AppSettings): AppSettings {
     ...settings,
     comfyui: {
       ...settings.comfyui,
+      installPath: normalizeFilesystemPath(settings.comfyui.installPath),
+      environmentId:
+        settings.comfyui.environmentType === 'venv'
+          ? normalizeFilesystemPath(settings.comfyui.environmentId)
+          : settings.comfyui.environmentId.trim(),
       workflows
     }
   };
@@ -99,6 +112,12 @@ export function getRuntimeStatus(settings = getAppSettings()): RuntimeStatus {
     llmConfigured: Boolean(settings.llm.baseUrl && settings.llm.apiKey && settings.llm.model),
     geminiConfigured: Boolean(settings.gemini.baseUrl && settings.gemini.apiKey),
     comfyuiConfigured: Boolean(settings.comfyui.baseUrl),
+    comfyuiLaunchConfigured: Boolean(
+      settings.comfyui.autoStart &&
+        settings.comfyui.installPath &&
+        settings.comfyui.environmentType &&
+        settings.comfyui.environmentId
+    ),
     characterAssetWorkflowExists: workflowExists(settings.comfyui.workflows.character_asset.workflowPath),
     storyboardImageWorkflowExists: workflowExists(settings.comfyui.workflows.storyboard_image.workflowPath),
     textToImageWorkflowExists: workflowExists(settings.comfyui.workflows.text_to_image.workflowPath),

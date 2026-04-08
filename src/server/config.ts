@@ -9,6 +9,24 @@ dotenv.config();
 const cwd = process.cwd();
 const resolvedFfmpegPath = typeof ffmpegStatic === 'string' ? ffmpegStatic : '';
 
+function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
 export function resolveMaybeRelative(value: string | undefined, fallbackRelativePath: string): string {
   const chosen = value && value.trim() ? value.trim() : fallbackRelativePath;
   return path.isAbsolute(chosen) ? chosen : path.resolve(cwd, chosen);
@@ -35,6 +53,22 @@ export const envAppSettingsDefaults: AppSettings = {
   },
   comfyui: {
     baseUrl: process.env.COMFYUI_BASE_URL ?? 'http://100.100.8.2:8188',
+    installPath: process.env.COMFYUI_PATH ? resolveMaybeRelative(process.env.COMFYUI_PATH, process.env.COMFYUI_PATH) : '',
+    environmentType:
+      process.env.COMFYUI_ENV_TYPE === 'venv' || process.env.COMFYUI_ENV_TYPE === 'conda'
+        ? process.env.COMFYUI_ENV_TYPE
+        : process.env.COMFYUI_PYTHON_PATH
+          ? 'venv'
+          : process.env.COMFYUI_CONDA_PREFIX || process.env.COMFYUI_CONDA_ENV
+            ? 'conda'
+        : '',
+    environmentId:
+      process.env.COMFYUI_ENV_ID ??
+      process.env.COMFYUI_PYTHON_PATH ??
+      process.env.COMFYUI_CONDA_PREFIX ??
+      process.env.COMFYUI_CONDA_ENV ??
+      '',
+    autoStart: parseBooleanEnv(process.env.COMFYUI_AUTO_START, true),
     workflows: {
       character_asset: {
         workflowPath: resolveMaybeRelative(

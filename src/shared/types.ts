@@ -19,6 +19,8 @@ export const GEMINI_IMAGE_MODELS = [
   'models/gemini-3.1-flash-image-preview',
   'models/gemini-3-pro-image-preview'
 ] as const;
+export const COMFYUI_ENVIRONMENT_TYPES = ['venv', 'conda'] as const;
+export const COMFYUI_RUNTIME_STATUSES = ['stopped', 'starting', 'running', 'error'] as const;
 
 export type StageId = (typeof STAGES)[number];
 export type ComfyWorkflowType = (typeof COMFYUI_WORKFLOW_TYPES)[number];
@@ -28,6 +30,8 @@ export type StoryLength = (typeof STORY_LENGTHS)[number];
 export type VideoFps = (typeof VIDEO_FPS_OPTIONS)[number];
 export type ImageGenerationProvider = (typeof IMAGE_GENERATION_PROVIDERS)[number];
 export type GeminiImageModel = (typeof GEMINI_IMAGE_MODELS)[number];
+export type ComfyuiEnvironmentType = (typeof COMFYUI_ENVIRONMENT_TYPES)[number];
+export type ComfyuiRuntimeStatus = (typeof COMFYUI_RUNTIME_STATUSES)[number];
 export type RunStage = StageId | 'all';
 export type StageStatus = 'idle' | 'running' | 'success' | 'error';
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -49,6 +53,10 @@ export interface AppSettings {
   };
   comfyui: {
     baseUrl: string;
+    installPath: string;
+    environmentType: ComfyuiEnvironmentType | '';
+    environmentId: string;
+    autoStart: boolean;
     workflows: Record<ComfyWorkflowType, ComfyWorkflowSettings>;
     pollIntervalMs: number;
     timeoutMs: number;
@@ -63,6 +71,7 @@ export interface RuntimeStatus {
   llmConfigured: boolean;
   geminiConfigured: boolean;
   comfyuiConfigured: boolean;
+  comfyuiLaunchConfigured: boolean;
   characterAssetWorkflowExists: boolean;
   storyboardImageWorkflowExists: boolean;
   textToImageWorkflowExists: boolean;
@@ -362,6 +371,35 @@ export interface AppMeta {
   stages: Array<{ id: StageId; label: string }>;
   envStatus: RuntimeStatus;
   workflowPaths: Record<ComfyWorkflowType, string>;
+  comfyuiRuntime: ComfyuiRuntimeInfo;
+}
+
+export interface ComfyuiDetectedEnvironment {
+  id: string;
+  type: ComfyuiEnvironmentType;
+  label: string;
+  path: string;
+  source: 'install_path' | 'conda';
+  pythonPath: string;
+}
+
+export interface ComfyuiEnvironmentDiscovery {
+  installPath: string;
+  installPathExists: boolean;
+  mainPyPath: string;
+  mainPyExists: boolean;
+  condaExecutable: string;
+  environments: ComfyuiDetectedEnvironment[];
+  errors: string[];
+}
+
+export interface ComfyuiRuntimeInfo {
+  supported: boolean;
+  autoStartEnabled: boolean;
+  launchConfigured: boolean;
+  status: ComfyuiRuntimeStatus;
+  pid: number | null;
+  lastError: string;
 }
 
 function normalizeReferenceSearchText(value: string): string {
@@ -745,6 +783,10 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   },
   comfyui: {
     baseUrl: 'http://127.0.0.1:8188',
+    installPath: '',
+    environmentType: '',
+    environmentId: '',
+    autoStart: true,
     workflows: {
       character_asset: {
         workflowPath: ''
@@ -821,6 +863,15 @@ function normalizeImageGenerationProvider(
 
 function normalizeGeminiImageModel(value: unknown, fallback: GeminiImageModel): GeminiImageModel {
   return GEMINI_IMAGE_MODELS.includes(value as GeminiImageModel) ? (value as GeminiImageModel) : fallback;
+}
+
+function normalizeComfyuiEnvironmentType(
+  value: unknown,
+  fallback: ComfyuiEnvironmentType | ''
+): ComfyuiEnvironmentType | '' {
+  return COMFYUI_ENVIRONMENT_TYPES.includes(value as ComfyuiEnvironmentType)
+    ? (value as ComfyuiEnvironmentType)
+    : fallback;
 }
 
 function normalizeCinematicProfile(
@@ -1028,6 +1079,10 @@ export function normalizeAppSettings(input: Partial<AppSettings> | undefined, fa
     },
     comfyui: {
       baseUrl: normalizeEditableString(rawComfyui.baseUrl, fallback.comfyui.baseUrl),
+      installPath: normalizeEditableString(rawComfyui.installPath, fallback.comfyui.installPath),
+      environmentType: normalizeComfyuiEnvironmentType(rawComfyui.environmentType, fallback.comfyui.environmentType),
+      environmentId: normalizeEditableString(rawComfyui.environmentId, fallback.comfyui.environmentId),
+      autoStart: normalizeBoolean(rawComfyui.autoStart, fallback.comfyui.autoStart),
       workflows: {
         character_asset: normalizeComfyWorkflowSettings(
           rawWorkflows.character_asset,
