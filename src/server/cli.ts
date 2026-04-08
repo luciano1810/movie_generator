@@ -4,6 +4,9 @@ import process from 'node:process';
 import {
   STAGES,
   STAGE_LABELS,
+  STORY_LENGTH_LABELS,
+  STORY_LENGTHS,
+  type StoryLength,
   type StageId
 } from '../shared/types.js';
 import { bootstrapRuntime } from './bootstrap.js';
@@ -19,13 +22,17 @@ type CliValues = Record<string, string | boolean | undefined>;
 function printUsage(): void {
   console.log(`用法:
   npm run cli:dev
-  npm run cli:dev -- project create --title "<项目名>" --new "<创意/文案>"
-  npm run cli:dev -- project create --title "<项目名>" --optimize "<已有剧本/文案>"
+  npm run cli:dev -- project create --title "<项目名>" --new "<创意/文案>" --length medium
+  npm run cli:dev -- project create --title "<项目名>" --optimize "<已有剧本/文案>" --length short
   npm run cli:dev -- project run --name "<项目名>"
 
 交互模式:
   help               查看帮助
   exit / quit        退出交互模式
+
+篇幅可选:
+  test | short | medium | long
+  测试 | 短篇 | 中篇 | 长篇
 `);
 }
 
@@ -124,6 +131,39 @@ function tokenizeCommandLine(input: string): string[] {
   return tokens;
 }
 
+function normalizeStoryLength(value: string | undefined): StoryLength | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (STORY_LENGTHS.includes(normalized as StoryLength)) {
+    return normalized as StoryLength;
+  }
+
+  if (normalized === '测试') {
+    return 'test';
+  }
+
+  if (normalized === '短篇') {
+    return 'short';
+  }
+
+  if (normalized === '中篇') {
+    return 'medium';
+  }
+
+  if (normalized === '长篇') {
+    return 'long';
+  }
+
+  return null;
+}
+
 class TerminalProgressRenderer {
   private currentStage: StageId | null = null;
   private lastLine = '';
@@ -194,6 +234,9 @@ function parseCliInvocation(args: string[]): {
       optimize: {
         type: 'string'
       },
+      length: {
+        type: 'string'
+      },
       name: {
         type: 'string'
       },
@@ -235,6 +278,8 @@ async function handleProjectCreate(values: CliValues): Promise<void> {
   const title = typeof values.title === 'string' ? values.title.trim() : '';
   const newSource = typeof values.new === 'string' ? values.new.trim() : '';
   const optimizeSource = typeof values.optimize === 'string' ? values.optimize.trim() : '';
+  const rawLength = typeof values.length === 'string' ? values.length.trim() : '';
+  const storyLength = normalizeStoryLength(rawLength);
 
   if (!title) {
     throw new Error('创建项目时必须提供 --title。');
@@ -244,17 +289,23 @@ async function handleProjectCreate(values: CliValues): Promise<void> {
     throw new Error('创建项目时必须且只能提供一个来源：--new 或 --optimize。');
   }
 
+  if (rawLength && !storyLength) {
+    throw new Error('`--length` 仅支持：test、short、medium、long，或 测试、短篇、中篇、长篇。');
+  }
+
   const project = await createProject({
     title,
     sourceText: newSource || optimizeSource,
     settings: {
-      scriptMode: newSource ? 'generate' : 'optimize'
+      scriptMode: newSource ? 'generate' : 'optimize',
+      ...(storyLength ? { storyLength } : {})
     }
   });
 
   console.log(`项目已创建: ${project.title}`);
   console.log(`ID: ${project.id}`);
   console.log(`模式: ${project.settings.scriptMode === 'generate' ? '生成新剧本' : '优化已有剧本'}`);
+  console.log(`篇幅: ${STORY_LENGTH_LABELS[project.settings.storyLength]} (${project.settings.storyLength})`);
 }
 
 async function handleProjectRun(values: CliValues): Promise<void> {

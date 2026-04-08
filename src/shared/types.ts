@@ -738,9 +738,9 @@ export function getDefaultShotDurationSeconds(value: Pick<ProjectSettings, 'stor
 }
 
 export function getStoryboardShotFallbackDurationSeconds(
-  value: Pick<ProjectSettings, 'maxVideoSegmentDurationSeconds'>
+  value: Pick<ProjectSettings, 'storyLength' | 'maxVideoSegmentDurationSeconds'>
 ): number {
-  return Math.max(1, Math.min(4, value.maxVideoSegmentDurationSeconds || 4));
+  return Math.max(1, Math.min(getDefaultShotDurationSeconds(value), value.maxVideoSegmentDurationSeconds || 4));
 }
 
 export const DEFAULT_SETTINGS: ProjectSettings = {
@@ -916,23 +916,6 @@ function inferStoryLength(
     return explicit;
   }
 
-  const legacyTargetSceneCount = Number(input.targetSceneCount);
-  if (Number.isFinite(legacyTargetSceneCount) && legacyTargetSceneCount > 0) {
-    if (legacyTargetSceneCount >= 8) {
-      return 'long';
-    }
-
-    if (legacyTargetSceneCount >= 5) {
-      return 'medium';
-    }
-
-    if (legacyTargetSceneCount >= 3) {
-      return 'short';
-    }
-
-    return 'test';
-  }
-
   const legacyShotDurationSeconds = Number(input.defaultShotDurationSeconds);
   if (Number.isFinite(legacyShotDurationSeconds) && legacyShotDurationSeconds > 0) {
     if (legacyShotDurationSeconds >= 6) {
@@ -944,6 +927,23 @@ function inferStoryLength(
     }
 
     if (legacyShotDurationSeconds >= 4) {
+      return 'short';
+    }
+
+    return 'test';
+  }
+
+  const legacyTargetSceneCount = Number(input.targetSceneCount);
+  if (Number.isFinite(legacyTargetSceneCount) && legacyTargetSceneCount > 0) {
+    if (legacyTargetSceneCount >= 8) {
+      return 'long';
+    }
+
+    if (legacyTargetSceneCount >= 5) {
+      return 'medium';
+    }
+
+    if (legacyTargetSceneCount >= 3) {
       return 'short';
     }
 

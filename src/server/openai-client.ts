@@ -1403,8 +1403,12 @@ function buildStoryboardShotDurationGuideline(settings: ProjectSettings): string
     2,
     Math.min(getPreferredLongShotDurationSeconds(settings), maxVideoSegmentDurationSeconds)
   );
+  const preferredPlotBeatDurationSeconds = Math.max(
+    3,
+    Math.min(maxVideoSegmentDurationSeconds, Math.max(preferredLongShotDurationSeconds, 4))
+  );
 
-  return `每个镜头的 durationSeconds 必须由你在分镜时独立决定。项目篇幅只决定整片总量，不决定单个镜头该拍几秒。请根据当前镜头承载的信息量、动作完整度、表演停顿、对白长度、运镜路径和情绪发酵空间自行给出时长；反应、插入、视线、道具和动作细节镜头可以明显短一些，大多数镜头优先控制在 ${preferredLongShotDurationSeconds} 秒以内，只有明确需要完整长动作或连续情绪沉浸时才写得更长，但任何一个镜头都不能超过 ${maxVideoSegmentDurationSeconds} 秒。`;
+  return `每个镜头的 durationSeconds 必须由你在分镜时独立决定。项目篇幅只决定整片总量，不决定单个镜头该拍几秒。请根据当前镜头承载的信息量、动作完整度、表演停顿、对白长度、运镜路径和情绪发酵空间自行给出时长；反应、插入、视线、道具和动作细节镜头可以明显短一些，但承载明确剧情推进、完整一句意思、关系变化或信息落点的镜头，通常不要短于 ${preferredPlotBeatDurationSeconds} 秒。2 到 3 秒镜头只留给真正的插入、撞击、瞬时反应或极短促的强调点；大多数镜头优先控制在 ${preferredLongShotDurationSeconds} 到 ${Math.min(maxVideoSegmentDurationSeconds, preferredLongShotDurationSeconds + 2)} 秒内，只有明确需要完整长动作或连续情绪沉浸时才写得更长，但任何一个镜头都不能超过 ${maxVideoSegmentDurationSeconds} 秒。`;
 }
 
 function buildStoryboardShotSplitGuideline(settings: ProjectSettings): string {
@@ -1414,7 +1418,7 @@ function buildStoryboardShotSplitGuideline(settings: ProjectSettings): string {
     Math.min(getPreferredLongShotDurationSeconds(settings), maxVideoSegmentDurationSeconds)
   );
 
-  return `是否继续拆镜首先看当前内容是否已经出现新的戏剧节拍、对白接话点、反应点、动作阶段变化、视线目标变化、人物进出场、空间揭示或信息反转；只要这些变化成立，就优先主动拆成多个镜头，用反打、插入、推拉、跟移、过肩、主观视角、细节特写和环境承接镜头把节奏拆细。只有当一个镜头确实只承担单一动作/单一反应/单一情绪停顿，并且明确需要保持一镜到底时，才把它保留在一个镜头内；如果预计单镜头会超过 ${preferredLongShotDurationSeconds} 秒且内部已有多个节拍，优先拆成 2 到 4 个镜头；如果一条连续长镜头总时长超过 ${maxVideoSegmentDurationSeconds} 秒，必须拆成多个带同一 longTakeIdentifier 的连续分段。`;
+  return `是否继续拆镜首先看当前内容是否已经出现新的戏剧节拍、对白主导权切换、反应落点、动作阶段变化、视线目标变化、人物进出场、空间揭示或信息反转；只要这些变化成立，就优先主动拆成多个镜头，用反打、插入、推拉、跟移、过肩、主观视角、细节特写和环境承接镜头把节奏拆细。但分镜的最小单位应该是“完整的戏剧节拍”，不是“每一句台词”或“每一次抬眼/点头”；如果人物关系、空间轴线、动作目标和情绪方向还在同一个连续推进里，即使有来回对白，也优先放在同一个镜头或同一组连贯镜头里，不要机械地一问一答就切一次。只有当一个镜头确实只承担单一动作/单一反应/单一情绪停顿，并且明确需要保持一镜到底时，才把它保留在一个镜头内；如果预计单镜头会超过 ${preferredLongShotDurationSeconds} 秒且内部已有多个节拍，优先拆成 2 到 4 个镜头；如果一条连续长镜头总时长超过 ${maxVideoSegmentDurationSeconds} 秒，必须拆成多个带同一 longTakeIdentifier 的连续分段。`;
 }
 
 function getStoryLengthScriptGenerationTarget(settings: ProjectSettings): {
@@ -1477,20 +1481,20 @@ function getStoryboardStructureRequirement(settings: ProjectSettings): {
   if (settings.storyLength === 'long') {
     return {
       minimumScenes: 8,
-      minimumShotsPerScene: 12
+      minimumShotsPerScene: 4
     };
   }
 
   if (settings.storyLength === 'medium') {
     return {
       minimumScenes: 5,
-      minimumShotsPerScene: 8
+      minimumShotsPerScene: 3
     };
   }
 
   return {
     minimumScenes: 3,
-    minimumShotsPerScene: 4
+    minimumShotsPerScene: 3
   };
 }
 
@@ -1896,6 +1900,242 @@ export interface StoryboardReferenceAssetReviewResult {
   reassignedShotCount: number;
 }
 
+interface StoryboardFragmentationSceneMetric {
+  sceneNumber: number;
+  durationSeconds: number;
+  shotCount: number;
+  shotSummaries: string[];
+  exceedsDenseShortSceneThreshold: boolean;
+}
+
+interface StoryboardFragmentationMetrics {
+  totalShots: number;
+  shortShotCount: number;
+  shortShotRatio: number;
+  scenes: StoryboardFragmentationSceneMetric[];
+}
+
+interface StoryboardFragmentationReviewPayload {
+  ok?: boolean;
+  requiresReplan?: boolean;
+  summary?: string;
+  feedback?: string;
+}
+
+interface StoryboardFragmentationReviewResult {
+  ok: boolean;
+  requiresReplan: boolean;
+  feedback: string;
+}
+
+function normalizeStoryboardFragmentationReviewBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function getStoryboardFragmentationMetrics(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[]
+): StoryboardFragmentationMetrics {
+  const shotsByScene = new Map<number, StoryboardShot[]>();
+
+  for (const shot of storyboard) {
+    const existing = shotsByScene.get(shot.sceneNumber) ?? [];
+    existing.push(shot);
+    shotsByScene.set(shot.sceneNumber, existing);
+  }
+
+  const scenes = script.scenes.map((scene) => {
+    const shots = (shotsByScene.get(scene.sceneNumber) ?? []).sort((left, right) => left.shotNumber - right.shotNumber);
+    const shotCount = shots.length;
+
+    return {
+      sceneNumber: scene.sceneNumber,
+      durationSeconds: scene.durationSeconds,
+      shotCount,
+      shotSummaries: shots.map((shot) => `${shot.shotNumber}(${shot.durationSeconds}s) ${shot.title}`),
+      exceedsDenseShortSceneThreshold: scene.durationSeconds >= 10 && scene.durationSeconds <= 15 && shotCount >= 4
+    } satisfies StoryboardFragmentationSceneMetric;
+  });
+
+  const shortShotCount = storyboard.filter((shot) => shot.durationSeconds < 3).length;
+  const totalShots = storyboard.length;
+
+  return {
+    totalShots,
+    shortShotCount,
+    shortShotRatio: totalShots > 0 ? shortShotCount / totalShots : 0,
+    scenes
+  };
+}
+
+function formatStoryboardFragmentationPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function buildStoryboardFragmentationHardRuleFeedback(metrics: StoryboardFragmentationMetrics): string {
+  const issues: string[] = [];
+  const denseShortScenes = metrics.scenes.filter((scene) => scene.exceedsDenseShortSceneThreshold);
+
+  if (denseShortScenes.length) {
+    issues.push(
+      denseShortScenes
+        .map(
+          (scene) =>
+            `场景 ${scene.sceneNumber} 仅 ${scene.durationSeconds}s，却被拆成 ${scene.shotCount} 镜（命中“10 到 15 秒场景不得拆成 4 镜及以上”的高风险规则）`
+        )
+        .join('；')
+    );
+  }
+
+  if (metrics.shortShotRatio > 0.3) {
+    issues.push(
+      `全片共有 ${metrics.totalShots} 镜，其中 ${metrics.shortShotCount} 镜低于 3 秒，占比 ${formatStoryboardFragmentationPercent(
+        metrics.shortShotRatio
+      )}，超过 30% 的高风险阈值`
+    );
+  }
+
+  return issues.join('；');
+}
+
+function buildStoryboardFragmentationReviewContext(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[],
+  metrics: StoryboardFragmentationMetrics
+): string {
+  const scenes = metrics.scenes
+    .map((sceneMetric) => {
+      const scene = script.scenes.find((item) => item.sceneNumber === sceneMetric.sceneNumber);
+      const heading = scene?.sceneHeading || buildFallbackSceneHeading(scene?.location ?? '', scene?.timeOfDay ?? '');
+      const summary = scene?.summary?.trim() || '无场景摘要';
+
+      return [
+        `- 场景 ${sceneMetric.sceneNumber}｜${heading || `scene ${sceneMetric.sceneNumber}`}｜时长 ${sceneMetric.durationSeconds}s｜镜头数 ${sceneMetric.shotCount}｜是否命中短场过密规则：${sceneMetric.exceedsDenseShortSceneThreshold ? '是' : '否'}`,
+        `  场景推进：${summary}`,
+        `  镜头列表：${sceneMetric.shotSummaries.join('；') || '无'}`
+      ].join('\n');
+    })
+    .join('\n\n');
+
+  const shortShots = storyboard
+    .filter((shot) => shot.durationSeconds < 3)
+    .map((shot) => `scene ${shot.sceneNumber} shot ${shot.shotNumber}（${shot.durationSeconds}s，${shot.title}）`)
+    .join('；');
+
+  return [
+    `全片总镜头数：${metrics.totalShots}`,
+    `低于 3 秒的镜头数：${metrics.shortShotCount}`,
+    `低于 3 秒镜头占比：${formatStoryboardFragmentationPercent(metrics.shortShotRatio)}`,
+    `低于 3 秒的镜头明细：${shortShots || '无'}`,
+    '',
+    '分场统计：',
+    scenes || '无'
+  ].join('\n');
+}
+
+function getStoryboardFragmentationReviewMaxTokens(storyboard: StoryboardShot[]): number {
+  return Math.min(6_000, Math.max(1_500, storyboard.length * 120 + 1_000));
+}
+
+function buildStoryboardFragmentationReviewPrompt(
+  script: ScriptPackage,
+  settings: ProjectSettings,
+  storyboard: StoryboardShot[],
+  metrics: StoryboardFragmentationMetrics,
+  hardRuleFeedback: string
+): string {
+  const hardRuleNotice = hardRuleFeedback
+    ? `已触发的硬规则告警：${hardRuleFeedback}`
+    : '当前本地硬规则统计没有直接触发阈值，但你仍需审查是否存在镜头过碎、节拍被切裂、对白被机械切碎的问题。';
+
+  return `请审查这份“已完整生成”的分镜是否存在高风险碎镜头问题，并只输出 JSON。
+
+审查目标：
+1. 判断分镜是否因为切得过碎，导致剧情推进被拆散、对白主导权被切裂、反应镜泛滥或单镜头只剩零碎句子/抬眼/停顿。
+2. 下面两条是硬规则，只要命中任意一条，就必须判定为需要重规划：
+   - 如果某场时长在 10 到 15 秒之间，却被拆成 4 镜及以上，判定为高风险碎镜头分镜。
+   - 如果全片超过 30% 的镜头低于 3 秒，判定为高风险碎镜头分镜。
+3. 即使没有命中硬规则，如果你认为这份分镜仍明显存在“剧情单位被切成反应碎片、对白被一问一答机械拆开、缺少完整戏剧节拍”的问题，也应判定为需要重规划。
+4. 你的结论要优先关注叙事节奏与戏剧推进，不要被单个镜头写得华丽所干扰。
+5. 如果判定需要重规划，feedback 必须明确指出哪些场景或哪些镜头类型导致问题，并直接使用“要求重规划”的语气。
+6. 输出 JSON 结构如下：
+{
+  "ok": true,
+  "requiresReplan": false,
+  "summary": "一句话总结",
+  "feedback": "如果需要重规划，明确写出原因；如果通过，也简要说明为何通过"
+}
+
+项目风格：${settings.visualStyle}
+
+${hardRuleNotice}
+
+统计与上下文：
+${buildStoryboardFragmentationReviewContext(script, storyboard, metrics)}`;
+}
+
+async function reviewStoryboardFragmentationRisk(
+  script: ScriptPackage,
+  storyboard: StoryboardShot[],
+  settings: ProjectSettings,
+  options?: {
+    signal?: AbortSignal;
+  }
+): Promise<StoryboardFragmentationReviewResult> {
+  if (!storyboard.length) {
+    return {
+      ok: true,
+      requiresReplan: false,
+      feedback: ''
+    };
+  }
+
+  const metrics = getStoryboardFragmentationMetrics(script, storyboard);
+  const hardRuleFeedback = buildStoryboardFragmentationHardRuleFeedback(metrics);
+
+  try {
+    const payload = await requestJson<StoryboardFragmentationReviewPayload>(
+      [
+        {
+          role: 'system',
+          content:
+            '你是一名电影叙事节奏审片师与分镜连续性审核员。你的职责是识别“镜头切得太碎导致剧情承载力下降”的分镜问题。请严格执行用户给出的硬规则，只输出 JSON，不要输出任何额外说明。'
+        },
+        {
+          role: 'user',
+          content: buildStoryboardFragmentationReviewPrompt(script, settings, storyboard, metrics, hardRuleFeedback)
+        }
+      ],
+      {
+        temperature: 0.2,
+        maxTokens: getStoryboardFragmentationReviewMaxTokens(storyboard),
+        signal: options?.signal
+      }
+    );
+
+    const llmFeedback = [normalizeOptionalString(payload.summary), normalizeOptionalString(payload.feedback)]
+      .filter(Boolean)
+      .join('；');
+    const finalFeedback = [hardRuleFeedback, llmFeedback].filter(Boolean).join('；');
+    const forcedRequiresReplan = Boolean(hardRuleFeedback);
+    const requiresReplan =
+      forcedRequiresReplan || normalizeStoryboardFragmentationReviewBoolean(payload.requiresReplan, false);
+    const ok = !requiresReplan && normalizeStoryboardFragmentationReviewBoolean(payload.ok, true);
+
+    return {
+      ok,
+      requiresReplan,
+      feedback: finalFeedback
+    };
+  } catch {
+    return {
+      ok: !hardRuleFeedback,
+      requiresReplan: Boolean(hardRuleFeedback),
+      feedback: hardRuleFeedback
+    };
+  }
+}
+
 function validateStoryboardAgainstScript(
   script: ScriptPackage,
   shots: StoryboardShot[],
@@ -2297,7 +2537,7 @@ function buildStoryboardConversationPrelude(
 3. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写“无语音内容”。${spokenLanguageRequirement}
 4. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
 5. 项目篇幅为 ${STORY_LENGTH_LABELS[settings.storyLength]}；当前剧本共有 ${script.scenes.length} 个场景，你必须在多轮对话结束后完整覆盖全部现有场景，不得跳场，也不要臆造新的 scene。如果当前剧本场景数低于该篇幅的推荐值，也继续基于现有场景完成拆镜
-6. 镜头数量不要预设上限，由你根据戏剧节奏、信息密度、动作复杂度、对白来回和情绪变化自行决定；但镜头颗粒度不能过粗。当前剧本总时长约 ${script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0)} 秒，全剧至少按 ${recommendedMinimumShotCount} 个镜头起步，允许明显高于这个参考值；尤其在对白交锋、追逐打斗、搜证调查、关键道具动作、视线反应和空间揭示处，要优先多拆反打、过肩、插入、主观、动作细节和环境承接镜头，避免把多个戏剧节拍硬塞进一个镜头。只有确实单一动作/单一反应/明确一镜到底的段落，才保留为一个长一点的镜头
+6. 镜头数量不要预设上限，由你根据戏剧节奏、信息密度、动作复杂度、对白来回和情绪变化自行决定；但镜头颗粒度不能过粗，也不能碎到只剩句子和反应碎片。当前剧本总时长约 ${script.scenes.reduce((sum, scene) => sum + scene.durationSeconds, 0)} 秒，全剧至少按 ${recommendedMinimumShotCount} 个镜头起步，允许明显高于这个参考值；尤其在对白交锋、追逐打斗、搜证调查、关键道具动作、视线反应和空间揭示处，要优先多拆反打、过肩、插入、主观、动作细节和环境承接镜头，避免把多个戏剧节拍硬塞进一个镜头。只有确实单一动作/单一反应/明确一镜到底的段落，才保留为一个长一点的镜头；每场镜头组合至少要让观众清楚看到起势、推进和落点，不要把一场戏切成“一问一答、一抬眼、一皱眉”就换镜头的碎片
 7. 分场镜头密度参考如下：
 ${sceneRules}
 8. ${shotSplitGuideline}
@@ -2398,13 +2638,13 @@ function buildStoryboardPlanTurnPrompt(script: ScriptPackage, settings: ProjectS
 要求：
 1. 这一轮只能输出整部剧的分镜规划 JSON，必须先明确 totalShots，并给出全部镜头的概况；不要输出 firstFramePrompt、lastFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt、camera、composition、transitionHint 等完整镜头字段
 2. 项目篇幅为 ${STORY_LENGTH_LABELS[settings.storyLength]}；当前剧本共有 ${script.scenes.length} 个场景，你必须完整覆盖全部现有场景，不得跳场，也不要臆造新的 scene。如果当前剧本场景数低于该篇幅的推荐值，也继续基于现有场景完成规划
-3. 全剧至少按 ${recommendedMinimumShotCount} 个镜头起步，按场景下限累积出的最低参考值约为 ${minimumShotCount} 个镜头；可以根据对白交锋、动作细节、视线反应、道具插入和空间揭示继续往上加镜头，但不要低于各场景下限，也不要用无效空镜凑数
+3. 全剧至少按 ${recommendedMinimumShotCount} 个镜头起步，按场景下限累积出的最低参考值约为 ${minimumShotCount} 个镜头；可以根据对白交锋、动作细节、视线反应、道具插入和空间揭示继续往上加镜头，但不要低于各场景下限，也不要用无效空镜凑数，更不要把镜头规划成“一句台词一个镜头”的碎切节奏
 4. 分场镜头密度参考如下：
 ${sceneRules}
 5. ${shotSplitGuideline}
 6. ${shotDurationGuideline}
 7. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；这是硬上限，不是建议值。任何一个规划镜头的 durationSeconds 都不能超过它
-8. 每个规划镜头都要给出 1 句 overview，说明这个镜头的画面焦点、动作/对白推进和情绪/转场作用，概况要具体但紧凑
+8. 每个规划镜头都要给出 1 句 overview，说明这个镜头的画面焦点、动作/对白推进和情绪/转场作用，概况要具体但紧凑；overview 应该对应一个完整戏剧节拍，而不是孤立的一句台词或一个空反应
 9. title、purpose、overview 各写 1 句；overview 必须足够支持后续单镜头展开
 10. ${spokenLanguageRequirement}
 11. totalShots、sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
@@ -2824,11 +3064,21 @@ function buildStoryboardShotTurnPrompt(
     ? `当前镜头是长镜头组镜头，longTakeIdentifier 必须输出为 ${longTakeIdentifierOutput}，不能改写或省略。`
     : '当前镜头不属于长镜头组，longTakeIdentifier 必须输出 null。';
 
-  return `现在生成第 ${shotIndex + 1}/${planShots.length} 个镜头的完整分镜 JSON。${retryNotice}
+  return `🎬 电影级单镜头分镜助手
 
-${continuityNotice}
+Role:
+你是一位拥有 20 年经验的顶级电影导演和分镜视觉艺术家。你擅长通过镜头语言叙事，熟悉希区柯克、维伦纽瓦、罗杰·狄金斯等大师的视听方法。你的任务不是一次性输出整套分镜，而是在多轮调用中，每次只生成当前这一个镜头的专业分镜 JSON，供系统逐条保存。${retryNotice}
 
-当前镜头固定规划：
+Working Mode:
+1. 系统会分多次调用你。
+2. 每次调用只要求你输出一个镜头。
+3. 你只能生成当前镜头，不能提前生成下一镜，不能补完整张分镜表，不能擅自新增镜头号。
+4. 你输出完当前镜头后必须立即停止，方便系统执行“输出一个，保存一个”。
+5. ${continuityNotice}
+
+Input Data:
+- 当前镜头序号：第 ${shotIndex + 1}/${planShots.length} 个
+- 当前镜头固定规划：
 {
   "sceneNumber": ${shotPlan.sceneNumber},
   "shotNumber": ${shotPlan.shotNumber},
@@ -2839,45 +3089,52 @@ ${continuityNotice}
   "longTakeIdentifier": ${longTakeIdentifierOutput},
   "overview": ${JSON.stringify(shotPlan.overview)}
 }
-
-当前场分镜规划：
+- 当前场分镜规划：
 ${buildStoryboardScenePlanContext(planShots, shotPlan.sceneNumber)}
-
-当前镜头前后规划：
+- 当前镜头前后规划：
 ${buildStoryboardAdjacentPlanContext(planShots, shotIndex)}
-
-已完成镜头摘要：
+- 已完成镜头摘要：
 ${buildCompletedStoryboardContext(storyboard, shotPlan)}
-
+- 对话标记说明：
 ${dialogueDurationNotice}
+- 目标场景上下文：
+${buildStoryboardSceneContext(script, scene)}
 
-要求：
-1. 只能输出这一个镜头的完整 JSON，不能输出其他镜头
-2. sceneNumber 必须是 ${shotPlan.sceneNumber}，shotNumber 必须是 ${shotPlan.shotNumber}，title 必须保持为 ${JSON.stringify(shotPlan.title)}，purpose 必须保持为 ${JSON.stringify(shotPlan.purpose)}，durationSeconds 必须保持为 ${shotPlan.durationSeconds}
-3. 必须把当前规划里的 overview 展开成完整可执行分镜，但不能偏离该镜头承担的戏剧功能
+Task Requirements:
+1. 只能输出这一个镜头的完整 JSON，不能输出其他镜头。
+2. sceneNumber 必须是 ${shotPlan.sceneNumber}，shotNumber 必须是 ${shotPlan.shotNumber}，title 必须保持为 ${JSON.stringify(shotPlan.title)}，purpose 必须保持为 ${JSON.stringify(shotPlan.purpose)}，durationSeconds 必须保持为 ${shotPlan.durationSeconds}。
+3. 必须把当前规划里的 overview 展开成完整可执行分镜，但不能偏离该镜头承担的戏剧功能。
 4. ${dialogueIdentifierRequirement}
 5. ${longTakeIdentifierRequirement}
-6. dialogue、voiceover、camera、composition、transitionHint 和 speechPrompt 直接根据当前剧本场景、当前镜头规划、前后镜头关系和已完成镜头摘要生成；videoPrompt 只保留当前单镜头内部可执行的动作、表演、运镜和连续性要求，不要把切到反应镜、换机位或进入下一镜直接写进当前视频段
-7. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串
-8. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音
-9. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词/旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
-10. 人物外观必须稳定，场景信息要具体，方便 ComfyUI 直接使用
-11. ${shotSplitGuideline} 当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整
-12. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写
-13. 构图、镜头运动、光线、表情、动作的起势、过程、停顿和收势都要写清楚，避免动作刚开始就立刻结束，避免镜头内状态跳变过猛
-14. firstFramePrompt 不能只写剧情摘要或抽象事件，必须写成可直接生图的起始参考帧画面说明：明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、眼神状态、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间；人物视线必须根据对手、道具、动作目标、画外空间或运动方向来设计，除非这个镜头明确需要主观凝视、对镜交流或正面压迫感，否则不要默认所有角色都面朝镜头或直视屏幕；如果是单人独处镜头且没有明确互动对象，默认让人物看向画外左/右侧、手中物件、门口/窗外/走廊深处等环境锚点或行进方向，不要只写“看向前方”；它必须对应一张单张电影级静帧，不能写成海报、拼贴、多联画、设定板、字幕画面或概念草图。不要使用压着潮湿空气、绝望爬上墙面、空气在发抖这类文学性隐喻或抽象修辞，优先写墙面返潮、地面反光、水汽、污渍、光线方向、材质和人物姿态这些可直接看见的画面信息
-15. 只有在镜头需要明确落幅、动作落点、收束构图、镜头终点状态或不提供结束参考帧就容易跑偏时，才把 useLastFrameReference 设为 true；不要机械地给每个镜头都加尾帧约束
-16. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；如果是单人独处镜头且没有明确互动对象，默认让人物看向画外左/右侧、手中物件、门口/窗外/走廊深处等环境锚点或下一步运动方向，不要只写“看向前方”；同样不要使用文学性隐喻或抽象修辞，要优先写可直接看见的环境、光线、材质、姿态和视线落点；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
-17. 如果当前镜头与前一个镜头使用同一个 longTakeIdentifier，你仍然要给出完整的 firstFramePrompt 作为连续性描述，但系统会直接复用前一个视频尾帧作为当前首帧，不会单独生图；因此这类 longTakeIdentifier 只能用于真正无缝承接的长镜头拆段
-18. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容；它只能描述当前镜头内部可执行的连续画面，不要写“切到某人反应”“转到另一个机位”“插入特写”“切到下一镜”等段内切镜指令
-19. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在当前镜头与已完成镜头之间保持稳定
-20. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-21. 为保证单镜头字段可直接执行，每个字段都要写得具体、画面信息完整、动作节奏清楚，但不要堆砌重复形容词：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
-22. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-23. 你必须结合上文资产列表里的名称、摘要和细节判断这个镜头后续该用哪些参考图，并把对应 id 写进 referenceAssetIds；资产阶段会统一把这些资产生成成参考图，不能只看 id 猜测含义
-24. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
-25. referenceAssetIds 至少要覆盖当前镜头的核心场景和主要出镜角色；关键道具在构图、动作或剧情推进中重要时也要补入
-26. 输出结构：
+6. 当前项目的输出逻辑不能改变。虽然你现在采用“电影级单镜头分镜助手”的工作方式，但最终仍必须输出系统现有 schema，而不是表格，也不是自定义字段名。
+7. dialogue、voiceover、camera、composition、transitionHint 和 speechPrompt 要直接根据当前剧本场景、当前镜头规划、前后镜头关系和已完成镜头摘要生成；videoPrompt 只保留当前单镜头内部可执行的动作、表演、运镜和连续性要求，不要把切到反应镜、换机位或进入下一镜直接写进当前视频段。
+8. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串。
+9. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音。
+10. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词或旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
+11. 人物外观、服装、年龄感、道具状态、空间方向和情绪推进必须与已完成镜头保持稳定，除非剧情明确要求变化。
+12. 当前镜头必须服务于剧情推进，而不是只呈现空泛情绪；如果它是反应镜，也必须承担明确的信息落点、关系变化或动作落点。
+13. 当前镜头必须和上一镜形成合理的剪辑关系，例如动接动、视线承接、情绪延续、信息落点切换；transitionHint 要明确写出这种承接逻辑，不要只写空泛的 cut。
+14. 不要把当前镜头写成下一镜的预告片，不要越界到后续镜头；videoPrompt 只能描述当前镜头内部可执行的连续画面。
+15. ${shotSplitGuideline} 当前镜头已经固定为 ${shotPlan.durationSeconds} 秒，你必须在这个时长内把起势、过程、停顿和收势写完整。
+16. 当前视频工作流允许的单个镜头时长上限就是 ${maxVideoSegmentDurationSeconds} 秒；当前镜头时长已固定为 ${shotPlan.durationSeconds} 秒，不得改写。
+17. firstFramePrompt 必须写成可直接生图的单张电影级静帧说明，明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间。不要写成海报、拼贴、多联画、设定板或概念草图。
+18. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成镜头结束瞬间的可直接生图画面说明，明确落幅、动作落点、人物状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串。
+19. 如果当前镜头与前一个镜头使用同一个 longTakeIdentifier，你仍然要给出完整的 firstFramePrompt 作为连续性描述，但该标记只能用于真正无缝承接的长镜头拆段。
+20. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容。
+21. 不要使用文学性隐喻或抽象修辞，优先写可直接看见的环境、材质、光线方向、空间结构、人物姿态、动作变化和视线落点。
+22. 你必须结合上文资产列表里的名称、摘要和细节判断这个镜头后续该用哪些参考图，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义。
+23. 如果同一角色存在多个年龄段资产，必须根据当前场景的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用。
+24. referenceAssetIds 至少要覆盖当前镜头的核心场景和主要出镜角色；关键道具在构图、动作或剧情推进中重要时也要补入。
+25. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1.0、01 这类格式。
+26. 所有描述默认使用中文输出，只有字段内容中直接服务 AI 生图的视频/图片提示词部分可以保留专业视觉术语；对白与旁白内容必须使用 ${spokenLanguageLabel}。
+
+Output Rules:
+1. 只能输出一个镜头。
+2. 不要输出表格。
+3. 不要输出多个候选版本。
+4. 不要输出解释、分析、备注、标题、前言或结语。
+5. 只输出一个严格 JSON 对象，字段完整，便于系统直接保存。
+6. 输出字段必须沿用当前项目现有结构：
 {
   "shot": {
     "id": "scene-${shotPlan.sceneNumber}-shot-${shotPlan.shotNumber}",
@@ -2892,19 +3149,16 @@ ${dialogueDurationNotice}
     "voiceover": "本镜头画外音，必须使用${spokenLanguageLabel}，没有可留空",
     "camera": "镜头语言",
     "composition": "构图说明",
-    "transitionHint": "转场方式，优先自然承接、动作延续或情绪延续，避免突兀硬切",
+    "transitionHint": "与上一镜头或下一镜头的衔接逻辑，优先自然承接、动作延续、视线承接或情绪延续",
     "useLastFrameReference": true,
-    "firstFramePrompt": "用于起始参考帧静态图生成的详细提示词，必须是可直接生图的单张电影级静帧说明，不要只写剧情提示，也不要写成海报、拼贴、多联画、设定板或概念草图",
+    "firstFramePrompt": "用于起始参考帧静态图生成的详细提示词，必须是可直接生图的单张电影级静帧说明",
     "lastFramePrompt": "当 useLastFrameReference 为 true 时，用于结束参考帧静态图生成的详细提示词；当 useLastFrameReference 为 false 时，必须输出空字符串",
-    "videoPrompt": "用于视频生成的详细提示词；先写景别、机位、运镜和镜头节奏，再写人物动作、表演、环境、光线和氛围，不要用引号包裹台词文本",
+    "videoPrompt": "用于视频生成的详细提示词；先写景别、机位、运镜和镜头节奏，再写人物动作、表演、环境、光线和氛围",
     "backgroundSoundPrompt": "用于背景声音生成的详细提示词；无对白时也要写自然环境声、动作声和空间氛围声，不含人物对白",
-    "speechPrompt": "用于台词或旁白配音的详细提示词；有语音内容时通过人物特征明确说话者，并确保实际语音内容使用${spokenLanguageLabel}；没有语音内容时明确写无语音，不要用引号包裹台词文本",
+    "speechPrompt": "用于台词或旁白配音的详细提示词；有语音内容时通过人物特征明确说话者；没有语音内容时明确写无语音",
     "referenceAssetIds": ["scene:场景资产ID", "character:角色资产ID", "object:物品资产ID"]
   }
-}
-
-目标场景上下文：
-${buildStoryboardSceneContext(script, scene)}`;
+}`;
 }
 
 function buildStoryboardPlanAssistantMessage(planShots: StoryboardPlanShot[]): string {
@@ -3760,6 +4014,15 @@ export async function generateStoryboardFromScript(
   const validation = validateStoryboardAgainstScript(script, storyboard, settings, availableReferenceAssetIds);
   if (!validation.ok) {
     throw new Error(`分镜生成失败：最终结果不完整。${validation.feedback}`);
+  }
+
+  const fragmentationReview = await reviewStoryboardFragmentationRisk(script, storyboard, settings, {
+    signal: options?.signal
+  });
+  if (!fragmentationReview.ok) {
+    throw new Error(
+      `分镜生成失败：检测到高风险碎镜头分镜，要求重规划。${fragmentationReview.feedback || '请减少短场过密拆镜和低于 3 秒的碎镜头。'}`
+    );
   }
 
   return storyboard;
