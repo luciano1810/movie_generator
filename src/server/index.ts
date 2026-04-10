@@ -202,11 +202,22 @@ function buildFinalVideoDownloadName(project: Project): string {
 }
 
 async function main(): Promise<void> {
-  const { repairedRunStates } = await bootstrapRuntime();
+  let runtimeReady = false;
+  let runtimeBootstrapError = '';
 
-  if (repairedRunStates > 0) {
-    console.warn(`Recovered ${repairedRunStates} interrupted project run state(s).`);
-  }
+  void bootstrapRuntime()
+    .then(({ repairedRunStates }) => {
+      if (repairedRunStates > 0) {
+        console.warn(`Recovered ${repairedRunStates} interrupted project run state(s).`);
+      }
+
+      runtimeReady = true;
+      runtimeBootstrapError = '';
+    })
+    .catch((error) => {
+      runtimeBootstrapError = error instanceof Error ? error.message : '未知启动错误';
+      console.error('Failed to bootstrap runtime.', error);
+    });
 
   const app = express();
   app.use(
@@ -216,6 +227,23 @@ async function main(): Promise<void> {
   );
   app.use(express.json({ limit: '20mb' }));
   app.use('/storage', express.static(appConfig.storageRoot));
+  app.use('/api', (_request, response, next) => {
+    if (runtimeReady) {
+      next();
+      return;
+    }
+
+    if (runtimeBootstrapError) {
+      response.status(500).json({
+        message: `服务初始化失败：${runtimeBootstrapError}`
+      });
+      return;
+    }
+
+    response.status(503).json({
+      message: '服务启动中，请稍后重试。'
+    });
+  });
 
   app.get('/api/meta', (_request, response) => {
     const appSettings = getAppSettings();

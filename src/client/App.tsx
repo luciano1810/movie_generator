@@ -45,6 +45,16 @@ type ResolutionPresetId = '540p' | '720p' | '1080p' | '1440p';
 type ResolutionSelectValue = ResolutionPresetId | 'custom';
 type ProjectPanelTab = StageId | 'logs';
 
+class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 interface LibraryAssetItem {
   id: string;
   kind: AssetLibraryKind;
@@ -221,7 +231,7 @@ async function requestJson<T>(pathname: string, init?: RequestInit): Promise<T> 
       .json()
       .then((payload) => payload?.message as string | undefined)
       .catch(() => undefined);
-    throw new Error(message ?? `请求失败: ${response.status}`);
+    throw new ApiError(response.status, message ?? `请求失败: ${response.status}`);
   }
 
   return (await response.json()) as T;
@@ -1481,7 +1491,38 @@ export function App() {
   }
 
   useEffect(() => {
-    void Promise.all([loadMeta(), loadProjects(), loadAppSettings()]);
+    let cancelled = false;
+
+    async function loadInitialData(): Promise<void> {
+      while (!cancelled) {
+        try {
+          await Promise.all([loadMeta(), loadProjects(), loadAppSettings()]);
+          if (!cancelled) {
+            setNotice('');
+          }
+          return;
+        } catch (error) {
+          if (cancelled) {
+            return;
+          }
+
+          if (error instanceof ApiError && error.status === 503) {
+            setNotice('服务启动中，正在等待后端就绪…');
+            await new Promise((resolve) => window.setTimeout(resolve, 1000));
+            continue;
+          }
+
+          setNotice(error instanceof Error ? error.message : '加载初始数据失败');
+          return;
+        }
+      }
+    }
+
+    void loadInitialData();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
