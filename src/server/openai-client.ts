@@ -49,6 +49,8 @@ const VIDEO_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
   '6. Motivated Gaze Direction (动机化视线): 人物视线必须服务于当前互动对象、动作目标、道具位置、画外空间或运动方向；除非用户明确要求 POV / first-person shot / direct-to-camera monologue / confrontational stare into lens，否则不要默认写成 looking into camera / facing camera / staring at viewer，也不要让所有人物同时正对屏幕。若输入没有明确注视对象，你必须主动设计 off-axis gaze，例如 looking toward the opponent off-camera left/right、down at the object in hand、toward the doorway/deep corridor、or toward the direction of travel，并避免 direct eye contact with the lens。',
   '7. Single Character Instance Rule (角色单实例法则): 除非用户明确要求镜像、监控画面、照片、投影或分身叙事，同一个已命名角色在同一帧/同一镜头里只能出现一次。不要生成 same character twice、character clone、duplicate body、same-face background extra、twin duplicate 或独立存在的第二个同角色实体。',
   '8. Style & Character Lock (风格与角色锁定): 如果用户输入包含 [结构化摄影风格] 和 [角色硬约束]，必须把它们当作不可改写的视觉锁定条件，只允许翻译、融合和具体化，不允许替换角色脸型五官、发型发色、体型、服装主色、关键配饰、年龄感、气质、说话者身份或项目级镜头光学/布光/色彩/质感方向。',
+  '9. Motion-First Cue Alignment (短运动提示词对齐): 你收到的 [动作与台词] 本质上是单镜头短运动提示词。最终输出必须保留这种“谁在什么景别里做什么、镜头如何动、动作如何连续推进”的结构，优先写可见动作、微表演、局部受力、空间位移与镜头节奏，不要把它改写成抽象剧情梗概。',
+  '10. Close-Up Locking (特写锁定): 如果输入明显是手部、道具、局部面部、插入镜头或其他 detail close-up，默认保持 locked-off framing / fixed camera 或近乎固定的微弱机位变化；动感应主要来自主体局部动作、表情细节、材质反馈与景深变化，而不是大幅推拉摇移。',
   '',
   '# Input/Output Constraints',
   '- English Only: 所有视觉、动作、环境描述必须使用高水准的好莱坞剧本级英语。',
@@ -901,6 +903,8 @@ function buildImageToVideoPromptOptimizationInput(
     motionAndSpeechDetails || '保持当前镜头内部的连续动作演进。',
     '视线硬约束：如果上方没有明确写“主观镜头 / POV / 对镜独白 / 直视镜头”，则必须把人物眼神改写为看向画外左/右侧对象、手中道具、行进方向或远处环境锚点，并在英文里明确写出 off-camera / toward the object / toward the doorway / in the direction of travel 等离轴注视目标；不要写 looking into camera、staring at viewer、facing camera，也不要只写 looks ahead。',
     '人物单实例硬约束：如果上方没有明确要求镜子、监控屏、照片、投影或分身叙事，则同一个已命名角色在同一帧/同一镜头里只能出现一次；不要写 same character twice、character clone、duplicate body、same-face extra、twin duplicate，也不要把同一角色复制到背景中。',
+    '短运动提示词约束：把上面的镜头动作理解成单镜头短运动提示词，优先保留清晰的主体、动作动词、镜头节奏和环境反馈；如果人物在发声、接话或喊叫，必须让正确主体处于 speaking state，并通过口型、呼吸、下颌和身体节奏体现正在说话。',
+    '特写硬约束：如果上方信息显示当前镜头是手部、道具、物件、局部面部或插入特写，默认保持 fixed camera / locked-off framing，把动感交给局部动作和细节反馈，不要擅自改成大幅环绕、横移、甩镜或明显推拉。',
     '如果上方没有明确提供对白或旁白文本，不要臆造新的中文台词或旁白。',
     '请直接输出最终英文段落，不要标题，不要解释，不要确认规则。'
   ].join('\n');
@@ -2549,18 +2553,19 @@ ${sceneRules}
 14. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成可直接生图的结束参考帧画面说明，明确镜头结束时的景别、机位、构图、人物状态、视线方向、眼神焦点、眼神状态、道具状态和环境状态；人物视线同样要跟随互动对象、动作落点、画外方向或下一步运动趋势，除非镜头语言明确要求对镜看，否则不要默认正对屏幕；如果是单人独处镜头且没有明确互动对象，默认让人物看向画外左/右侧、手中物件、门口/窗外/走廊深处等环境锚点或下一步运动方向，不要只写“看向前方”；同样不要使用文学性隐喻或抽象修辞，要优先写可直接看见的环境、光线、材质、姿态和视线落点；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串
 15. longTakeIdentifier 只用于“明确要保持一镜到底，但因总时长超过 ${maxVideoSegmentDurationSeconds} 秒不得不拆段生成”的连续分段，例如 scene-2-longtake-1；如果只是按对白接话、反应点、动作细节、景别变化或空间揭示主动切成多个普通镜头，即使这一组镜头总时长不长，也应分别输出 longTakeIdentifier = null；如果某条一镜到底在 ${maxVideoSegmentDurationSeconds} 秒内可以拍完且内部没有必要拆节拍，也可以保留为一个镜头并输出 null
 16. 当某个镜头与前一个镜头的 longTakeIdentifier 相同，系统会直接复用前一个镜头视频的尾帧作为当前镜头首帧，不再单独生成当前镜头的起始参考帧；因此只有在画面、机位、动作和空间关系都应连续承接时，才能复用同一个 longTakeIdentifier
-17. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容；它只能描述当前镜头内部可执行的连续画面，不要写“切到某人反应”“转到另一个机位”“插入特写”“切到下一镜”等段内切镜指令
+17. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。它在后续视频阶段会被当作“短运动提示词”继续加工，所以优先写成 1 句紧凑、可执行、动词明确的单镜头动作描述，不要一上来先写剧情摘要或对白内容；它只能描述当前镜头内部可执行的连续画面，不要写“切到某人反应”“转到另一个机位”“插入特写”“切到下一镜”等段内切镜指令
 18. 人物一致性是硬约束。只要剧本没有明确要求变化，角色的脸型五官、发型发色、体型、服装主色、关键配饰、年龄感和整体气质都必须在多轮对话和相邻镜头中保持稳定
-19. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
-20. 为保证单镜头字段可直接执行，每个字段都要写得具体、画面信息完整、动作节奏清楚，但不要堆砌重复形容词：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示
-21. 如果一个镜头包含对白、旁白、接话停顿、说话口型表演或以语音反应为核心的表演节奏，必须额外输出 dialogueIdentifier；非语音镜头输出 null
-22. dialogueIdentifier 现在只作为“该镜头最终时长在规划归一化阶段自动 +${STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS} 秒，且不超过 ${maxVideoSegmentDurationSeconds} 秒上限”的标记，不再触发额外连续对白简报；字段里只需要输出稳定可读的 groupId，例如 scene-2-dialogue-1，系统会自动补全 sequenceIndex、sequenceLength 和 flowRole
-23. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头后续需要哪些参考图。下方资产列表会在资产阶段统一生成成参考图；你现在要先根据名称、类别、摘要和细节选出这个镜头实际需要依赖的项，不能只看 ID 猜测
-24. referenceAssetIds 只能使用下方资产列表里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
-25. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
-26. referenceAssetIds 至少要覆盖当前镜头的核心场景和主要出镜角色；关键道具在构图、动作或剧情推进中重要时也要补入
-27. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
-28. 第 1 轮只输出总镜头数和所有镜头概况，不要提前输出完整镜头字段；后续每一轮只输出当前指定的单个完整镜头 JSON，不能提前生成其他镜头，也不要重复已完成镜头
+19. videoPrompt 描述出镜人物时，优先使用年龄感、性别与稳定外观标识来描述可见主体，不要只依赖角色名；如果镜头里有人说话、接话、喊叫或明显发声，videoPrompt 必须体现正确主体正在说话或处于明确的发声状态，但不要把具体台词文本塞进 videoPrompt
+20. videoPrompt 和 speechPrompt 如果需要描述台词内容，不要用中文或英文引号包裹台词文本，直接描述某人说某句话即可
+21. 为保证单镜头字段可直接执行，每个字段都要写得具体、画面信息完整、动作节奏清楚，但不要堆砌重复形容词：title、purpose、camera、composition 各 1 句；firstFramePrompt、videoPrompt、backgroundSoundPrompt、speechPrompt 各 1 到 2 句；只有在 useLastFrameReference 为 true 时才输出 1 到 2 句的 lastFramePrompt，但它必须优先保证画面信息完整，不要偷懒简写成剧情提示；如果当前镜头是手部、道具、局部面部或插入特写，camera 与 videoPrompt 必须明确为固定机位或近乎固定的 locked-off framing，把动感交给主体局部动作，不要再写大幅推拉摇移
+22. 如果一个镜头包含对白、旁白、接话停顿、说话口型表演或以语音反应为核心的表演节奏，必须额外输出 dialogueIdentifier；非语音镜头输出 null
+23. dialogueIdentifier 现在只作为“该镜头最终时长在规划归一化阶段自动 +${STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS} 秒，且不超过 ${maxVideoSegmentDurationSeconds} 秒上限”的标记，不再触发额外连续对白简报；字段里只需要输出稳定可读的 groupId，例如 scene-2-dialogue-1，系统会自动补全 sequenceIndex、sequenceLength 和 flowRole
+24. 每个镜头必须额外输出 referenceAssetIds 数组，用来指明这个镜头后续需要哪些参考图。下方资产列表会在资产阶段统一生成成参考图；你现在要先根据名称、类别、摘要和细节选出这个镜头实际需要依赖的项，不能只看 ID 猜测
+25. referenceAssetIds 只能使用下方资产列表里给出的 id，不能杜撰新 id；优先包含镜头中实际出现或需要约束的场景、角色和关键物品，保持精简但不要漏掉关键资产
+26. 如果同一角色存在多个年龄段资产，必须根据当前 scene 的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用
+27. referenceAssetIds 至少要覆盖当前镜头的核心场景和主要出镜角色；关键道具在构图、动作或剧情推进中重要时也要补入
+28. sceneNumber、shotNumber、durationSeconds 必须输出纯整数阿拉伯数字，不能写成 1,0、1.0、01 这类格式
+29. 第 1 轮只输出总镜头数和所有镜头概况，不要提前输出完整镜头字段；后续每一轮只输出当前指定的单个完整镜头 JSON，不能提前生成其他镜头，也不要重复已完成镜头
 
 剧本 JSON：
 ${JSON.stringify(script, null, 2)}
@@ -3107,7 +3112,7 @@ Task Requirements:
 4. ${dialogueIdentifierRequirement}
 5. ${longTakeIdentifierRequirement}
 6. 当前项目的输出逻辑不能改变。虽然你现在采用“电影级单镜头分镜助手”的工作方式，但最终仍必须输出系统现有 schema，而不是表格，也不是自定义字段名。
-7. dialogue、voiceover、camera、composition、transitionHint 和 speechPrompt 要直接根据当前剧本场景、当前镜头规划、前后镜头关系和已完成镜头摘要生成；videoPrompt 只保留当前单镜头内部可执行的动作、表演、运镜和连续性要求，不要把切到反应镜、换机位或进入下一镜直接写进当前视频段。
+7. dialogue、voiceover、camera、composition、transitionHint 和 speechPrompt 要直接根据当前剧本场景、当前镜头规划、前后镜头关系和已完成镜头摘要生成；videoPrompt 只保留当前单镜头内部可执行的动作、表演、运镜和连续性要求，不要把切到反应镜、换机位或进入下一镜直接写进当前视频段。videoPrompt 在后续视频阶段会被当作“短运动提示词”继续加工，所以优先写成 1 句紧凑、可执行、动词明确的单镜头动作描述，而不是长篇散文。
 8. 每个镜头必须包含起始参考帧描述 firstFramePrompt、布尔字段 useLastFrameReference，以及视频片段描述 videoPrompt；只有在镜头确实需要明确结束画面约束时，才把 useLastFrameReference 设为 true 并提供 lastFramePrompt，否则设为 false 且 lastFramePrompt 置空字符串。
 9. 每个镜头必须额外提供 backgroundSoundPrompt，用于描述环境音、动作音、氛围音，不要写人物对白；如果镜头没有台词或旁白，也必须明确写出自然的环境声、动作声和空间氛围声，不能写成静音。
 10. 每个镜头必须额外提供 speechPrompt，用于描述该镜头的台词或旁白配音方式、语气、节奏、情绪；如果镜头里有人说话，必须通过人物身份、年龄感、外观和气质特征明确当前说话者，不要只写角色名；如果没有台词或旁白，要明确写无语音内容。${spokenLanguageRequirement}
@@ -3120,8 +3125,8 @@ Task Requirements:
 17. firstFramePrompt 必须写成可直接生图的单张电影级静帧说明，明确景别、机位、构图、主体位置、人物外观与姿态、视线方向、眼神焦点、表情、手部动作、关键道具、前中后景层次、环境细节、时间与光线，并冻结在镜头起始瞬间。不要写成海报、拼贴、多联画、设定板或概念草图。
 18. 当 useLastFrameReference 为 true 时，lastFramePrompt 必须写成镜头结束瞬间的可直接生图画面说明，明确落幅、动作落点、人物状态、道具状态和环境状态；当 useLastFrameReference 为 false 时，lastFramePrompt 必须输出空字符串。
 19. 如果当前镜头与前一个镜头使用同一个 longTakeIdentifier，你仍然要给出完整的 firstFramePrompt 作为连续性描述，但该标记只能用于真正无缝承接的长镜头拆段。
-20. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容。
-21. 不要使用文学性隐喻或抽象修辞，优先写可直接看见的环境、材质、光线方向、空间结构、人物姿态、动作变化和视线落点。
+20. videoPrompt 必须先描述镜头本身，再描述人物、动作、表演、环境、光线和氛围。优先从景别、机位、运镜、镜头节奏写起，不要一上来先写剧情摘要或对白内容。描述出镜人物时优先使用年龄感、性别与稳定外观标识，不要只依赖角色名；如果镜头里有人说话、接话、喊叫或明显发声，videoPrompt 必须体现正确主体正在说话或处于明确的发声状态，但不要把具体台词文本塞进 videoPrompt。
+21. 不要使用文学性隐喻或抽象修辞，优先写可直接看见的环境、材质、光线方向、空间结构、人物姿态、动作变化和视线落点；如果当前镜头是手部、道具、局部面部或插入特写，camera 与 videoPrompt 必须明确为固定机位或近乎固定的 locked-off framing，把动感交给主体局部动作，不要再写大幅推拉摇移。
 22. 你必须结合上文资产列表里的名称、摘要和细节判断这个镜头后续该用哪些参考图，并把对应 id 写进 referenceAssetIds；不能只看 id 猜测含义。
 23. 如果同一角色存在多个年龄段资产，必须根据当前场景的时间线和剧情阶段选择正确年龄段，不能把少年版和成年版混用。
 24. referenceAssetIds 至少要覆盖当前镜头的核心场景和主要出镜角色；关键道具在构图、动作或剧情推进中重要时也要补入。

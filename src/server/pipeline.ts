@@ -2569,17 +2569,27 @@ function buildSegmentVideoPrompt(
   terminalFramePrompt: string,
   baseVideoPrompt?: string
 ): string {
+  const lastFramePrompt = sanitizeVideoPromptText(terminalFramePrompt);
   const optimizedVideoPromptOnly = getOptimizedVideoPromptOnly(project, baseVideoPrompt);
 
   if (optimizedVideoPromptOnly) {
-    return optimizedVideoPromptOnly;
+    if (segmentCount <= 1) {
+      return lastFramePrompt
+        ? `${optimizedVideoPromptOnly} The shot remains a single continuous take and naturally resolves on the intended ending frame.`
+        : optimizedVideoPromptOnly;
+    }
+
+    if (segmentIndex === segmentCount - 1) {
+      return `${optimizedVideoPromptOnly} This is the final segment of the same continuous take; keep camera, blocking, lighting, and motion coherent, then decelerate naturally into the intended ending frame.`;
+    }
+
+    return `${optimizedVideoPromptOnly} This is segment ${segmentIndex + 1}/${segmentCount} of the same continuous take; preserve camera, blocking, lighting, and motion continuity, and leave clean headroom for the next segment without resolving to the final ending frame yet.`;
   }
 
   const basePrompt = getVideoWorkflowPrompt(project, shot, appSettings, {
     durationSeconds: segmentDurationSeconds,
     baseVideoPrompt
   });
-  const lastFramePrompt = sanitizeVideoPromptText(terminalFramePrompt);
 
   if (!lastFramePrompt) {
     return basePrompt;
