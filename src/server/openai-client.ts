@@ -1778,6 +1778,12 @@ interface StoryboardPlanReviewResult {
   feedback: string;
 }
 
+interface StoryboardFragmentationRepairPayload {
+  shots?: StoryboardPlanShotPayload[];
+  summary?: string;
+  feedback?: string;
+}
+
 interface StoryboardSingleShotPayload {
   shot?: StoryboardShotPayload;
   shots?: StoryboardShotPayload[];
@@ -1908,8 +1914,9 @@ interface StoryboardFragmentationSceneMetric {
   sceneNumber: number;
   durationSeconds: number;
   shotCount: number;
+  shortShotCount: number;
+  shortShotRatio: number;
   shotSummaries: string[];
-  exceedsDenseShortSceneThreshold: boolean;
 }
 
 interface StoryboardFragmentationMetrics {
@@ -1921,26 +1928,77 @@ interface StoryboardFragmentationMetrics {
 
 interface StoryboardFragmentationReviewPayload {
   ok?: boolean;
+  requiresRepair?: boolean;
   requiresReplan?: boolean;
+  problemSceneNumbers?: unknown[];
+  problemShotKeys?: unknown[];
   summary?: string;
   feedback?: string;
 }
 
 interface StoryboardFragmentationReviewResult {
   ok: boolean;
-  requiresReplan: boolean;
+  requiresRepair: boolean;
   feedback: string;
+  problemSceneNumbers: number[];
+  problemShotKeys: string[];
 }
 
 function normalizeStoryboardFragmentationReviewBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
 }
 
+function normalizeStoryboardFragmentationSceneNumbers(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(
+    value
+      .map((item) => normalizePositiveInteger(item, -1))
+      .filter((item) => item > 0)
+  )].sort((left, right) => left - right);
+}
+
+function normalizeStoryboardFragmentationShotKeys(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value.map((item) => normalizeOptionalString(item)).filter(Boolean))];
+}
+
+function extractStoryboardFragmentationSceneNumbersFromShotKeys(shotKeys: string[]): number[] {
+  const sceneNumbers = shotKeys
+    .map((shotKey) => {
+      const match = shotKey.match(/scene\s+(\d+)\s+shot\s+\d+/i);
+      return match ? Number.parseInt(match[1] ?? '', 10) : Number.NaN;
+    })
+    .filter((value) => Number.isInteger(value) && value > 0);
+
+  return [...new Set(sceneNumbers)].sort((left, right) => left - right);
+}
+
+function extractStoryboardFragmentationSceneNumbersFromText(text: string): number[] {
+  if (!text.trim()) {
+    return [];
+  }
+
+  const matches = [...text.matchAll(/(?:scene|场景)\s*(\d+)/gi)];
+  const sceneNumbers = matches
+    .map((match) => Number.parseInt(match[1] ?? '', 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+
+  return [...new Set(sceneNumbers)].sort((left, right) => left - right);
+}
+
+type StoryboardFragmentationShotLike = Pick<StoryboardPlanShot, 'sceneNumber' | 'shotNumber' | 'durationSeconds' | 'title'>;
+
 function getStoryboardFragmentationMetrics(
   script: ScriptPackage,
-  storyboard: StoryboardShot[]
+  storyboard: StoryboardFragmentationShotLike[]
 ): StoryboardFragmentationMetrics {
-  const shotsByScene = new Map<number, StoryboardShot[]>();
+  const shotsByScene = new Map<number, StoryboardFragmentationShotLike[]>();
 
   for (const shot of storyboard) {
     const existing = shotsByScene.get(shot.sceneNumber) ?? [];
@@ -1951,13 +2009,16 @@ function getStoryboardFragmentationMetrics(
   const scenes = script.scenes.map((scene) => {
     const shots = (shotsByScene.get(scene.sceneNumber) ?? []).sort((left, right) => left.shotNumber - right.shotNumber);
     const shotCount = shots.length;
+    const shortShotCount = shots.filter((shot) => shot.durationSeconds < 3).length;
+    const shortShotRatio = shotCount > 0 ? shortShotCount / shotCount : 0;
 
     return {
       sceneNumber: scene.sceneNumber,
       durationSeconds: scene.durationSeconds,
       shotCount,
-      shotSummaries: shots.map((shot) => `${shot.shotNumber}(${shot.durationSeconds}s) ${shot.title}`),
-      exceedsDenseShortSceneThreshold: scene.durationSeconds >= 10 && scene.durationSeconds <= 15 && shotCount >= 4
+      shortShotCount,
+      shortShotRatio,
+      shotSummaries: shots.map((shot) => `${shot.shotNumber}(${shot.durationSeconds}s) ${shot.title}`)
     } satisfies StoryboardFragmentationSceneMetric;
   });
 
@@ -1976,35 +2037,9 @@ function formatStoryboardFragmentationPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function buildStoryboardFragmentationHardRuleFeedback(metrics: StoryboardFragmentationMetrics): string {
-  const issues: string[] = [];
-  const denseShortScenes = metrics.scenes.filter((scene) => scene.exceedsDenseShortSceneThreshold);
-
-  if (denseShortScenes.length) {
-    issues.push(
-      denseShortScenes
-        .map(
-          (scene) =>
-            `场景 ${scene.sceneNumber} 仅 ${scene.durationSeconds}s，却被拆成 ${scene.shotCount} 镜（命中“10 到 15 秒场景不得拆成 4 镜及以上”的高风险规则）`
-        )
-        .join('；')
-    );
-  }
-
-  if (metrics.shortShotRatio > 0.3) {
-    issues.push(
-      `全片共有 ${metrics.totalShots} 镜，其中 ${metrics.shortShotCount} 镜低于 3 秒，占比 ${formatStoryboardFragmentationPercent(
-        metrics.shortShotRatio
-      )}，超过 30% 的高风险阈值`
-    );
-  }
-
-  return issues.join('；');
-}
-
 function buildStoryboardFragmentationReviewContext(
   script: ScriptPackage,
-  storyboard: StoryboardShot[],
+  storyboard: StoryboardFragmentationShotLike[],
   metrics: StoryboardFragmentationMetrics
 ): string {
   const scenes = metrics.scenes
@@ -2014,7 +2049,7 @@ function buildStoryboardFragmentationReviewContext(
       const summary = scene?.summary?.trim() || '无场景摘要';
 
       return [
-        `- 场景 ${sceneMetric.sceneNumber}｜${heading || `scene ${sceneMetric.sceneNumber}`}｜时长 ${sceneMetric.durationSeconds}s｜镜头数 ${sceneMetric.shotCount}｜是否命中短场过密规则：${sceneMetric.exceedsDenseShortSceneThreshold ? '是' : '否'}`,
+        `- 场景 ${sceneMetric.sceneNumber}｜${heading || `scene ${sceneMetric.sceneNumber}`}｜时长 ${sceneMetric.durationSeconds}s｜镜头数 ${sceneMetric.shotCount}｜低于 3 秒镜头 ${sceneMetric.shortShotCount}（${formatStoryboardFragmentationPercent(sceneMetric.shortShotRatio)}）`,
         `  场景推进：${summary}`,
         `  镜头列表：${sceneMetric.shotSummaries.join('；') || '无'}`
       ].join('\n');
@@ -2037,42 +2072,40 @@ function buildStoryboardFragmentationReviewContext(
   ].join('\n');
 }
 
-function getStoryboardFragmentationReviewMaxTokens(storyboard: StoryboardShot[]): number {
+function getStoryboardFragmentationReviewMaxTokens(storyboard: StoryboardFragmentationShotLike[]): number {
   return Math.min(6_000, Math.max(1_500, storyboard.length * 120 + 1_000));
 }
 
 function buildStoryboardFragmentationReviewPrompt(
   script: ScriptPackage,
   settings: ProjectSettings,
-  storyboard: StoryboardShot[],
+  storyboard: StoryboardFragmentationShotLike[],
   metrics: StoryboardFragmentationMetrics,
-  hardRuleFeedback: string
+  mode: 'plan' | 'storyboard'
 ): string {
-  const hardRuleNotice = hardRuleFeedback
-    ? `已触发的硬规则告警：${hardRuleFeedback}`
-    : '当前本地硬规则统计没有直接触发阈值，但你仍需审查是否存在镜头过碎、节拍被切裂、对白被机械切碎的问题。';
+  const reviewTargetLabel = mode === 'plan' ? '分镜规划' : '已完整生成的分镜';
 
-  return `请审查这份“已完整生成”的分镜是否存在高风险碎镜头问题，并只输出 JSON。
+  return `请审查这份${reviewTargetLabel}是否存在高风险碎镜头问题，并只输出 JSON。
 
 审查目标：
 1. 判断分镜是否因为切得过碎，导致剧情推进被拆散、对白主导权被切裂、反应镜泛滥或单镜头只剩零碎句子/抬眼/停顿。
-2. 下面两条是硬规则，只要命中任意一条，就必须判定为需要重规划：
-   - 如果某场时长在 10 到 15 秒之间，却被拆成 4 镜及以上，判定为高风险碎镜头分镜。
-   - 如果全片超过 30% 的镜头低于 3 秒，判定为高风险碎镜头分镜。
-3. 即使没有命中硬规则，如果你认为这份分镜仍明显存在“剧情单位被切成反应碎片、对白被一问一答机械拆开、缺少完整戏剧节拍”的问题，也应判定为需要重规划。
+2. 下面提供的镜头时长、镜头数、低于 3 秒镜头占比等统计，只是帮助你理解分镜节奏的参考数据，不构成硬规则、自动阈值或本地判定条件。是否需要修复，必须由你根据叙事完整性、对白节拍、反应镜密度和戏剧推进自行判断。
+3. 如果你认为这份分镜存在“剧情单位被切成反应碎片、对白被一问一答机械拆开、缺少完整戏剧节拍”的问题，应判定为需要局部修复。
 4. 你的结论要优先关注叙事节奏与戏剧推进，不要被单个镜头写得华丽所干扰。
-5. 如果判定需要重规划，feedback 必须明确指出哪些场景或哪些镜头类型导致问题，并直接使用“要求重规划”的语气。
-6. 输出 JSON 结构如下：
+5. 如果判定需要修复，默认优先局部修复问题 scene，把碎掉的问答、反应或动作节拍并回更完整的戏剧单位，而不是推翻整份分镜。
+6. feedback 必须明确指出哪些场景或哪些镜头类型导致问题；problemSceneNumbers 必须尽量列出需要修复的 sceneNumber；problemShotKeys 列出最典型的问题镜头，格式使用 "scene X shot Y"。
+7. 如果整体节奏可接受、局部问题不足以要求修复，就把 requiresRepair 设为 false，并说明为何可接受。
+8. 输出 JSON 结构如下：
 {
   "ok": true,
-  "requiresReplan": false,
+  "requiresRepair": false,
+  "problemSceneNumbers": [],
+  "problemShotKeys": [],
   "summary": "一句话总结",
-  "feedback": "如果需要重规划，明确写出原因；如果通过，也简要说明为何通过"
+  "feedback": "如果需要局部修复，明确写出原因；如果通过，也简要说明为何通过"
 }
 
 项目风格：${settings.visualStyle}
-
-${hardRuleNotice}
 
 统计与上下文：
 ${buildStoryboardFragmentationReviewContext(script, storyboard, metrics)}`;
@@ -2080,22 +2113,24 @@ ${buildStoryboardFragmentationReviewContext(script, storyboard, metrics)}`;
 
 async function reviewStoryboardFragmentationRisk(
   script: ScriptPackage,
-  storyboard: StoryboardShot[],
+  storyboard: StoryboardFragmentationShotLike[],
   settings: ProjectSettings,
   options?: {
     signal?: AbortSignal;
+    mode?: 'plan' | 'storyboard';
   }
 ): Promise<StoryboardFragmentationReviewResult> {
   if (!storyboard.length) {
     return {
       ok: true,
-      requiresReplan: false,
-      feedback: ''
+      requiresRepair: false,
+      feedback: '',
+      problemSceneNumbers: [],
+      problemShotKeys: []
     };
   }
 
   const metrics = getStoryboardFragmentationMetrics(script, storyboard);
-  const hardRuleFeedback = buildStoryboardFragmentationHardRuleFeedback(metrics);
 
   try {
     const payload = await requestJson<StoryboardFragmentationReviewPayload>(
@@ -2103,11 +2138,17 @@ async function reviewStoryboardFragmentationRisk(
         {
           role: 'system',
           content:
-            '你是一名电影叙事节奏审片师与分镜连续性审核员。你的职责是识别“镜头切得太碎导致剧情承载力下降”的分镜问题。请严格执行用户给出的硬规则，只输出 JSON，不要输出任何额外说明。'
+            '你是一名电影叙事节奏审片师与分镜连续性审核员。你的职责是识别“镜头切得太碎导致剧情承载力下降”的分镜问题，并优先给出局部修复建议。请只输出 JSON，不要输出任何额外说明。'
         },
         {
           role: 'user',
-          content: buildStoryboardFragmentationReviewPrompt(script, settings, storyboard, metrics, hardRuleFeedback)
+          content: buildStoryboardFragmentationReviewPrompt(
+            script,
+            settings,
+            storyboard,
+            metrics,
+            options?.mode ?? 'storyboard'
+          )
         }
       ],
       {
@@ -2117,25 +2158,43 @@ async function reviewStoryboardFragmentationRisk(
       }
     );
 
+    const problemSceneNumbers = normalizeStoryboardFragmentationSceneNumbers(payload.problemSceneNumbers);
+    const problemShotKeys = normalizeStoryboardFragmentationShotKeys(payload.problemShotKeys);
+    const hasExplicitTargets = problemSceneNumbers.length > 0 || problemShotKeys.length > 0;
     const llmFeedback = [normalizeOptionalString(payload.summary), normalizeOptionalString(payload.feedback)]
       .filter(Boolean)
       .join('；');
-    const finalFeedback = [hardRuleFeedback, llmFeedback].filter(Boolean).join('；');
-    const forcedRequiresReplan = Boolean(hardRuleFeedback);
-    const requiresReplan =
-      forcedRequiresReplan || normalizeStoryboardFragmentationReviewBoolean(payload.requiresReplan, false);
-    const ok = !requiresReplan && normalizeStoryboardFragmentationReviewBoolean(payload.ok, true);
+    const finalFeedback = llmFeedback;
+    const requiresRepair = normalizeStoryboardFragmentationReviewBoolean(
+      payload.requiresRepair,
+      normalizeStoryboardFragmentationReviewBoolean(payload.requiresReplan, hasExplicitTargets)
+    );
+    const ok = !requiresRepair && normalizeStoryboardFragmentationReviewBoolean(payload.ok, true);
+    const problemSceneNumbersFromShotKeys = extractStoryboardFragmentationSceneNumbersFromShotKeys(problemShotKeys);
+    const problemSceneNumbersFromFeedback = extractStoryboardFragmentationSceneNumbersFromText(finalFeedback);
+    const resolvedProblemSceneNumbers = requiresRepair
+      ? problemSceneNumbers.length
+        ? problemSceneNumbers
+        : problemSceneNumbersFromShotKeys.length
+          ? problemSceneNumbersFromShotKeys
+          : problemSceneNumbersFromFeedback
+      : [];
+    const resolvedProblemShotKeys = requiresRepair ? problemShotKeys : [];
 
     return {
       ok,
-      requiresReplan,
-      feedback: finalFeedback
+      requiresRepair,
+      feedback: finalFeedback,
+      problemSceneNumbers: resolvedProblemSceneNumbers,
+      problemShotKeys: resolvedProblemShotKeys
     };
   } catch {
     return {
-      ok: !hardRuleFeedback,
-      requiresReplan: Boolean(hardRuleFeedback),
-      feedback: hardRuleFeedback
+      ok: true,
+      requiresRepair: false,
+      feedback: '碎镜头审查失败，已跳过。',
+      problemSceneNumbers: [],
+      problemShotKeys: []
     };
   }
 }
@@ -2743,6 +2802,178 @@ function buildStoryboardAdjacentPlanContext(planShots: StoryboardPlanShot[], sho
     .join('\n');
 }
 
+function buildStoryboardFragmentationRepairSceneContext(
+  script: ScriptPackage,
+  planShots: StoryboardPlanShot[],
+  sceneNumber: number
+): string {
+  const scene = script.scenes.find((item) => item.sceneNumber === sceneNumber);
+
+  if (!scene) {
+    return `场景 ${sceneNumber}：未找到对应剧本场景。`;
+  }
+
+  const sceneIndex = script.scenes.findIndex((item) => item.sceneNumber === sceneNumber);
+  const previousScene = sceneIndex > 0 ? script.scenes[sceneIndex - 1] ?? null : null;
+  const nextScene = sceneIndex >= 0 ? script.scenes[sceneIndex + 1] ?? null : null;
+  const heading = scene.sceneHeading || buildFallbackSceneHeading(scene.location, scene.timeOfDay);
+  const currentPlan = buildStoryboardScenePlanContext(planShots, sceneNumber);
+
+  return [
+    `场景 ${scene.sceneNumber}｜${heading || `scene ${scene.sceneNumber}`}｜时长 ${scene.durationSeconds}s`,
+    `场景摘要：${scene.summary?.trim() || '无场景摘要'}`,
+    '当前场规划：',
+    currentPlan || '无',
+    `上一场摘要：${previousScene ? `场景 ${previousScene.sceneNumber}｜${previousScene.summary?.trim() || '无场景摘要'}` : '无'}`,
+    `下一场摘要：${nextScene ? `场景 ${nextScene.sceneNumber}｜${nextScene.summary?.trim() || '无场景摘要'}` : '无'}`
+  ].join('\n');
+}
+
+function getStoryboardFragmentationRepairMaxTokens(
+  planShots: StoryboardPlanShot[],
+  targetSceneNumbers: number[]
+): number {
+  const targetSceneSet = new Set(targetSceneNumbers);
+  const targetShotCount = planShots.filter((shot) => targetSceneSet.has(shot.sceneNumber)).length;
+
+  return Math.min(5_000, Math.max(1_800, targetShotCount * 450 + 1_200));
+}
+
+function buildStoryboardFragmentationRepairPrompt(
+  script: ScriptPackage,
+  settings: ProjectSettings,
+  planShots: StoryboardPlanShot[],
+  review: StoryboardFragmentationReviewResult
+): string {
+  const spokenLanguageRequirement = buildStoryboardSpokenLanguageRequirement(settings.language);
+  const maxVideoSegmentDurationSeconds = getEffectiveMaxVideoSegmentDurationSeconds(settings);
+  const targetSceneNumbers = review.problemSceneNumbers;
+  const targetSceneContext = targetSceneNumbers
+    .map((sceneNumber) => buildStoryboardFragmentationRepairSceneContext(script, planShots, sceneNumber))
+    .join('\n\n');
+  const problemShotKeys = review.problemShotKeys.length ? review.problemShotKeys.join('；') : '无';
+
+  return `请只修复存在碎镜头问题的分镜规划场景，并只输出 JSON。
+
+修复范围：
+1. 只允许修改这些 sceneNumber：${targetSceneNumbers.join(', ')}
+2. 未列入范围的 scene 会由系统原样保留；不要重写、不要补输出、不要改它们的顺序
+3. 这次修复目标是减少碎切，优先把零碎问答、机械反应镜、无效停顿镜、只承载半句信息的镜头并回更完整的戏剧节拍
+4. 如果某个镜头本身健康，就尽量保留它的戏剧落点、标题和大致时长；只改真正有问题的镜头
+5. 不要通过新增更多短镜头来修复问题；overview 必须对应一个完整戏剧单位，而不是一句台词尾音或单纯抬眼反应
+
+问题定位：
+- 审查反馈：${review.feedback || '无'}
+- 代表性问题镜头：${problemShotKeys}
+
+目标场景上下文：
+${targetSceneContext}
+
+输出规则：
+1. 只输出一个 JSON 对象，结构为 { "shots": [...] }
+2. shots 中只能包含上述目标 scene 的修正版规划镜头，不能包含其他 scene
+3. 对每个目标 scene，必须完整输出该 scene 修复后的全部规划镜头，而不是只输出改动片段
+4. sceneNumber 必须保持不变；shotNumber 必须在各自 scene 内从 1 开始连续递增
+5. 仍然只输出规划字段：sceneNumber、shotNumber、title、purpose、durationSeconds、dialogueIdentifier、longTakeIdentifier、overview
+6. durationSeconds 不得超过 ${maxVideoSegmentDurationSeconds} 秒；${spokenLanguageRequirement}
+7. 优先通过并镜、改写 overview、合并对白节拍与动作节拍来修复；只有在确实必要时才删镜或重排
+8. dialogueIdentifier 和 longTakeIdentifier 只有在修复后仍合理时才保留；如果旧标记已经不成立，可以重置为 null 或改成新的稳定标识
+
+输出示例：
+{
+  "shots": [
+    {
+      "sceneNumber": ${targetSceneNumbers[0] ?? 1},
+      "shotNumber": 1,
+      "title": "镜头标题",
+      "purpose": "镜头作用",
+      "durationSeconds": ${getStoryboardShotFallbackDurationSeconds(settings)},
+      "dialogueIdentifier": { "groupId": "scene-${targetSceneNumbers[0] ?? 1}-dialogue-1" },
+      "longTakeIdentifier": null,
+      "overview": "这个镜头重新承载更完整的动作、对白推进和情绪变化"
+    }
+  ]
+}`;
+}
+
+async function repairStoryboardPlanFragmentation(
+  conversation: ChatCompletionMessageParam[],
+  script: ScriptPackage,
+  settings: ProjectSettings,
+  planShots: StoryboardPlanShot[],
+  review: StoryboardFragmentationReviewResult,
+  options?: StoryboardGenerationOptions
+): Promise<StoryboardPlanReviewResult> {
+  const targetSceneNumbers = review.problemSceneNumbers;
+
+  if (!targetSceneNumbers.length) {
+    return {
+      ok: false,
+      planShots,
+      feedback: review.feedback || '碎镜头审查要求修复，但未能定位具体场景。'
+    };
+  }
+
+  try {
+    const payload = await requestJson<StoryboardFragmentationRepairPayload>(
+      [
+        ...conversation,
+        {
+          role: 'user',
+          content: buildStoryboardFragmentationRepairPrompt(script, settings, planShots, review)
+        }
+      ],
+      {
+        temperature: 0.25,
+        maxTokens: getStoryboardFragmentationRepairMaxTokens(planShots, targetSceneNumbers),
+        signal: options?.signal
+      }
+    );
+
+    const repairedSceneShots = normalizeAndFinalizeStoryboardPlanShots(payload.shots ?? [], settings, targetSceneNumbers);
+    const repairedSceneNumberSet = new Set(repairedSceneShots.map((shot) => shot.sceneNumber));
+    const missingTargetScenes = targetSceneNumbers.filter((sceneNumber) => !repairedSceneNumberSet.has(sceneNumber));
+
+    if (missingTargetScenes.length) {
+      return {
+        ok: false,
+        planShots,
+        feedback: `碎镜头局部修复失败：缺少目标场景 ${missingTargetScenes.join(', ')} 的修正版规划。`
+      };
+    }
+
+    const targetSceneSet = new Set(targetSceneNumbers);
+    const mergedPlanShots = normalizeAndFinalizeStoryboardPlanShots(
+      [...planShots.filter((shot) => !targetSceneSet.has(shot.sceneNumber)), ...repairedSceneShots],
+      settings,
+      script.scenes.map((scene) => scene.sceneNumber)
+    );
+    const validation = validateStoryboardPlanAgainstScript(script, mergedPlanShots, settings, mergedPlanShots.length);
+
+    if (!validation.ok) {
+      return {
+        ok: false,
+        planShots,
+        feedback: `碎镜头局部修复失败：${validation.feedback}`
+      };
+    }
+
+    return {
+      ok: true,
+      planShots: mergedPlanShots,
+      feedback: [normalizeOptionalString(payload.summary), normalizeOptionalString(payload.feedback)]
+        .filter(Boolean)
+        .join('；')
+    };
+  } catch {
+    return {
+      ok: false,
+      planShots,
+      feedback: review.feedback || '碎镜头局部修复失败。'
+    };
+  }
+}
+
 function formatStoryboardDialogueIdentifier(
   identifier: Pick<StoryboardDialogueIdentifier, 'groupId' | 'sequenceIndex' | 'sequenceLength' | 'flowRole'> | null
 ): string {
@@ -3277,38 +3508,71 @@ async function generateStoryboardPlan(
       signal: options?.signal
     });
 
-    const planShots = normalizeAndFinalizeStoryboardPlanShots(payload.shots ?? [], settings, expectedSceneNumbers);
-    const validation = validateStoryboardPlanAgainstScript(script, planShots, settings, payload.totalShots);
+    let candidatePlanShots = normalizeAndFinalizeStoryboardPlanShots(payload.shots ?? [], settings, expectedSceneNumbers);
+    const validation = validateStoryboardPlanAgainstScript(script, candidatePlanShots, settings, payload.totalShots);
 
-    if (validation.ok) {
+    if (!validation.ok) {
+      const reviewed = await reviewStoryboardPlan(
+        conversation,
+        script,
+        settings,
+        requestPrompt,
+        payload,
+        candidatePlanShots,
+        validation.feedback,
+        options
+      );
+
+      if (!reviewed.ok) {
+        retryFeedback = reviewed.feedback;
+        continue;
+      }
+
+      candidatePlanShots = reviewed.planShots;
+    }
+
+    const fragmentationReview = await reviewStoryboardFragmentationRisk(script, candidatePlanShots, settings, {
+      signal: options?.signal,
+      mode: 'plan'
+    });
+
+    if (!fragmentationReview.requiresRepair) {
       return {
         requestPrompt,
-        planShots
+        planShots: candidatePlanShots
       };
     }
 
-    const reviewed = await reviewStoryboardPlan(
+    const repaired = await repairStoryboardPlanFragmentation(
       conversation,
       script,
       settings,
-      requestPrompt,
-      payload,
-      planShots,
-      validation.feedback,
+      candidatePlanShots,
+      fragmentationReview,
       options
     );
 
-    if (reviewed.ok) {
+    if (!repaired.ok) {
+      retryFeedback = repaired.feedback || fragmentationReview.feedback;
+      continue;
+    }
+
+    const repairedFragmentationReview = await reviewStoryboardFragmentationRisk(script, repaired.planShots, settings, {
+      signal: options?.signal,
+      mode: 'plan'
+    });
+
+    if (!repairedFragmentationReview.requiresRepair) {
       return {
         requestPrompt,
-        planShots: reviewed.planShots
+        planShots: repaired.planShots
       };
     }
 
-    retryFeedback = reviewed.feedback;
+    retryFeedback = repairedFragmentationReview.feedback || repaired.feedback || fragmentationReview.feedback;
   }
 
-  throw new Error(`分镜规划生成失败：连续多次输出仍不完整。${retryFeedback}`);
+  throw new Error(`分镜规划生成失败：连续多次输出仍存在结构缺失或高风险碎镜头问题。${retryFeedback}`);
 }
 
 async function generateStoryboardShot(
@@ -4022,11 +4286,12 @@ export async function generateStoryboardFromScript(
   }
 
   const fragmentationReview = await reviewStoryboardFragmentationRisk(script, storyboard, settings, {
-    signal: options?.signal
+    signal: options?.signal,
+    mode: 'storyboard'
   });
-  if (!fragmentationReview.ok) {
-    throw new Error(
-      `分镜生成失败：检测到高风险碎镜头分镜，要求重规划。${fragmentationReview.feedback || '请减少短场过密拆镜和低于 3 秒的碎镜头。'}`
+  if (fragmentationReview.requiresRepair) {
+    console.warn(
+      `Storyboard fragmentation warning: ${fragmentationReview.feedback || '最终分镜仍存在需要局部修复的碎镜头风险。'}`
     );
   }
 
