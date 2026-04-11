@@ -72,7 +72,7 @@ const VIDEO_PROMPT_OPTIMIZER_SYSTEM_PROMPT = [
   '当用户提供 [Image State + Action/Dialogue] 后，直接输出优化后的 Cinematic Description，不要确认规则，不要复述输入，不要添加任何额外文字。'
 ].join('\n');
 
-const STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS = 2;
+const STORYBOARD_DIALOGUE_MARKER_DURATION_BONUS_SECONDS = 0;
 
 function createClient(input?: Partial<LlmModelDiscoveryRequest>): OpenAI {
   const settings = getAppSettings();
